@@ -10,6 +10,8 @@
 - `pip install causal-conv1d`: an efficient implemention of a simple causal Conv1d layer used inside the Mamba block.
 - `pip install mamba-ssm`: the core Mamba package.
 
+It can also be built from source with `pip install .` from this repository.
+
 If `pip` complains about PyTorch versions, try passing `--no-build-isolation` to `pip`.
 
 Other requirements:
