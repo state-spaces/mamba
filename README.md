@@ -136,6 +136,16 @@ python benchmarks/benchmark_generation_mamba_simple.py --model-name "state-space
 python benchmarks/benchmark_generation_mamba_simple.py --model-name "EleutherAI/pythia-2.8b" --batch 128
 ```
 
+
+## Troubleshooting
+
+Our models were trained using PyTorch [AMP](https://pytorch.org/docs/stable/amp.html) for mixed precision. AMP keeps model parameters in float32 and casts to half precision when necessary.
+On the other hand, other frameworks like DeepSpeed store parameters in float16 and upcasts when necessary (e.g. for optimizer accumulation).
+
+We've observed that higher precision for the main model parameters may be necessary, because SSMs are sensitive to their recurrent dynamics. If you are experiencing instabilities,
+as a first step please try a framework storing parameters in fp32 (such as AMP).
+
+
 ## Citation
 
 If you use this codebase, or otherwise found our work valuable, please cite Mamba:
