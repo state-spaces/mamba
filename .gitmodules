@@ -1,3 +1,6 @@
 [submodule "3rdparty/lm-evaluation-harness"]
 	path = 3rdparty/lm-evaluation-harness
 	url = https://github.com/EleutherAI/lm-evaluation-harness/
+[submodule "3rdparty/promptsource"]
+	path = 3rdparty/promptsource
+	url = https://github.com/bigscience-workshop/promptsource.git
