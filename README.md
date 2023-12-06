@@ -73,7 +73,7 @@ This example is used in the generation scripts below.
 ## Pretrained Models
 
 Pretrained models are uploaded to
-[HuggingFace](https://huggingface.co/state-spaces): `mamba-130m`, `mamba-370m`,
+[Hugging Face](https://huggingface.co/state-spaces): `mamba-130m`, `mamba-370m`,
 `mamba-790m`, `mamba-1.4b`, `mamba-2.8b`.
 
 The models will be autodownloaded by the generation script below.
@@ -115,7 +115,7 @@ Note that the result of each task might differ from reported values by 0.1-0.3 d
 ## Inference
 
 The script [benchmarks/benchmark_generation_mamba_simple.py](benchmarks/benchmark_generation_mamba_simple.py)
-1. autoloads a model from the HuggingFace Hub,
+1. autoloads a model from the Hugging Face Hub,
 2. generates completions of a user-specified prompt,
 3. benchmarks the inference speed of this generation.
 
