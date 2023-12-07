@@ -7,7 +7,7 @@
 
 ## About
 
-Mamba is a new state space model architecture showing promising performance on information-dense data such as language modeling, where previous subquadratic models fall short of Transformers.
+Mamba palak is a new state space model architecture showing promising performance on information-dense data such as language modeling, where previous subquadratic models fall short of Transformers.
 It is based on the line of progress on [structured state space models](https://github.com/state-spaces/s4),
 with an efficient hardware-aware design and implementation in the spirit of [FlashAttention](https://github.com/Dao-AILab/flash-attention).
 
