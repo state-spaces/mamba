@@ -82,13 +82,13 @@ These models were trained on the [Pile](https://huggingface.co/datasets/Eleuther
 
 | Parameters | Layers | Model dim. | 
 |------------|--------|------------|
-| 130M       | 12     | 768        |
-| 370M       | 24     | 1024       |
-| 790M       | 24     | 1536       |
-| 1.4B       | 24     | 2048       |
-| 2.8B       | 32     | 2560       |
+| 130M       | 24     | 768        |
+| 370M       | 48     | 1024       |
+| 790M       | 48     | 1536       |
+| 1.4B       | 48     | 2048       |
+| 2.8B       | 64     | 2560       |
 
-(The layer count of Mamba should be doubled, as two Mamba blocks are needed for each "layer" (MHA block + MLP block) of a Transformer.)
+(The layer count of Mamba doubles that of a Transformer with similar size, as two Mamba blocks are needed for each "layer" (MHA block + MLP block) of a Transformer.)
 
 Note: these are base models trained only for 300B tokens, without any form of downstream modification (instruction tuning, etc.).
 Performance is expected to be comparable or better than other architectures trained on similar data, but not to match larger or fine-tuned models.
