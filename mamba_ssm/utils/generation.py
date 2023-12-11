@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from einops import rearrange, repeat
 from torch import Tensor
 from torch.profiler import ProfilerActivity, profile, record_function
-from transformers.generation import GreedySearchDecoderOnlyOutput, SampleDecoderOnlyOutput
+from transformers.generation import GreedySearchDecoderOnlyOutput, SampleDecoderOnlyOutput, TextStreamer
 
 
 @dataclass
@@ -103,6 +103,7 @@ def decode(
     tensor_parallel=1,
     cg=False,
     enable_timing=False,
+    streamer: Optional[TextStreamer] = None
 ):
     """Decoding, either greedy or with top-k or top-p sampling.
     If top-k = 0, don't limit the number of candidates (pure sampling).
@@ -119,6 +120,9 @@ def decode(
         sequences: (batch, max_length)
         scores: tuples of (batch, vocab_size)
     """
+    if streamer is not None:
+        streamer.put(input_ids.cpu())
+
     batch_size, seqlen_og = input_ids.shape
     teacher_output_len = teacher_outputs.shape[1] if teacher_outputs is not None else 0
     if cg:
@@ -189,7 +193,12 @@ def decode(
     while not should_stop(sequences[-1], inference_params):
         scores.append(get_logits(sequences[-1], inference_params))
         inference_params.seqlen_offset += sequences[-1].shape[1]
-        sequences.append(sample_tokens(scores[-1], inference_params))
+        sampled_tokens = sample_tokens(scores[-1], inference_params)
+        sequences.append(sampled_tokens)
+        if streamer is not None:
+            streamer.put(sampled_tokens.cpu())
+    if streamer is not None:
+        streamer.end()
     if enable_timing:
         end.record()
         if tensor_parallel > 1:
