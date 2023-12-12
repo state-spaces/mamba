@@ -2,6 +2,7 @@
 
 import math
 from functools import partial
+from typing import Union
 
 from collections import namedtuple
 
@@ -179,12 +180,20 @@ class MambaLMHeadModel(nn.Module, GenerationMixin):
         vocab_size: int,
         initializer_cfg=None,
         pad_vocab_size_multiple: int = 1,
+        bidirectional: bool = False,
+        bidirectional_strategy: Union[str, None] = None,
         device=None,
         dtype=None,
         **backbone_kwargs,
     ) -> None:
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
+        if bidirectional and bidirectional_strategy not in ["add", "concat", "ew_multiply"]:
+            raise NotImplementedError(f"{bidirectional_strategy} strategy for bi-directionality is not implemented!")
+        if bidirectional and bidirectional_strategy is None:
+            bidirectional_strategy = "add"  # Default strategy: `add`
+        self.bidirectional = bidirectional
+        self.bidirectional_strategy = bidirectional_strategy
         if vocab_size % pad_vocab_size_multiple != 0:
             vocab_size += pad_vocab_size_multiple - (vocab_size % pad_vocab_size_multiple)
         self.backbone = MixerModel(
@@ -195,7 +204,10 @@ class MambaLMHeadModel(nn.Module, GenerationMixin):
             **backbone_kwargs,
             **factory_kwargs,
         )
-        self.lm_head = nn.Linear(d_model, vocab_size, bias=False, **factory_kwargs)
+        if bidirectional and bidirectional_strategy == "concat":
+            self.lm_head = nn.Linear(d_model * 2, vocab_size, bias=False, **factory_kwargs)
+        else:
+            self.lm_head = nn.Linear(d_model, vocab_size, bias=False, **factory_kwargs)
 
         # Initialize weights and apply final processing
         self.apply(
@@ -205,12 +217,16 @@ class MambaLMHeadModel(nn.Module, GenerationMixin):
                 **(initializer_cfg if initializer_cfg is not None else {}),
             )
         )
-        self.tie_weights()
+        # For bi-directionality using the `concat` strategy, we cannot tie weights since concatenation doubles d_model
+        if not bidirectional or bidirectional_strategy != "concat":
+            self.tie_weights()
 
     def tie_weights(self):
         self.lm_head.weight = self.backbone.embedding.weight
 
     def allocate_inference_cache(self, batch_size, max_seqlen, dtype=None, **kwargs):
+        if self.bidirectional:
+            return self.backbone.allocate_inference_cache(batch_size, max_seqlen * 2, dtype=dtype, **kwargs)
         return self.backbone.allocate_inference_cache(batch_size, max_seqlen, dtype=dtype, **kwargs)
 
     def forward(self, input_ids, position_ids=None, inference_params=None, num_last_tokens=0):
@@ -219,11 +235,23 @@ class MambaLMHeadModel(nn.Module, GenerationMixin):
         num_last_tokens: if > 0, only return the logits for the last n tokens
         """
         hidden_states = self.backbone(input_ids, inference_params=inference_params)
+        if self.bidirectional:
+            # input_ids assumed to have shape (B, L, N), so we flip along dims=1
+            hidden_states_rev = self.backbone(
+                input_ids.flip(dims=(1,)),  # Flip along the sequence length dimension
+                inference_params=inference_params
+            ).flip(dims=(1,))  # Flip back for combining with forward hidden states
+            if self.bidirectional_strategy == "add":
+                hidden_states = hidden_states + hidden_states_rev
+            elif self.bidirectional_strategy == "concat":
+                hidden_states = torch.cat([hidden_states, hidden_states_rev], dim=-1)
+            elif self.bidirectional_strategy == "ew_multiply":  # i.e., element-wise product
+                hidden_states = hidden_states * hidden_states_rev
         if num_last_tokens > 0:
             hidden_states = hidden_states[:, -num_last_tokens:]
         lm_logits = self.lm_head(hidden_states)
-        CausalLMOutput = namedtuple("CausalLMOutput", ["logits"])
-        return CausalLMOutput(logits=lm_logits)
+        LMOutput = namedtuple("LMOutput", ["logits"])
+        return LMOutput(logits=lm_logits)
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name, device=None, dtype=None, **kwargs):
