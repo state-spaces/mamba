@@ -74,7 +74,9 @@ This example is used in the generation scripts below.
 
 Pretrained models are uploaded to
 [Hugging Face](https://huggingface.co/state-spaces): `mamba-130m`, `mamba-370m`,
-`mamba-790m`, `mamba-1.4b`, `mamba-2.8b`.
+`mamba-790m`, `mamba-1.4b`, `mamba-2.8b`, trained on 300B tokens on the Pile, as well as `mamba-2.8b-slimpj`
+(trained on 600B tokens on the SlimPajama dataset).
+
 
 The models will be autodownloaded by the generation script below.
 
@@ -108,6 +110,12 @@ library.
 ```
 python evals/lm_harness_eval.py --model mamba --model_args pretrained=state-spaces/mamba-130m --tasks lambada_openai,hellaswag,piqa,arc_easy,arc_challenge,winogrande --device cuda --batch_size 64
 python evals/lm_harness_eval.py --model hf --model_args pretrained=EleutherAI/pythia-160m --tasks lambada_openai,hellaswag,piqa,arc_easy,arc_challenge,winogrande --device cuda --batch_size 64
+```
+
+To reproduce the results on the `mamba-2.8b-slimpj` model reported in the blogposts:
+```
+python evals/lm_harness_eval.py --model mamba --model_args pretrained=state-spaces/mamba-2.8b-slimpj --tasks boolq,piqa,hellaswag,winogrande,arc_easy,arc_challenge,openbookqa,race,truthfulqa_mc2 --device cuda --batch_size 64
+python evals/lm_harness_eval.py --model mamba --model_args pretrained=state-spaces/mamba-2.8b-slimpj --tasks mmlu --num_fewshot 5 --device cuda --batch_size 64
 ```
 
 Note that the result of each task might differ from reported values by 0.1-0.3 due to noise in the evaluation process.
