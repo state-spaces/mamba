@@ -188,10 +188,10 @@ class MambaLMHeadModel(nn.Module, GenerationMixin):
     ) -> None:
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
-        if bidirectional and bidirectional_strategy not in ["add", "concat", "ew_multiply"]:
-            raise NotImplementedError(f"{bidirectional_strategy} strategy for bi-directionality is not implemented!")
         if bidirectional and bidirectional_strategy is None:
             bidirectional_strategy = "add"  # Default strategy: `add`
+        if bidirectional and bidirectional_strategy not in ["add", "concat", "ew_multiply"]:
+            raise NotImplementedError(f"{bidirectional_strategy} strategy for bi-directionality is not implemented!")
         self.bidirectional = bidirectional
         self.bidirectional_strategy = bidirectional_strategy
         if vocab_size % pad_vocab_size_multiple != 0:
