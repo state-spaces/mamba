@@ -499,7 +499,6 @@ class RMSNorm(torch.nn.Module):
             eps=self.eps,
             prenorm=prenorm,
             residual_in_fp32=residual_in_fp32,
-            is_rms_norm=True,
         )
 
 
