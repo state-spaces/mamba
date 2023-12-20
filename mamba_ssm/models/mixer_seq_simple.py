@@ -94,24 +94,10 @@ class MambaWrapper(nn.Module):
     """Thin wrapper around Mamba to support bi-directionality."""
     def __init__(
         self,
-        d_model,
-        d_state=16,
-        d_conv=4,
-        expand=2,
-        dt_rank="auto",
-        dt_min=0.001,
-        dt_max=0.1,
-        dt_init="random",
-        dt_scale=1.0,
-        dt_init_floor=1e-4,
-        conv_bias=True,
-        bias=False,
-        use_fast_path=True,  # Fused kernel options
-        layer_idx=None,
+        d_model: int,
         bidirectional: bool = False,
         bidirectional_strategy: Optional[str] = None,
-        device=None,
-        dtype=None,
+        **mamba_kwargs,
     ):
         super().__init__()
         if bidirectional and bidirectional_strategy is None:
@@ -122,40 +108,12 @@ class MambaWrapper(nn.Module):
         self.bidirectional_strategy = bidirectional_strategy
         self.mamba_fwd = Mamba(
             d_model=d_model,
-            d_state=d_state,
-            d_conv=d_conv,
-            expand=expand,
-            dt_rank=dt_rank,
-            dt_min=dt_min,
-            dt_max=dt_max,
-            dt_init=dt_init,
-            dt_scale=dt_scale,
-            dt_init_floor=dt_init_floor,
-            conv_bias=conv_bias,
-            bias=bias,
-            use_fast_path=use_fast_path,  # Fused kernel options
-            layer_idx=layer_idx,
-            device=device,
-            dtype=dtype,
+            **mamba_kwargs
         )
         if bidirectional:
             self.mamba_rev = Mamba(
                 d_model=d_model,
-                d_state=d_state,
-                d_conv=d_conv,
-                expand=expand,
-                dt_rank=dt_rank,
-                dt_min=dt_min,
-                dt_max=dt_max,
-                dt_init=dt_init,
-                dt_scale=dt_scale,
-                dt_init_floor=dt_init_floor,
-                conv_bias=conv_bias,
-                bias=bias,
-                use_fast_path=use_fast_path,  # Fused kernel options
-                layer_idx=layer_idx,
-                device=device,
-                dtype=dtype,
+                **mamba_kwargs
             )
         else:
             self.mamba_rev = None
