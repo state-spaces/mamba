@@ -1,5 +1,5 @@
 # Copyright (c) 2023, Tri Dao, Albert Gu.
-import copy
+
 import math
 from typing import Optional
 
