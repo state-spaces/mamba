@@ -60,6 +60,20 @@ def modify_logits_for_top_p_filtering(logits, top_p):
     logits.masked_fill_(indices_to_remove, float("-inf"))
 
 
+def modify_logit_for_repetition_penalty(logits, prev_output_tokens, repetition_penalty=1.0):
+    """Apply repetition penalty. See https://arxiv.org/abs/1909.05858
+    logits: (batch_size, vocab_size)
+    prev_output_tokens: (batch_size, seq_len)
+    """
+    if repetition_penalty == 1.0:
+        return logits
+    score = torch.gather(logits, 1, prev_output_tokens)
+    # if score < 0 then repetition penalty has to be multiplied to reduce the previous token probability
+    score = torch.where(score < 0, score * repetition_penalty, score / repetition_penalty)
+    logits.scatter_(1, prev_output_tokens, score)
+    return logits
+
+
 def sample(logits, top_k=1, top_p=0.0, temperature=1.0):
     """Sample from top-k logits.
     Arguments:
@@ -97,6 +111,7 @@ def decode(
     top_k=1,
     top_p=0.0,
     temperature=1.0,
+    repetition_penalty=1.0,
     eos_token_id=None,
     teacher_outputs=None,
     vocab_size=None,
@@ -186,10 +201,18 @@ def decode(
     if enable_timing:
         start.record()
     scores, sequences = [], [input_ids]
+    sequences_cat = input_ids
     while not should_stop(sequences[-1], inference_params):
         scores.append(get_logits(sequences[-1], inference_params))
         inference_params.seqlen_offset += sequences[-1].shape[1]
-        sampled_tokens = sample_tokens(scores[-1], inference_params)
+        if repetition_penalty == 1.0:
+            sampled_tokens = sample_tokens(scores[-1], inference_params)
+        else:
+            logits = modify_logit_for_repetition_penalty(
+                scores[-1].clone(), sequences_cat, repetition_penalty
+            )
+            sampled_tokens = sample_tokens(logits, inference_params)
+            sequences_cat = torch.cat([sequences_cat, sampled_tokens], dim=1)
         sequences.append(sampled_tokens)
         if streamer is not None:
             streamer.put(sampled_tokens.cpu())
