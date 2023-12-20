@@ -2,12 +2,15 @@
 
 import math
 from functools import partial
+import json
+import os
 
 from collections import namedtuple
 
 import torch
 import torch.nn as nn
 
+from mamba_ssm.models.config_mamba import MambaConfig
 from mamba_ssm.modules.mamba_simple import Mamba, Block
 from mamba_ssm.utils.generation import GenerationMixin
 from mamba_ssm.utils.hf import load_config_hf, load_state_dict_hf
@@ -174,16 +177,22 @@ class MambaLMHeadModel(nn.Module, GenerationMixin):
 
     def __init__(
         self,
-        d_model: int,
-        n_layer: int,
-        vocab_size: int,
+        config: MambaConfig,
         initializer_cfg=None,
-        pad_vocab_size_multiple: int = 1,
         device=None,
         dtype=None,
-        **backbone_kwargs,
     ) -> None:
+        self.config = config
+        d_model = config.d_model
+        n_layer = config.n_layer
+        vocab_size = config.vocab_size
+        ssm_cfg = config.ssm_cfg
+        rms_norm = config.rms_norm
+        residual_in_fp32 = config.residual_in_fp32
+        fused_add_norm = config.fused_add_norm
+        pad_vocab_size_multiple = config.pad_vocab_size_multiple
         factory_kwargs = {"device": device, "dtype": dtype}
+
         super().__init__()
         if vocab_size % pad_vocab_size_multiple != 0:
             vocab_size += pad_vocab_size_multiple - (vocab_size % pad_vocab_size_multiple)
@@ -191,8 +200,11 @@ class MambaLMHeadModel(nn.Module, GenerationMixin):
             d_model=d_model,
             n_layer=n_layer,
             vocab_size=vocab_size,
+            ssm_cfg=ssm_cfg,
+            rms_norm=rms_norm,
             initializer_cfg=initializer_cfg,
-            **backbone_kwargs,
+            fused_add_norm=fused_add_norm,
+            residual_in_fp32=residual_in_fp32,
             **factory_kwargs,
         )
         self.lm_head = nn.Linear(d_model, vocab_size, bias=False, **factory_kwargs)
@@ -227,7 +239,26 @@ class MambaLMHeadModel(nn.Module, GenerationMixin):
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name, device=None, dtype=None, **kwargs):
-        config = load_config_hf(pretrained_model_name)
-        model = cls(**config, device=device, dtype=dtype, **kwargs)
+        config_data = load_config_hf(pretrained_model_name)
+        config = MambaConfig(**config_data)
+        model = cls(config, device=device, dtype=dtype, **kwargs)
         model.load_state_dict(load_state_dict_hf(pretrained_model_name, device=device, dtype=dtype))
         return model
+
+    def save_pretrained(self, save_directory):
+        """
+        Minimal implementation of save_pretrained for MambaLMHeadModel.
+        Save the model and its configuration file to a directory.
+        """
+        # Ensure save_directory exists
+        if not os.path.exists(save_directory):
+            os.makedirs(save_directory)
+
+        # Save the model's state_dict
+        model_path = os.path.join(save_directory, 'pytorch_model.bin')
+        torch.save(self.state_dict(), model_path)
+
+        # Save the configuration of the model
+        config_path = os.path.join(save_directory, 'config.json')
+        with open(config_path, 'w') as f:
+            json.dump(self.config.__dict__, f)
