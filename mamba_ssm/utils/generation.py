@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from einops import rearrange, repeat
 from torch import Tensor
 from torch.profiler import ProfilerActivity, profile, record_function
-from transformers.generation import GreedySearchDecoderOnlyOutput, SampleDecoderOnlyOutput
+from transformers.generation import GreedySearchDecoderOnlyOutput, SampleDecoderOnlyOutput, TextStreamer
 
 
 @dataclass
@@ -60,6 +60,20 @@ def modify_logits_for_top_p_filtering(logits, top_p):
     logits.masked_fill_(indices_to_remove, float("-inf"))
 
 
+def modify_logit_for_repetition_penalty(logits, prev_output_tokens, repetition_penalty=1.0):
+    """Apply repetition penalty. See https://arxiv.org/abs/1909.05858
+    logits: (batch_size, vocab_size)
+    prev_output_tokens: (batch_size, seq_len)
+    """
+    if repetition_penalty == 1.0:
+        return logits
+    score = torch.gather(logits, 1, prev_output_tokens)
+    # if score < 0 then repetition penalty has to be multiplied to reduce the previous token probability
+    score = torch.where(score < 0, score * repetition_penalty, score / repetition_penalty)
+    logits.scatter_(1, prev_output_tokens, score)
+    return logits
+
+
 def sample(logits, top_k=1, top_p=0.0, temperature=1.0):
     """Sample from top-k logits.
     Arguments:
@@ -97,12 +111,13 @@ def decode(
     top_k=1,
     top_p=0.0,
     temperature=1.0,
+    repetition_penalty=1.0,
     eos_token_id=None,
     teacher_outputs=None,
     vocab_size=None,
-    tensor_parallel=1,
     cg=False,
     enable_timing=False,
+    streamer: Optional[TextStreamer] = None
 ):
     """Decoding, either greedy or with top-k or top-p sampling.
     If top-k = 0, don't limit the number of candidates (pure sampling).
@@ -119,6 +134,9 @@ def decode(
         sequences: (batch, max_length)
         scores: tuples of (batch, vocab_size)
     """
+    if streamer is not None:
+        streamer.put(input_ids.cpu())
+
     batch_size, seqlen_og = input_ids.shape
     teacher_output_len = teacher_outputs.shape[1] if teacher_outputs is not None else 0
     if cg:
@@ -130,7 +148,6 @@ def decode(
             batch_size,
             seqlen_og,
             max_length,
-            tensor_parallel=tensor_parallel,
         )
         inference_params = model._decoding_cache.inference_params
         inference_params.reset(max_length, batch_size)
@@ -182,18 +199,27 @@ def decode(
     end = torch.cuda.Event(enable_timing=enable_timing)
 
     if enable_timing:
-        if tensor_parallel > 1:
-            torch.distributed.barrier()
         start.record()
     scores, sequences = [], [input_ids]
+    sequences_cat = input_ids
     while not should_stop(sequences[-1], inference_params):
         scores.append(get_logits(sequences[-1], inference_params))
         inference_params.seqlen_offset += sequences[-1].shape[1]
-        sequences.append(sample_tokens(scores[-1], inference_params))
+        if repetition_penalty == 1.0:
+            sampled_tokens = sample_tokens(scores[-1], inference_params)
+        else:
+            logits = modify_logit_for_repetition_penalty(
+                scores[-1].clone(), sequences_cat, repetition_penalty
+            )
+            sampled_tokens = sample_tokens(logits, inference_params)
+            sequences_cat = torch.cat([sequences_cat, sampled_tokens], dim=1)
+        sequences.append(sampled_tokens)
+        if streamer is not None:
+            streamer.put(sampled_tokens.cpu())
+    if streamer is not None:
+        streamer.end()
     if enable_timing:
         end.record()
-        if tensor_parallel > 1:
-            torch.distributed.barrier()
         torch.cuda.synchronize()
         print(f"Prompt processing + decoding time: {(start.elapsed_time(end)):.0f}ms")
     output_cls = GreedySearchDecoderOnlyOutput if top_k == 1 else SampleDecoderOnlyOutput
@@ -223,22 +249,6 @@ class GenerationMixin:
         return output if return_dict_in_generate else output.sequences
 
 
-def allocate_inference_cache(
-    max_batch_size,
-    max_seqlen,
-    nheads,
-    headdim,
-    layers: Union[int, Sequence],
-    device,
-    dtype=torch.float16,
-):
-    assert dtype in [torch.float16, torch.bfloat16, torch.float32]
-    kv_cache_shape = (max_batch_size, max_seqlen, 2, nheads, headdim)
-    if isinstance(layers, int):
-        layers = range(layers)
-    return {i: torch.empty(kv_cache_shape, device=device, dtype=dtype) for i in layers}
-
-
 @dataclass
 class DecodingCGCache:
     max_batch_size: int = 0
@@ -259,7 +269,6 @@ def update_graph_cache(
     seqlen_og,
     max_seqlen,
     decoding_seqlens=(1,),
-    tensor_parallel=1,
     dtype=None,
     n_warmups=2,
 ):
@@ -280,23 +289,8 @@ def update_graph_cache(
         gc.collect()
         cache.device, cache.dtype = device, dtype
         cache.max_batch_size, cache.max_seqlen = batch_size, max_seqlen
-        if hasattr(model, "allocate_inference_cache"):
-            inf_cache = model.allocate_inference_cache(batch_size, max_seqlen, dtype)
-        else:
-            headdim = getattr(
-                model.config,
-                "head_dim",
-                model.config.hidden_size // model.config.num_attention_heads,
-            )
-            inf_cache = allocate_inference_cache(
-                batch_size,
-                max_seqlen,
-                model.config.num_attention_heads // tensor_parallel,
-                headdim,
-                model.config.num_hidden_layers,
-                device,
-                dtype,
-            )
+        assert hasattr(model, "allocate_inference_cache"), "CUDA graph decoding requires that the model has a method allocate_inference_cache"
+        inf_cache = model.allocate_inference_cache(batch_size, max_seqlen, dtype)
         lengths_per_sample = torch.full((batch_size,), seqlen_og, dtype=torch.int32, device=device)
         cache.inference_params = InferenceParams(
             max_seqlen=max_seqlen,

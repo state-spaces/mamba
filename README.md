@@ -13,7 +13,7 @@ with an efficient hardware-aware design and implementation in the spirit of [Fla
 
 ## Installation
 
-- `pip install causal-conv1d<=1.0.2`: an efficient implementation of a simple causal Conv1d layer used inside the Mamba block.
+- `pip install causal-conv1d>=1.1.0`: an efficient implementation of a simple causal Conv1d layer used inside the Mamba block.
 - `pip install mamba-ssm`: the core Mamba package.
 
 It can also be built from source with `pip install .` from this repository.
@@ -105,7 +105,8 @@ library.
 
 1. Pull the `lm-evaluation-harness` repo by `git submodule update --init
    --recursive`. We use the `big-refactor` branch.
-2. Install `lm-evaluation-harness`: `pip install -e 3rdparty/lm-evaluation-harness`
+2. Install `lm-evaluation-harness`: `pip install -e 3rdparty/lm-evaluation-harness`.
+On Python 3.10 you might need to manually install the latest version of `promptsource`: `pip install git+https://github.com/bigscience-workshop/promptsource.git`.
 3. Run evaluation with (more documentation at the [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness/tree/big-refactor) repo):
 ```
 python evals/lm_harness_eval.py --model mamba --model_args pretrained=state-spaces/mamba-130m --tasks lambada_openai,hellaswag,piqa,arc_easy,arc_challenge,winogrande --device cuda --batch_size 64
@@ -134,8 +135,8 @@ Other configurable options include the top-p (nucleus sampling) probability, and
 To test generation latency (e.g. batch size = 1) with different sampling strategies:
 
 ```
-python benchmarks/benchmark_generation_mamba_simple.py --model-name "state-spaces/mamba-2.8b" --prompt "My cat wrote all this CUDA code for a new language model and" --topp 0.9 --temperature 0.5
-python benchmarks/benchmark_generation_mamba_simple.py --model-name "EleutherAI/pythia-2.8b" --prompt "My cat wrote all this CUDA code for a new language model and" --topp 0.9 --temperature 0.5
+python benchmarks/benchmark_generation_mamba_simple.py --model-name "state-spaces/mamba-2.8b" --prompt "My cat wrote all this CUDA code for a new language model and" --topp 0.9 --temperature 0.7 --repetition-penalty 1.2
+python benchmarks/benchmark_generation_mamba_simple.py --model-name "EleutherAI/pythia-2.8b" --prompt "My cat wrote all this CUDA code for a new language model and" --topp 0.9 --temperature 0.7 --repetition-penalty 1.2
 ```
 
 To test generation throughput with random prompts (e.g. large batch size):

@@ -1,5 +1,5 @@
 # Copyright (c) 2023, Tri Dao, Albert Gu.
-
+import copy
 import math
 from typing import Optional
 
@@ -10,15 +10,12 @@ from torch import Tensor
 
 from einops import rearrange, repeat
 
+from mamba_ssm.ops.selective_scan_interface import selective_scan_fn, mamba_inner_fn
+
 try:
     from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
 except ImportError:
     causal_conv1d_fn, causal_conv1d_update = None
-
-try:
-    from mamba_ssm.ops.selective_scan_interface import selective_scan_fn, mamba_inner_fn
-except ImportError:
-    selective_scan_fn, mamba_inner_fn = None, None, None
 
 try:
     from mamba_ssm.ops.triton.selective_state_update import selective_state_update
@@ -165,16 +162,18 @@ class Mamba(nn.Module):
             x, z = xz.chunk(2, dim=1)
             # Compute short convolution
             if conv_state is not None:
-                conv_state.copy_(x[:, :, -self.d_conv :])  # Update state (B D W)
+                # If we just take x[:, :, -self.d_conv :], it will error if seqlen < self.d_conv
+                # Instead F.pad will pad with zeros if seqlen < self.d_conv, and truncate otherwise.
+                conv_state.copy_(F.pad(x, (self.d_conv - x.shape[-1], 0)))  # Update state (B D W)
             if causal_conv1d_fn is None:
                 x = self.act(self.conv1d(x)[..., :seqlen])
             else:
                 assert self.activation in ["silu", "swish"]
                 x = causal_conv1d_fn(
-                    x,
-                    rearrange(self.conv1d.weight, "d 1 w -> d w"),
-                    self.conv1d.bias,
-                    self.activation,
+                    x=x,
+                    weight=rearrange(self.conv1d.weight, "d 1 w -> d w"),
+                    bias=self.conv1d.bias,
+                    activation=self.activation,
                 )
 
             # We're careful here about the layout, to avoid extra transposes.
@@ -293,6 +292,101 @@ class Mamba(nn.Module):
                 conv_state.zero_()
                 ssm_state.zero_()
         return conv_state, ssm_state
+
+
+class MambaWrapper(nn.Module):
+    """Thin wrapper around Mamba to support bi-directionality."""
+    def __init__(
+        self,
+        d_model,
+        d_state=16,
+        d_conv=4,
+        expand=2,
+        dt_rank="auto",
+        dt_min=0.001,
+        dt_max=0.1,
+        dt_init="random",
+        dt_scale=1.0,
+        dt_init_floor=1e-4,
+        conv_bias=True,
+        bias=False,
+        use_fast_path=True,  # Fused kernel options
+        layer_idx=None,
+        bidirectional: bool = False,
+        bidirectional_strategy: Optional[str] = None,
+        bidirectional_weight_tie: Optional[bool] = False,
+        device=None,
+        dtype=None,
+    ):
+        super().__init__()
+        if bidirectional and bidirectional_strategy is None:
+            bidirectional_strategy = "add"  # Default strategy: `add`
+        if bidirectional and bidirectional_strategy not in ["add", "concat", "ew_multiply"]:
+            raise NotImplementedError(f"{bidirectional_strategy} strategy for bi-directionality is not implemented!")
+        self.bidirectional = bidirectional
+        self.bidirectional_strategy = bidirectional_strategy
+        self.bidirectional_weight_tie = bidirectional_weight_tie
+        self.mamba_fwd = Mamba(
+            d_model=d_model,
+            d_state=d_state,
+            d_conv=d_conv,
+            expand=expand,
+            dt_rank=dt_rank,
+            dt_min=dt_min,
+            dt_max=dt_max,
+            dt_init=dt_init,
+            dt_scale=dt_scale,
+            dt_init_floor=dt_init_floor,
+            conv_bias=conv_bias,
+            bias=bias,
+            use_fast_path=use_fast_path,  # Fused kernel options
+            layer_idx=layer_idx,
+            device=device,
+            dtype=dtype,
+        )
+        if bidirectional and not bidirectional_weight_tie:
+            # If not weight tying, instantiate separate Mamba
+            self.mamba_rev = Mamba(
+                d_model=d_model,
+                d_state=d_state,
+                d_conv=d_conv,
+                expand=expand,
+                dt_rank=dt_rank,
+                dt_min=dt_min,
+                dt_max=dt_max,
+                dt_init=dt_init,
+                dt_scale=dt_scale,
+                dt_init_floor=dt_init_floor,
+                conv_bias=conv_bias,
+                bias=bias,
+                use_fast_path=use_fast_path,  # Fused kernel options
+                layer_idx=layer_idx,
+                device=device,
+                dtype=dtype,
+            )
+        else:
+            self.mamba_rev = None
+
+    def forward(self, hidden_states, inference_params=None):
+        """Bidirectional-enabled forward pass
+
+        hidden_states: (B, L, D)
+        Returns: same shape as hidden_states
+        """
+        out = self.mamba_fwd(hidden_states, inference_params=inference_params)
+        if self.bidirectional:
+            mamba_rev = self.mamba_rev if self.mamba_rev is not None else self.mamba_fwd
+            out_rev = mamba_rev(
+                hidden_states.flip(dims=(1,)),  # Flip along the sequence length dimension
+                inference_params=inference_params
+            ).flip(dims=(1,))  # Flip back for combining with forward hidden states
+            if self.bidirectional_strategy == "add":
+                out = out + out_rev
+            elif self.bidirectional_strategy == "concat":
+                out = torch.cat([out, out_rev], dim=-1)
+            elif self.bidirectional_strategy == "ew_multiply":
+                out = out * out_rev
+        return out
 
 
 class Block(nn.Module):

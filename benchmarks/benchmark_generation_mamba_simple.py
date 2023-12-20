@@ -22,6 +22,7 @@ parser.add_argument("--genlen", type=int, default=100)
 parser.add_argument("--temperature", type=float, default=1.0)
 parser.add_argument("--topk", type=int, default=1)
 parser.add_argument("--topp", type=float, default=1.0)
+parser.add_argument("--repetition-penalty", type=float, default=1.0)
 parser.add_argument("--batch", type=int, default=1)
 args = parser.parse_args()
 
@@ -61,6 +62,7 @@ if is_mamba:
         temperature=args.temperature,
         top_k=args.topk,
         top_p=args.topp,
+        repetition_penalty=args.repetition_penalty,
     )
 else:
     fn = lambda: model.generate(
@@ -73,6 +75,7 @@ else:
         temperature=args.temperature,
         top_k=args.topk,
         top_p=args.topp,
+        repetition_penalty=args.repetition_penalty,
     )
 out = fn()
 if args.prompt is not None:

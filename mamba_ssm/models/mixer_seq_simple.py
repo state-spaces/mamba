@@ -2,14 +2,17 @@
 
 import math
 from functools import partial
-from typing import Union
+import json
+import os
+from typing import Optional
 
 from collections import namedtuple
 
 import torch
 import torch.nn as nn
 
-from mamba_ssm.modules.mamba_simple import Mamba, Block
+from mamba_ssm.models.config_mamba import MambaConfig
+from mamba_ssm.modules.mamba_simple import MambaWrapper, Block
 from mamba_ssm.utils.generation import GenerationMixin
 from mamba_ssm.utils.hf import load_config_hf, load_state_dict_hf
 
@@ -27,13 +30,21 @@ def create_block(
     residual_in_fp32=False,
     fused_add_norm=False,
     layer_idx=None,
+    bidirectional=False,
+    bidirectional_strategy=None,
+    bidirectional_weight_tie=False,
     device=None,
     dtype=None,
 ):
     if ssm_cfg is None:
         ssm_cfg = {}
     factory_kwargs = {"device": device, "dtype": dtype}
-    mixer_cls = partial(Mamba, layer_idx=layer_idx, **ssm_cfg, **factory_kwargs)
+    bidirectional_kwargs = {
+        "bidirectional": bidirectional,
+        "bidirectional_strategy": bidirectional_strategy,
+        "bidirectional_weight_tie": bidirectional_weight_tie,
+    }
+    mixer_cls = partial(MambaWrapper, layer_idx=layer_idx, **ssm_cfg, **bidirectional_kwargs, **factory_kwargs)
     norm_cls = partial(
         nn.LayerNorm if not rms_norm else RMSNorm, eps=norm_epsilon, **factory_kwargs
     )
@@ -93,6 +104,9 @@ class MixerModel(nn.Module):
         initializer_cfg=None,
         fused_add_norm=False,
         residual_in_fp32=False,
+        bidirectional: bool = False,
+        bidirectional_strategy: Optional[str] = None,
+        bidirectional_weight_tie: bool = False,
         device=None,
         dtype=None,
     ) -> None:
@@ -122,6 +136,9 @@ class MixerModel(nn.Module):
                     residual_in_fp32=residual_in_fp32,
                     fused_add_norm=fused_add_norm,
                     layer_idx=i,
+                    bidirectional=bidirectional,
+                    bidirectional_strategy=bidirectional_strategy,
+                    bidirectional_weight_tie=bidirectional_weight_tie,
                     **factory_kwargs,
                 )
                 for i in range(n_layer)
@@ -175,36 +192,43 @@ class MambaLMHeadModel(nn.Module, GenerationMixin):
 
     def __init__(
         self,
-        d_model: int,
-        n_layer: int,
-        vocab_size: int,
+        config: MambaConfig,
         initializer_cfg=None,
-        pad_vocab_size_multiple: int = 1,
-        bidirectional: bool = False,
-        bidirectional_strategy: Union[str, None] = None,
         device=None,
         dtype=None,
-        **backbone_kwargs,
     ) -> None:
+        self.config = config
+        d_model = config.d_model
+        n_layer = config.n_layer
+        vocab_size = config.vocab_size
+        ssm_cfg = config.ssm_cfg
+        rms_norm = config.rms_norm
+        residual_in_fp32 = config.residual_in_fp32
+        fused_add_norm = config.fused_add_norm
+        pad_vocab_size_multiple = config.pad_vocab_size_multiple
+        bidirectional = config.bidirectional
+        bidirectional_strategy = config.bidirectional_strategy
+        bidirectional_weight_tie = config.bidirectional_weight_tie
         factory_kwargs = {"device": device, "dtype": dtype}
+
         super().__init__()
-        if bidirectional and bidirectional_strategy is None:
-            bidirectional_strategy = "add"  # Default strategy: `add`
-        if bidirectional and bidirectional_strategy not in ["add", "concat", "ew_multiply"]:
-            raise NotImplementedError(f"{bidirectional_strategy} strategy for bi-directionality is not implemented!")
-        self.bidirectional = bidirectional
-        self.bidirectional_strategy = bidirectional_strategy
         if vocab_size % pad_vocab_size_multiple != 0:
             vocab_size += pad_vocab_size_multiple - (vocab_size % pad_vocab_size_multiple)
         self.backbone = MixerModel(
             d_model=d_model,
             n_layer=n_layer,
             vocab_size=vocab_size,
+            ssm_cfg=ssm_cfg,
+            rms_norm=rms_norm,
             initializer_cfg=initializer_cfg,
-            **backbone_kwargs,
+            fused_add_norm=fused_add_norm,
+            residual_in_fp32=residual_in_fp32,
+            bidirectional=bidirectional,
+            bidirectional_strategy=bidirectional_strategy,
+            bidirectional_weight_tie=bidirectional_weight_tie,
             **factory_kwargs,
         )
-        if bidirectional and bidirectional_strategy == "concat":
+        if self.config.bidirectional and self.config.bidirectional_strategy == "concat":
             self.lm_head = nn.Linear(d_model * 2, vocab_size, bias=False, **factory_kwargs)
         else:
             self.lm_head = nn.Linear(d_model, vocab_size, bias=False, **factory_kwargs)
@@ -218,15 +242,13 @@ class MambaLMHeadModel(nn.Module, GenerationMixin):
             )
         )
         # For bi-directionality using the `concat` strategy, we cannot tie weights since concatenation doubles d_model
-        if not bidirectional or bidirectional_strategy != "concat":
+        if not self.config.bidirectional or self.config.bidirectional_strategy != "concat":
             self.tie_weights()
 
     def tie_weights(self):
         self.lm_head.weight = self.backbone.embedding.weight
 
     def allocate_inference_cache(self, batch_size, max_seqlen, dtype=None, **kwargs):
-        if self.bidirectional:
-            return self.backbone.allocate_inference_cache(batch_size, max_seqlen * 2, dtype=dtype, **kwargs)
         return self.backbone.allocate_inference_cache(batch_size, max_seqlen, dtype=dtype, **kwargs)
 
     def forward(self, input_ids, position_ids=None, inference_params=None, num_last_tokens=0):
@@ -235,18 +257,6 @@ class MambaLMHeadModel(nn.Module, GenerationMixin):
         num_last_tokens: if > 0, only return the logits for the last n tokens
         """
         hidden_states = self.backbone(input_ids, inference_params=inference_params)
-        if self.bidirectional:
-            # input_ids assumed to have shape (B, L, N), so we flip along dims=1
-            hidden_states_rev = self.backbone(
-                input_ids.flip(dims=(1,)),  # Flip along the sequence length dimension
-                inference_params=inference_params
-            ).flip(dims=(1,))  # Flip back for combining with forward hidden states
-            if self.bidirectional_strategy == "add":
-                hidden_states = hidden_states + hidden_states_rev
-            elif self.bidirectional_strategy == "concat":
-                hidden_states = torch.cat([hidden_states, hidden_states_rev], dim=-1)
-            elif self.bidirectional_strategy == "ew_multiply":  # i.e., element-wise product
-                hidden_states = hidden_states * hidden_states_rev
         if num_last_tokens > 0:
             hidden_states = hidden_states[:, -num_last_tokens:]
         lm_logits = self.lm_head(hidden_states)
@@ -255,7 +265,26 @@ class MambaLMHeadModel(nn.Module, GenerationMixin):
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name, device=None, dtype=None, **kwargs):
-        config = load_config_hf(pretrained_model_name)
-        model = cls(**config, device=device, dtype=dtype, **kwargs)
+        config_data = load_config_hf(pretrained_model_name)
+        config = MambaConfig(**config_data)
+        model = cls(config, device=device, dtype=dtype, **kwargs)
         model.load_state_dict(load_state_dict_hf(pretrained_model_name, device=device, dtype=dtype))
         return model
+
+    def save_pretrained(self, save_directory):
+        """
+        Minimal implementation of save_pretrained for MambaLMHeadModel.
+        Save the model and its configuration file to a directory.
+        """
+        # Ensure save_directory exists
+        if not os.path.exists(save_directory):
+            os.makedirs(save_directory)
+
+        # Save the model's state_dict
+        model_path = os.path.join(save_directory, 'pytorch_model.bin')
+        torch.save(self.state_dict(), model_path)
+
+        # Save the configuration of the model
+        config_path = os.path.join(save_directory, 'config.json')
+        with open(config_path, 'w') as f:
+            json.dump(self.config.__dict__, f)
