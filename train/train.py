@@ -2,28 +2,37 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
-from torchtext.datasets import WikiText2
-from torchtext.data import BucketIterator, Field
+from torchtext.datasets import Pennies
+from torchtext.data import BucketIterator
 from mamba_ssm.models.mamba_lm_head_model import MambaLMHeadModel
 from mamba_ssm.utils.generation import GenerationMixin
 from mamba_ssm.utils.hf import load_config_hf, load_state_dict_hf
-from torch.nn.parallel import DistributedDataParallel
+from torch.nn.parallel import DistributedDataParallel, FullyShardedDataParallel
 
-def tokenize(text):
-    return text.split()
+class TinyShakespeareDataset(Dataset):
+    def __init__(self, file_path, ctx_len):
+        self.file_path = file_path
+        self.lines = self._preprocess_dataset(file_path)
+        self.ctx_len = ctx_len
 
-# Define how to process the text data
-TEXT = Field(tokenize=tokenize, lower=True, batch_first=True)
+    def _preprocess_dataset(self, file_path):
+        with open(file_path, 'r') as f:
+            lines = f.read().split('\n')
+        lines = [line.lower() for line in lines if line.strip()]
+        return lines
 
-def load_dataset(batch_size, num_workers):
-    train_data, val_data, test_data = WikiText2.splits(TEXT, root='./data')
-    TEXT.build_vocab(train_data)
-    train_iter, val_iter, test_iter = BucketIterator.splits(
-        (train_data, val_data, test_data), 
-        batch_size=batch_size,
-        device=device,
-        sort_within_batch=True
-    )
+    def __len__(self):
+        return len(self.lines)
+
+    def __getitem__(self, idx):
+        line = self.lines[idx]
+        return torch.tensor(line)
+
+def load_dataset(batch_size, num_workers, ctx_len):
+    train_data, val_data = Pennies.splits(root='./data')
+    train_data, val_data = train_data.remove_empty(), val_data.remove_empty()
+    train_iter = BucketIterator(TinyShakespeareDataset(train_data, ctx_len=ctx_len), batch_size=batch_size, num_workers=num_workers)
+    val_iter = BucketIterator(TinyShakespeareDataset(val_data, ctx_len=ctx_len), batch_size=batch_size, num_workers=num_workers)
     return train_iter, val_iter
 
 def create_model(config_name, device, dtype):
@@ -63,13 +72,14 @@ def evaluate(model, val_iter, device):
 def fsdp_wrapper(model, device, dtype):
     model = model.to(device).type(dtype)
     model = DistributedDataParallel(model, device_ids=[device], find_unused_parameters=True)
+    model = FullyShardedDataParallel(model, device_ids=[device], find_unused_parameters=True)
     return model
 
-def main(config_name, device, dtype, num_epochs, batch_size, num_workers):
-    train_iter, val_iter = load_dataset(batch_size, num_workers)
+def main(config_name, device, dtype, num_epochs, batch_size, num_workers, ctx_len):
+    train_iter, val_iter = load_dataset(batch_size, num_workers, ctx_len)
     model = create_model(config_name, device, dtype)
     model = fsdp_wrapper(model, device, dtype)
-    optimizer = optim.AdamW(model.parameters(), lr=3e-5)
+    optimizer = optim.AdamW(model.parameters(), lr=3e-5, betas=(0.9, 0.98), eps=1e-8, weight_decay=0.01)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=3, verbose=True)
     model = train(model, train_iter, val_iter, device, optimizer, scheduler, num_epochs)
 
@@ -80,4 +90,6 @@ if __name__ == "__main__":
     num_epochs = 10
     batch_size = 32
     num_workers = 4
-    main(config_name, device, dtype, num_epochs, batch_size, num_workers)
+    ctx_len = 1024  # Specify the desired context length
+    file_path = "./input.txt"
+    main(config_name, device, dtype, num_epochs, batch_size, num_workers, ctx_len)
