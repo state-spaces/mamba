@@ -1,95 +1,136 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
-from torchtext.datasets import Pennies
-from torchtext.data import BucketIterator
+from torch.utils.data import Dataset, DataLoader, random_split
+from torch.nn.utils.rnn import pad_sequence
 from mamba_ssm.models.mamba_lm_head_model import MambaLMHeadModel
-from mamba_ssm.utils.generation import GenerationMixin
-from mamba_ssm.utils.hf import load_config_hf, load_state_dict_hf
-from torch.nn.parallel import DistributedDataParallel, FullyShardedDataParallel
+from torch.nn.parallel import DistributedDataParallel
+from transformers import AutoTokenizer
+import logging
+import random
+import numpy as np
+from config_mamba import MambaConfig
+from fairscale.nn.data_parallel import FullyShardedDataParallel as FSDP
+import torch.distributed as dist
+import os
+import argparse
 
-class TinyShakespeareDataset(Dataset):
-    def __init__(self, file_path, ctx_len):
-        self.file_path = file_path
-        self.lines = self._preprocess_dataset(file_path)
-        self.ctx_len = ctx_len
+# Setup logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-    def _preprocess_dataset(self, file_path):
-        with open(file_path, 'r') as f:
-            lines = f.read().split('\n')
-        lines = [line.lower() for line in lines if line.strip()]
-        return lines
+def set_seed(seed):
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+
+class TextDataset(Dataset):
+    def __init__(self, file_path, tokenizer, block_size):
+        self.tokenizer = tokenizer
+        self.block_size = block_size
+        self.data = self._load_data(file_path)
+
+    def _load_data(self, file_path):
+        with open(file_path, 'r', encoding='utf-8') as file:
+            text = file.read()
+        tokens = self.tokenizer.encode(text, add_special_tokens=True)
+        return [tokens[i:i + self.block_size] for i in range(0, len(tokens), self.block_size)]
 
     def __len__(self):
-        return len(self.lines)
+        return len(self.data)
 
     def __getitem__(self, idx):
-        line = self.lines[idx]
-        return torch.tensor(line)
+        return torch.tensor(self.data[idx], dtype=torch.long)
 
-def load_dataset(batch_size, num_workers, ctx_len):
-    train_data, val_data = Pennies.splits(root='./data')
-    train_data, val_data = train_data.remove_empty(), val_data.remove_empty()
-    train_iter = BucketIterator(TinyShakespeareDataset(train_data, ctx_len=ctx_len), batch_size=batch_size, num_workers=num_workers)
-    val_iter = BucketIterator(TinyShakespeareDataset(val_data, ctx_len=ctx_len), batch_size=batch_size, num_workers=num_workers)
-    return train_iter, val_iter
+def collate_batch(batch):
+    return pad_sequence(batch, batch_first=True, padding_value=tokenizer.pad_token_id)
 
-def create_model(config_name, device, dtype):
-    config_data = load_config_hf(config_name)
-    config = MambaConfig(**config_data)
-    model = MambaLMHeadModel(config, device=device, dtype=dtype)
-    model.load_state_dict(load_state_dict_hf(config_name, device=device, dtype=dtype))
+def load_dataset(file_path, tokenizer, block_size, batch_size, num_workers, split_ratio=0.8):
+    dataset = TextDataset(file_path, tokenizer, block_size)
+    train_size = int(len(dataset) * split_ratio)
+    val_size = len(dataset) - train_size
+    train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, collate_fn=collate_batch)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, collate_fn=collate_batch)
+    return train_loader, val_loader
+
+def create_model(device, dtype):
+    mamba_config = MambaConfig(
+        d_model=2560,
+        n_layer=64,
+        vocab_size=50277,
+        ssm_cfg={},
+        rms_norm=True,
+        residual_in_fp32=True,
+        fused_add_norm=True,
+        pad_vocab_size_multiple=8
+    )
+    model = MambaLMHeadModel(mamba_config, device=device, dtype=dtype)
     return model
 
-def train(model, train_iter, val_iter, device, optimizer, scheduler, num_epochs):
+def train(model, data_loader, optimizer, device):
     model.train()
     total_loss = 0
-    for epoch in range(num_epochs):
-        for i, batch in enumerate(train_iter):
-            optimizer.zero_grad()
-            loss = model(batch.text, inference_params=None).loss
-            loss.backward()
-            optimizer.step()
-            scheduler.step()
-            total_loss += loss.item()
-            if (i + 1) % 100 == 0:
-                print(f"Epoch {epoch + 1}, Batch {i + 1}, Loss: {loss.item():.4f}")
-        print(f"Epoch {epoch + 1}, Loss: {total_loss / (i + 1):.4f}")
-        val_loss = evaluate(model, val_iter, device)
-        print(f"Epoch {epoch + 1}, Validation Loss: {val_loss:.4f}")
-    return model
+    for batch in data_loader:
+        optimizer.zero_grad()
+        input_ids = batch.to(device)
+        outputs = model(input_ids)
+        loss = outputs.loss
+        loss.backward()
+        optimizer.step()
+        total_loss += loss.item()
+    return total_loss / len(data_loader)
 
-def evaluate(model, val_iter, device):
+def evaluate(model, data_loader, device):
     model.eval()
     total_loss = 0
     with torch.no_grad():
-        for i, batch in enumerate(val_iter):
-            loss = model(batch.text, inference_params=None).loss
-            total_loss += loss.item()
-    return total_loss / (i + 1)
+        for batch in data_loader:
+            input_ids = batch.to(device)
+            outputs = model(input_ids)
+            total_loss += outputs.loss.item()
+    return total_loss / len(data_loader)
 
-def fsdp_wrapper(model, device, dtype):
-    model = model.to(device).type(dtype)
-    model = DistributedDataParallel(model, device_ids=[device], find_unused_parameters=True)
-    model = FullyShardedDataParallel(model, device_ids=[device], find_unused_parameters=True)
-    return model
+def setup_distributed(gpu, world_size):
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '12355'
+    dist.init_process_group("nccl", rank=gpu, world_size=world_size)
 
-def main(config_name, device, dtype, num_epochs, batch_size, num_workers, ctx_len):
-    train_iter, val_iter = load_dataset(batch_size, num_workers, ctx_len)
-    model = create_model(config_name, device, dtype)
-    model = fsdp_wrapper(model, device, dtype)
-    optimizer = optim.AdamW(model.parameters(), lr=3e-5, betas=(0.9, 0.98), eps=1e-8, weight_decay=0.01)
+def cleanup_distributed():
+    dist.destroy_process_group()
+
+def main_worker(gpu, args):
+    setup_distributed(gpu, args.world_size)
+    torch.cuda.set_device(gpu)
+    set_seed(42)
+
+    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name)
+    train_loader, val_loader = load_dataset(args.file_path, tokenizer, args.block_size, args.batch_size, args.num_workers)
+
+    model = create_model(gpu, torch.float16)
+    model = FSDP(model)
+    optimizer = optim.AdamW(model.parameters(), lr=3e-5)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=3, verbose=True)
-    model = train(model, train_iter, val_iter, device, optimizer, scheduler, num_epochs)
+
+    for epoch in range(args.num_epochs):
+        train_loss = train(model, train_loader, optimizer, gpu)
+        val_loss = evaluate(model, val_loader, gpu)
+        logging.info(f"GPU {gpu}, Epoch {epoch + 1}, Training Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}")
+        scheduler.step(val_loss)
+
+    cleanup_distributed()
 
 if __name__ == "__main__":
-    config_name = "mamba_mixer_config"
-    device = "cuda:0"
-    dtype = torch.bfloat16
-    num_epochs = 10
-    batch_size = 32
-    num_workers = 4
-    ctx_len = 1024  # Specify the desired context length
-    file_path = "./input.txt"
-    main(config_name, device, dtype, num_epochs, batch_size, num_workers, ctx_len)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--num_gpus", type=int, default=8, help="Number of GPUs to use")
+    parser.add_argument("--num_epochs", type=int, default=10)
+    parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument("--block_size", type=int, default=1024)
+    parser.add_argument("--file_path", type=str, default="./input.txt")
+    parser.add_argument("--tokenizer_name", type=str, default="EleutherAI/gpt-neox-20b")
+    args = parser.parse_args()
+    args.world_size = args.num_gpus
+
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '12355'
+    torch.multiprocessing.spawn(main_worker, nprocs=args.num_gpus, args=(args,))
