@@ -28,7 +28,7 @@ class TextDataset(Dataset):
         with open(file_path, 'r', encoding='utf-8') as file:
             text = file.read()
         tokens = self.tokenizer.encode(text, add_special_tokens=True)
-        return [tokens[i:i + self.block_size] for i in range(0, len(tokens), self.block_size)]
+        return [tokens[i:i + self.block_size] for i in range(0, len(tokens), 1)]
 
     def __len__(self):
         return len(self.data)
@@ -89,7 +89,7 @@ class MambaModel(pl.LightningModule):
         self.log('val_loss', loss, sync_dist=True)
 
     def configure_optimizers(self):
-        optimizer = optim.AdamW(self.parameters(), lr=3e-7)
+        optimizer = optim.AdamW(self.parameters(), lr=3e-5)
         lr_scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=3, verbose=True)
         return {"optimizer": optimizer, "lr_scheduler": lr_scheduler, "monitor": "val_loss"}
 
