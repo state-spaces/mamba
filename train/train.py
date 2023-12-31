@@ -1,4 +1,5 @@
-
+import os
+import argparse
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -6,23 +7,11 @@ from torch.utils.data import Dataset, DataLoader, random_split
 from torch.nn.utils.rnn import pad_sequence
 from mamba_ssm.models.mixer_seq_simple import MambaLMHeadModel
 from mamba_ssm.models.config_mamba import MambaConfig
-from torch.nn.parallel import DistributedDataParallel
 from transformers import AutoTokenizer
-import logging
-import random
+import pytorch_lightning as pl
+from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 import numpy as np
-from fairscale.nn.data_parallel import FullyShardedDataParallel as FSDP
-import torch.distributed as dist
-import os
-import argparse
-
-# Setup logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
-def set_seed(seed):
-    torch.manual_seed(seed)
-    np.random.seed(seed)
-    random.seed(seed)
+import random
 
 class TextDataset(Dataset):
     def __init__(self, file_path, tokenizer, block_size):
@@ -43,18 +32,59 @@ class TextDataset(Dataset):
         return torch.tensor(self.data[idx], dtype=torch.long)
 
 def collate_batch(batch):
-    return pad_sequence(batch, batch_first=True, padding_value=tokenizer.pad_token_id)
+    return pad_sequence(batch, batch_first=True, padding_value=0)
 
-def load_dataset(file_path, tokenizer, block_size, batch_size, num_workers, split_ratio=0.8):
-    dataset = TextDataset(file_path, tokenizer, block_size)
-    train_size = int(len(dataset) * split_ratio)
-    val_size = len(dataset) - train_size
-    train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, collate_fn=collate_batch)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, collate_fn=collate_batch)
-    return train_loader, val_loader
+class MambaDataModule(pl.LightningDataModule):
+    def __init__(self, file_path, tokenizer_name, block_size, batch_size, num_workers, split_ratio=0.8):
+        super().__init__()
+        self.file_path = file_path
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+        self.block_size = block_size
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+        self.split_ratio = split_ratio
 
-def create_model(device, dtype):
+    def setup(self, stage=None):
+        dataset = TextDataset(self.file_path, self.tokenizer, self.block_size)
+        train_size = int(len(dataset) * self.split_ratio)
+        val_size = len(dataset) - train_size
+        self.train_dataset, self.val_dataset = random_split(dataset, [train_size, val_size])
+
+    def train_dataloader(self):
+        return DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers, collate_fn=collate_batch, pin_memory=True)
+
+    def val_dataloader(self):
+        return DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers, collate_fn=collate_batch, pin_memory=True)
+
+class MambaModel(pl.LightningModule):
+    def __init__(self, mamba_config):
+        super().__init__()
+        self.model = MambaLMHeadModel(mamba_config, device=self.device, dtype=torch.float16)
+
+    def forward(self, input_ids):
+        return self.model(input_ids)
+
+    def training_step(self, batch, batch_idx):
+        input_ids = batch
+        outputs = self(input_ids)
+        loss = outputs.loss
+        self.log('train_loss', loss)
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        input_ids = batch
+        outputs = self(input_ids)
+        loss = outputs.loss
+        self.log('val_loss', loss)
+
+    def configure_optimizers(self):
+        optimizer = optim.AdamW(self.parameters(), lr=3e-5)
+        lr_scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=3, verbose=True)
+        return {"optimizer": optimizer, "lr_scheduler": lr_scheduler, "monitor": "val_loss"}
+
+def main(args):
+    pl.seed_everything(42)
+
     mamba_config = MambaConfig(
         d_model=2560,
         n_layer=64,
@@ -65,60 +95,17 @@ def create_model(device, dtype):
         fused_add_norm=True,
         pad_vocab_size_multiple=8
     )
-    model = MambaLMHeadModel(mamba_config, device=device, dtype=dtype)
-    return model
 
-def train(model, data_loader, optimizer, device):
-    model.train()
-    total_loss = 0
-    for batch in data_loader:
-        optimizer.zero_grad()
-        input_ids = batch.to(device)
-        outputs = model(input_ids)
-        loss = outputs.loss
-        loss.backward()
-        optimizer.step()
-        total_loss += loss.item()
-    return total_loss / len(data_loader)
+    model = MambaModel(mamba_config)
+    data_module = MambaDataModule(args.file_path, args.tokenizer_name, args.block_size, args.batch_size, args.num_workers)
 
-def evaluate(model, data_loader, device):
-    model.eval()
-    total_loss = 0
-    with torch.no_grad():
-        for batch in data_loader:
-            input_ids = batch.to(device)
-            outputs = model(input_ids)
-            total_loss += outputs.loss.item()
-    return total_loss / len(data_loader)
+    checkpoint_dir = './checkpoints'
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    checkpoint_callback = ModelCheckpoint(dirpath=checkpoint_dir, monitor='val_loss', save_top_k=3, mode='min')
+    lr_monitor = LearningRateMonitor(logging_interval='epoch')
 
-def setup_distributed(gpu, world_size):
-    os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12355'
-    dist.init_process_group("nccl", rank=gpu, world_size=world_size)
-
-def cleanup_distributed():
-    dist.destroy_process_group()
-
-def main_worker(gpu, args):
-    setup_distributed(gpu, args.world_size)
-    torch.cuda.set_device(gpu)
-    set_seed(42)
-
-    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name)
-    train_loader, val_loader = load_dataset(args.file_path, tokenizer, args.block_size, args.batch_size, args.num_workers)
-
-    model = create_model(gpu, torch.bfloat16)
-    model = FSDP(model)
-    optimizer = optim.AdamW(model.parameters(), lr=3e-5)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=3, verbose=True)
-
-    for epoch in range(args.num_epochs):
-        train_loss = train(model, train_loader, optimizer, gpu)
-        val_loss = evaluate(model, val_loader, gpu)
-        logging.info(f"GPU {gpu}, Epoch {epoch + 1}, Training Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}")
-        scheduler.step(val_loss)
-
-    cleanup_distributed()
+    trainer = pl.Trainer(max_epochs=args.num_epochs, gpus=args.num_gpus, callbacks=[checkpoint_callback, lr_monitor], precision='bf16')
+    trainer.fit(model, datamodule=data_module)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -130,8 +117,5 @@ if __name__ == "__main__":
     parser.add_argument("--file_path", type=str, default="./input.txt")
     parser.add_argument("--tokenizer_name", type=str, default="EleutherAI/gpt-neox-20b")
     args = parser.parse_args()
-    args.world_size = args.num_gpus
 
-    os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12355'
-    torch.multiprocessing.spawn(main_worker, nprocs=args.num_gpus, args=(args,))
+    main(args)
