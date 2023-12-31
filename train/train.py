@@ -68,16 +68,24 @@ class MambaModel(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         input_ids = batch
         outputs = self(input_ids)
-        loss = outputs.loss
+        # Shift the input ids to the right for the labels
+        labels = input_ids[:, 1:].contiguous()
+        logits = outputs.logits[:, :-1, :].contiguous()
+        # Calculate loss
+        loss = nn.CrossEntropyLoss()(logits.view(-1, logits.size(-1)), labels.view(-1))
         self.log('train_loss', loss)
         return loss
 
     def validation_step(self, batch, batch_idx):
         input_ids = batch
         outputs = self(input_ids)
-        loss = outputs.loss
+        # Similar shifting as in training_step
+        labels = input_ids[:, 1:].contiguous()
+        logits = outputs.logits[:, :-1, :].contiguous()
+        # Calculate loss
+        loss = nn.CrossEntropyLoss()(logits.view(-1, logits.size(-1)), labels.view(-1))
         self.log('val_loss', loss)
-
+    
     def configure_optimizers(self):
         optimizer = optim.AdamW(self.parameters(), lr=3e-5)
         lr_scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=3, verbose=True)
