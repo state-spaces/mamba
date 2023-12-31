@@ -4,12 +4,12 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader, random_split
 from torch.nn.utils.rnn import pad_sequence
 from mamba_ssm.models.mamba_lm_head_model import MambaLMHeadModel
+from mamba_ssm.models.config_mamba import MambaConfig
 from torch.nn.parallel import DistributedDataParallel
 from transformers import AutoTokenizer
 import logging
 import random
 import numpy as np
-from config_mamba import MambaConfig
 from fairscale.nn.data_parallel import FullyShardedDataParallel as FSDP
 import torch.distributed as dist
 import os
