@@ -11,8 +11,12 @@ from transformers import AutoTokenizer
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.loggers import TensorBoardLogger
-import numpy as np
-import random
+
+# Set the environment variable for tokenizers parallelism
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+# Set float32 matrix multiplication precision for CUDA device with Tensor Cores
+torch.set_float32_matmul_precision('medium')  # or 'high'
 
 class TextDataset(Dataset):
     def __init__(self, file_path, tokenizer, block_size):
@@ -60,32 +64,34 @@ class MambaDataModule(pl.LightningDataModule):
 class MambaModel(pl.LightningModule):
     def __init__(self, mamba_config):
         super().__init__()
-        self.model = MambaLMHeadModel(mamba_config, device=self.device, dtype=torch.float16)
+        self.model = MambaLMHeadModel(mamba_config, device=self.device, dtype=torch.float32)
 
     def forward(self, input_ids):
         return self.model(input_ids)
 
     def training_step(self, batch, batch_idx):
         input_ids = batch
-        outputs = self(input_ids)
-        # Shift the input ids to the right for the labels
-        labels = input_ids[:, 1:].contiguous()
-        logits = outputs.logits[:, :-1, :].contiguous()
-        # Calculate loss
-        loss = nn.CrossEntropyLoss()(logits.view(-1, logits.size(-1)), labels.view(-1))
+        with torch.cuda.amp.autocast():  # Enable automatic mixed precision
+            outputs = self(input_ids)
+            # Shift the input ids to the right for the labels
+            labels = input_ids[:, 1:].contiguous()
+            logits = outputs.logits[:, :-1, :].contiguous()
+            # Calculate loss
+            loss = nn.CrossEntropyLoss()(logits.view(-1, logits.size(-1)), labels.view(-1))
         self.log('train_loss', loss)
         return loss
 
     def validation_step(self, batch, batch_idx):
         input_ids = batch
-        outputs = self(input_ids)
-        # Similar shifting as in training_step
-        labels = input_ids[:, 1:].contiguous()
-        logits = outputs.logits[:, :-1, :].contiguous()
-        # Calculate loss
-        loss = nn.CrossEntropyLoss()(logits.view(-1, logits.size(-1)), labels.view(-1))
+        with torch.cuda.amp.autocast():  # Enable automatic mixed precision
+            outputs = self(input_ids)
+            # Similar shifting as in training_step
+            labels = input_ids[:, 1:].contiguous()
+            logits = outputs.logits[:, :-1, :].contiguous()
+            # Calculate loss
+            loss = nn.CrossEntropyLoss()(logits.view(-1, logits.size(-1)), labels.view(-1))
         self.log('val_loss', loss)
-    
+
     def configure_optimizers(self):
         optimizer = optim.AdamW(self.parameters(), lr=3e-5)
         lr_scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=3, verbose=True)
@@ -113,17 +119,17 @@ def main(args):
     checkpoint_callback = ModelCheckpoint(dirpath=checkpoint_dir, monitor='val_loss', save_top_k=3, mode='min')
     lr_monitor = LearningRateMonitor(logging_interval='epoch')
 
-    # Define a TensorBoard logger for more frequent logging
     logger = TensorBoardLogger("tb_logs", name="mamba_model")
 
-    # Update the trainer initialization
     trainer = pl.Trainer(
         max_epochs=args.num_epochs,
         logger=logger,
-        accelerator='gpu',  # Use 'gpu' instead of 'gpus' for newer versions
-        devices=args.num_gpus,  # Specify the number of GPUs here
+        accelerator='gpu',
+        devices=args.num_gpus,
         callbacks=[checkpoint_callback, lr_monitor],
-        precision=16  # Use 16 for mixed precision training
+        precision=32,  # Keep the default precision as float32
+        amp_backend='native',
+        amp_level='O2'
     )
     trainer.fit(model, datamodule=data_module)
 
