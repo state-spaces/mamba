@@ -19,16 +19,17 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 torch.set_float32_matmul_precision('medium')  # or 'high'
 
 class TextDataset(Dataset):
-    def __init__(self, file_path, tokenizer, block_size):
+    def __init__(self, file_path, tokenizer, block_size, stride):
         self.tokenizer = tokenizer
         self.block_size = block_size
+        self.stride = stride
         self.data = self._load_data(file_path)
 
     def _load_data(self, file_path):
         with open(file_path, 'r', encoding='utf-8') as file:
             text = file.read()
         tokens = self.tokenizer.encode(text, add_special_tokens=True)
-        return [tokens[i:i + self.block_size] for i in range(0, len(tokens), 1)]
+        return [tokens[i:i + self.block_size] for i in range(0, len(tokens), self.stride)]
 
     def __len__(self):
         return len(self.data)
@@ -40,17 +41,18 @@ def collate_batch(batch):
     return pad_sequence(batch, batch_first=True, padding_value=0)
 
 class MambaDataModule(pl.LightningDataModule):
-    def __init__(self, file_path, tokenizer_name, block_size, batch_size, num_workers, split_ratio=0.8):
+    def __init__(self, file_path, tokenizer_name, block_size, stride, batch_size, num_workers, split_ratio=0.8):
         super().__init__()
         self.file_path = file_path
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
         self.block_size = block_size
+        self.stride = stride
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.split_ratio = split_ratio
 
     def setup(self, stage=None):
-        dataset = TextDataset(self.file_path, self.tokenizer, self.block_size)
+        dataset = TextDataset(self.file_path, self.tokenizer, self.block_size, self.stride)
         train_size = int(len(dataset) * self.split_ratio)
         val_size = len(dataset) - train_size
         self.train_dataset, self.val_dataset = random_split(dataset, [train_size, val_size])
@@ -108,7 +110,7 @@ def main(args):
     )
 
     model = MambaModel(mamba_config)
-    data_module = MambaDataModule(args.file_path, args.tokenizer_name, args.block_size, args.batch_size, args.num_workers)
+    data_module = MambaDataModule(args.file_path, args.tokenizer_name, args.block_size, args.stride, args.batch_size, args.num_workers)
 
     checkpoint_dir = './checkpoints'
     os.makedirs(checkpoint_dir, exist_ok=True)
@@ -135,6 +137,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--block_size", type=int, default=1024)
+    parser.add_argument("--stride", type=int, default=32)
     parser.add_argument("--file_path", type=str, default="./input.txt")
     parser.add_argument("--tokenizer_name", type=str, default="EleutherAI/gpt-neox-20b")
     args = parser.parse_args()
