@@ -1,9 +1,10 @@
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader, random_split
 from torch.nn.utils.rnn import pad_sequence
-from mamba_ssm.models.mamba_lm_head_model import MambaLMHeadModel
+from mamba_ssm.models.mixer_seq_simple import MambaLMHeadModel
 from mamba_ssm.models.config_mamba import MambaConfig
 from torch.nn.parallel import DistributedDataParallel
 from transformers import AutoTokenizer
@@ -106,7 +107,7 @@ def main_worker(gpu, args):
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name)
     train_loader, val_loader = load_dataset(args.file_path, tokenizer, args.block_size, args.batch_size, args.num_workers)
 
-    model = create_model(gpu, torch.float16)
+    model = create_model(gpu, torch.bfloat16)
     model = FSDP(model)
     optimizer = optim.AdamW(model.parameters(), lr=3e-5)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=3, verbose=True)
