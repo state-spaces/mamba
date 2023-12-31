@@ -1,5 +1,6 @@
 packaging
 wheel
 fairscale
+pytorch-lightning
 torch==2.1.0
 transformers==4.35.0
