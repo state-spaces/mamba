@@ -76,7 +76,7 @@ class MambaModel(pl.LightningModule):
             labels = input_ids[:, 1:].contiguous()
             logits = outputs.logits[:, :-1, :].contiguous()
             loss = nn.CrossEntropyLoss()(logits.view(-1, logits.size(-1)), labels.view(-1))
-        self.log('train_loss', loss)
+        self.log('train_loss', loss, sync_dist=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -86,10 +86,10 @@ class MambaModel(pl.LightningModule):
             labels = input_ids[:, 1:].contiguous()
             logits = outputs.logits[:, :-1, :].contiguous()
             loss = nn.CrossEntropyLoss()(logits.view(-1, logits.size(-1)), labels.view(-1))
-        self.log('val_loss', loss)
+        self.log('val_loss', loss, sync_dist=True)
 
     def configure_optimizers(self):
-        optimizer = optim.AdamW(self.parameters(), lr=3e-5)
+        optimizer = optim.AdamW(self.parameters(), lr=3e-7)
         lr_scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=3, verbose=True)
         return {"optimizer": optimizer, "lr_scheduler": lr_scheduler, "monitor": "val_loss"}
 
@@ -97,8 +97,8 @@ def main(args):
     pl.seed_everything(42)
 
     mamba_config = MambaConfig(
-        d_model=2560,
-        n_layer=64,
+        d_model=1280,
+        n_layer=32,
         vocab_size=50277,
         ssm_cfg={},
         rms_norm=True,
@@ -120,10 +120,11 @@ def main(args):
     trainer = pl.Trainer(
         max_epochs=args.num_epochs,
         logger=logger,
+        log_every_n_steps=1,
         accelerator='gpu',
         devices=args.num_gpus,
         callbacks=[checkpoint_callback, lr_monitor],
-        precision=16  # Using 16 for mixed precision training while keeping model parameters in float32
+        precision='16-mixed'  # Using 16 for mixed precision training while keeping model parameters in float32
     )
     trainer.fit(model, datamodule=data_module)
 
