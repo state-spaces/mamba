@@ -64,7 +64,7 @@ class MambaDataModule(pl.LightningDataModule):
 class MambaModel(pl.LightningModule):
     def __init__(self, mamba_config):
         super().__init__()
-        self.model = MambaLMHeadModel(mamba_config, device=self.device, dtype=torch.float32)
+        self.model = MambaLMHeadModel(mamba_config)
 
     def forward(self, input_ids):
         return self.model(input_ids)
@@ -73,10 +73,8 @@ class MambaModel(pl.LightningModule):
         input_ids = batch
         with torch.cuda.amp.autocast():  # Enable automatic mixed precision
             outputs = self(input_ids)
-            # Shift the input ids to the right for the labels
             labels = input_ids[:, 1:].contiguous()
             logits = outputs.logits[:, :-1, :].contiguous()
-            # Calculate loss
             loss = nn.CrossEntropyLoss()(logits.view(-1, logits.size(-1)), labels.view(-1))
         self.log('train_loss', loss)
         return loss
@@ -85,10 +83,8 @@ class MambaModel(pl.LightningModule):
         input_ids = batch
         with torch.cuda.amp.autocast():  # Enable automatic mixed precision
             outputs = self(input_ids)
-            # Similar shifting as in training_step
             labels = input_ids[:, 1:].contiguous()
             logits = outputs.logits[:, :-1, :].contiguous()
-            # Calculate loss
             loss = nn.CrossEntropyLoss()(logits.view(-1, logits.size(-1)), labels.view(-1))
         self.log('val_loss', loss)
 
@@ -127,9 +123,7 @@ def main(args):
         accelerator='gpu',
         devices=args.num_gpus,
         callbacks=[checkpoint_callback, lr_monitor],
-        precision=32,  # Keep the default precision as float32
-        amp_backend='native',
-        amp_level='O2'
+        precision=16  # Using 16 for mixed precision training while keeping model parameters in float32
     )
     trainer.fit(model, datamodule=data_module)
 
