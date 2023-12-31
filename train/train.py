@@ -10,6 +10,7 @@ from mamba_ssm.models.config_mamba import MambaConfig
 from transformers import AutoTokenizer
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
+from pytorch_lightning.loggers import TensorBoardLogger
 import numpy as np
 import random
 
@@ -104,7 +105,18 @@ def main(args):
     checkpoint_callback = ModelCheckpoint(dirpath=checkpoint_dir, monitor='val_loss', save_top_k=3, mode='min')
     lr_monitor = LearningRateMonitor(logging_interval='epoch')
 
-    trainer = pl.Trainer(max_epochs=args.num_epochs, gpus=args.num_gpus, callbacks=[checkpoint_callback, lr_monitor], precision='bf16')
+    # Define a TensorBoard logger for more frequent logging
+    logger = TensorBoardLogger("tb_logs", name="mamba_model")
+
+    # Update the trainer initialization
+    trainer = pl.Trainer(
+        max_epochs=args.num_epochs,
+        logger=logger,
+        accelerator='gpu',  # Use 'gpu' instead of 'gpus' for newer versions
+        devices=args.num_gpus,  # Specify the number of GPUs here
+        callbacks=[checkpoint_callback, lr_monitor],
+        precision=16  # Use 16 for mixed precision training
+    )
     trainer.fit(model, datamodule=data_module)
 
 if __name__ == "__main__":
