@@ -97,6 +97,10 @@ class MambaModel(pl.LightningModule):
         lr_scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=3, verbose=True)
         return {"optimizer": optimizer, "lr_scheduler": lr_scheduler, "monitor": "val_loss"}
 
+    # forward save_pretrained to model
+    def save_pretrained(self, *args, **kwargs):
+        return self.model.save_pretrained(*args, **kwargs)
+
 def main(args):
     pl.seed_everything(42)
 
