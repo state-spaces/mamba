@@ -22,7 +22,7 @@ dtype = torch.float16
 # Loading the model from the spiritual checkpoint
 print(f"Loading model from the checkpoint: {args.checkpoint_path}")
 tokenizer = AutoTokenizer.from_pretrained("EleutherAI/gpt-neox-20b")
-model = MambaLMHeadModel.from_pretrained(args.checkpoint_path).to(device)
+model = MambaLMHeadModel.from_pretrained(args.checkpoint_path, on_hf=False).to(device)
 model.eval()
 
 # Preparing the prompt
