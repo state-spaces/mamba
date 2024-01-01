@@ -78,7 +78,9 @@ class MambaModel(pl.LightningModule):
             labels = input_ids[:, 1:].contiguous()
             logits = outputs.logits[:, :-1, :].contiguous()
             loss = nn.CrossEntropyLoss()(logits.view(-1, logits.size(-1)), labels.view(-1))
+            perplexity = torch.exp(loss)
         self.log('train_loss', loss, sync_dist=True)
+        self.log('train_perplexity', perplexity, sync_dist=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
