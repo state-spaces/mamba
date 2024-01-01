@@ -3,6 +3,7 @@ import time
 import torch
 from transformers import AutoTokenizer
 from mamba_ssm.models.mixer_seq_simple import MambaLMHeadModel
+from mamba_ssm.models.config_mamba import MambaConfig
 
 # Setting up the parser for command line arguments
 parser = argparse.ArgumentParser(description="mamba model generation")
