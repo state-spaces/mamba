@@ -22,7 +22,25 @@ dtype = torch.float16
 # Loading the model from the spiritual checkpoint
 print(f"Loading model from the checkpoint: {args.checkpoint_path}")
 tokenizer = AutoTokenizer.from_pretrained("EleutherAI/gpt-neox-20b")
-model = MambaLMHeadModel.from_pretrained(args.checkpoint_path).to(device)
+
+#model = MambaLMHeadModel.from_pretrained(args.checkpoint_path).to(device)
+# Initialize the model with the same configuration as used during training
+mamba_config = MambaConfig(
+    d_model=1280,
+    n_layer=32,
+    vocab_size=50277,
+    ssm_cfg={},
+    rms_norm=True,
+    residual_in_fp32=True,
+    fused_add_norm=True,
+    pad_vocab_size_multiple=8
+)
+model = MambaLMHeadModel(mamba_config).to(device)
+
+# Load the state dictionary from the checkpoint file
+checkpoint = torch.load(args.checkpoint_path, map_location=device)
+model.load_state_dict(checkpoint['state_dict'])
+
 model.eval()
 
 # Preparing the prompt
