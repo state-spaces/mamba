@@ -100,6 +100,9 @@ class MambaModel(pl.LightningModule):
 def main(args):
     pl.seed_everything(42)
 
+    # mkdir the output dir
+    os.makedirs(args.output_dir, exist_ok=True)
+
     mamba_config = MambaConfig(
         d_model=1280,
         n_layer=32,
@@ -114,7 +117,7 @@ def main(args):
     model = MambaModel(mamba_config)
     data_module = MambaDataModule(args.file_path, args.tokenizer_name, args.block_size, args.stride, args.batch_size, args.num_workers)
 
-    checkpoint_dir = './checkpoints'
+    checkpoint_dir = os.path.join(args.output_dir, 'checkpoints')
     os.makedirs(checkpoint_dir, exist_ok=True)
     checkpoint_callback = ModelCheckpoint(dirpath=checkpoint_dir, monitor='val_loss', save_top_k=3, mode='min')
     lr_monitor = LearningRateMonitor(logging_interval='epoch')
@@ -132,6 +135,10 @@ def main(args):
     )
     trainer.fit(model, datamodule=data_module)
 
+    # save the model
+    model_path = os.path.join(args.output_dir, args.model_name)
+    model.save_pretrained(model_path)
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--num_gpus", type=int, default=8, help="Number of GPUs to use")
@@ -142,6 +149,8 @@ if __name__ == "__main__":
     parser.add_argument("--stride", type=int, default=32)
     parser.add_argument("--file_path", type=str, default="./input.txt")
     parser.add_argument("--tokenizer_name", type=str, default="EleutherAI/gpt-neox-20b")
+    parser.add_argument("--model_name", type=str, default="mamba_model")
+    parser.add_argument("--output_dir", type=str, default="./")
     args = parser.parse_args()
 
     main(args)
