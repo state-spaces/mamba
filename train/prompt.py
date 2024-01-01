@@ -3,10 +3,9 @@ import time
 import torch
 from transformers import AutoTokenizer
 from mamba_ssm.models.mixer_seq_simple import MambaLMHeadModel
-from mamba_ssm.models.config_mamba import MambaConfig
 
 # Setting up the parser for command line arguments
-parser = argparse.ArgumentParser(description="mamba model generation")
+parser = argparse.ArgumentParser(description="mamba model generation tool")
 parser.add_argument("--checkpoint_path", type=str, required=True, help="Path to the trained model checkpoint")
 parser.add_argument("--prompt", type=str, default=None, help="Initial text to start generation")
 parser.add_argument("--genlen", type=int, default=100, help="Length of the generation")
@@ -23,25 +22,7 @@ dtype = torch.float16
 # Loading the model from the spiritual checkpoint
 print(f"Loading model from the checkpoint: {args.checkpoint_path}")
 tokenizer = AutoTokenizer.from_pretrained("EleutherAI/gpt-neox-20b")
-
-#model = MambaLMHeadModel.from_pretrained(args.checkpoint_path).to(device)
-# Initialize the model with the same configuration as used during training
-mamba_config = MambaConfig(
-    d_model=1280,
-    n_layer=32,
-    vocab_size=50277,
-    ssm_cfg={},
-    rms_norm=True,
-    residual_in_fp32=True,
-    fused_add_norm=True,
-    pad_vocab_size_multiple=8
-)
-model = MambaLMHeadModel(mamba_config).to(device)
-
-# Load the state dictionary from the checkpoint file
-checkpoint = torch.load(args.checkpoint_path, map_location=device)
-model.load_state_dict(checkpoint['state_dict'])
-
+model = MambaLMHeadModel.from_pretrained(args.checkpoint_path).to(device)
 model.eval()
 
 # Preparing the prompt
