@@ -45,18 +45,21 @@ max_length = input_ids.shape[1] + args.genlen
 
 # Generation settings
 max_length = input_ids.shape[1] + args.genlen
-generation_function = lambda: model.generate(
+
+fn = lambda: model.generate(
     input_ids=input_ids,
     max_length=max_length,
+    cg=True,
+    return_dict_in_generate=True,
+    output_scores=True,
+    enable_timing=False,
     temperature=args.temperature,
     top_k=args.topk,
     top_p=args.topp,
-    repetition_penalty=args.repetition_penalty
+    repetition_penalty=args.repetition_penalty,
 )
 
 # Generate and decode the text
-output = generation_function()
+out = fn()
 if args.prompt is not None:
-    print(tokenizer.batch_decode(output.sequences.tolist()))
-
-generated_text = tokenizer.decode(output[0], skip_special_tokens=True)
+    print(tokenizer.batch_decode(out.sequences.tolist()))
