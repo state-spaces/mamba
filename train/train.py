@@ -10,6 +10,7 @@ from mamba_ssm.models.mixer_seq_simple import MambaLMHeadModel
 from mamba_ssm.models.config_mamba import MambaConfig
 from transformers import AutoTokenizer
 import pytorch_lightning as pl
+from lightning.pytorch.strategies import FSDPStrategy
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.loggers import TensorBoardLogger
 
@@ -148,6 +149,7 @@ def main(args):
         logger=logger,
         log_every_n_steps=1,
         accelerator='gpu',
+        strategy=FSDPStrategy(),
         devices=args.num_gpus,
         callbacks=[checkpoint_callback, lr_monitor],
         precision='16-mixed'  # Using 16 for mixed precision training while keeping model parameters in float32
