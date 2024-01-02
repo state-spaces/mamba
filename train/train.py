@@ -15,7 +15,7 @@ from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.loggers import TensorBoardLogger
 
 # Set the environment variable for tokenizers parallelism
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
 # Set float32 matrix multiplication precision for CUDA device with Tensor Cores
 torch.set_float32_matmul_precision('medium')  # or 'high'
