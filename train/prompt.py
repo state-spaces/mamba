@@ -32,6 +32,17 @@ if args.prompt is None:
 else:
     input_ids = tokenizer.encode(args.prompt, return_tensors="pt").to(device)
 
+torch.random.manual_seed(0)
+if args.prompt is None:
+    input_ids = torch.randint(1, 1000, (args.batch, args.promptlen), dtype=torch.long, device="cuda")
+    attn_mask = torch.ones_like(input_ids, dtype=torch.long, device="cuda")
+else:
+    tokens = tokenizer(args.prompt, return_tensors="pt")
+    input_ids = tokens.input_ids.to(device=device)
+    attn_mask = tokens.attention_mask.to(device=device)
+max_length = input_ids.shape[1] + args.genlen
+
+
 # Generation settings
 max_length = input_ids.shape[1] + args.genlen
 generation_function = lambda: model.generate(
@@ -45,11 +56,7 @@ generation_function = lambda: model.generate(
 
 # Generate and decode the text
 output = generation_function()
-generated_text = tokenizer.decode(output[0], skip_special_tokens=True)
-print("Generated Text:\n", generated_text)
+if args.prompt is not None:
+    print(tokenizer.batch_decode(output.sequences.tolist()))
 
-# Benchmarking the generation time
-start_time = time.time()
-generation_function()
-end_time = time.time()
-print(f"Generation Time: {end_time - start_time:.2f} seconds")
+generated_text = tokenizer.decode(output[0], skip_special_tokens=True)
