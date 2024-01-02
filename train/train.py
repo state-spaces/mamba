@@ -3,6 +3,7 @@ import argparse
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import numpy as np
 from torch.utils.data import Dataset, DataLoader, random_split
 from torch.nn.utils.rnn import pad_sequence
 from mamba_ssm.models.mixer_seq_simple import MambaLMHeadModel
@@ -23,19 +24,34 @@ class TextDataset(Dataset):
         self.tokenizer = tokenizer
         self.block_size = block_size
         self.stride = stride
-        self.data = self._load_data(file_path)
+        self.data_file, self.total_tokens = self._process_data(file_path)
+        # Create a memory-mapped array once and use it throughout the instance
+        self.mmap_array = np.load(self.data_file, mmap_mode='r')
 
-    def _load_data(self, file_path):
-        with open(file_path, 'r', encoding='utf-8') as file:
-            text = file.read()
-        tokens = self.tokenizer.encode(text, add_special_tokens=True)
-        return [tokens[i:i + self.block_size] for i in range(0, len(tokens), self.stride)]
+    def _process_data(self, file_path):
+        tokenized_file_path = file_path + '.npy'
+        if not os.path.exists(tokenized_file_path):
+            with open(file_path, 'r', encoding='utf-8') as file:
+                text = file.read()
+            tokens = self.tokenizer.encode(text, add_special_tokens=True)
+            token_array = np.array(tokens, dtype=np.int32)
+            np.save(tokenized_file_path, token_array)
+            total_tokens = len(token_array)
+        else:
+            # Load just to get the total number of tokens
+            total_tokens = len(np.load(tokenized_file_path, mmap_mode='r'))
+        return tokenized_file_path, total_tokens
 
     def __len__(self):
-        return len(self.data)
+        # Calculate the number of samples based on block size and stride
+        return (self.total_tokens - self.block_size + self.stride) // self.stride
 
     def __getitem__(self, idx):
-        return torch.tensor(self.data[idx], dtype=torch.long)
+        start = idx * self.stride
+        end = start + self.block_size
+        # Directly use the pre-loaded memory-mapped array
+        token_slice = self.mmap_array[start:end]
+        return torch.tensor(token_slice, dtype=torch.long)
 
 def collate_batch(batch):
     return pad_sequence(batch, batch_first=True, padding_value=0)

@@ -42,7 +42,6 @@ else:
     attn_mask = tokens.attention_mask.to(device=device)
 max_length = input_ids.shape[1] + args.genlen
 
-
 # Generation settings
 max_length = input_ids.shape[1] + args.genlen
 
