@@ -28,7 +28,7 @@ model.eval()
 # Preparing the prompt
 torch.random.manual_seed(0)
 if args.prompt is None:
-    input_ids = torch.randint(1, 1000, (1, args.promptlen), dtype=torch.long, device=device)
+    input_ids = torch.randint(1, 1000, (1, args.genlen), dtype=torch.long, device=device)
 else:
     input_ids = tokenizer.encode(args.prompt, return_tensors="pt").to(device)
 
