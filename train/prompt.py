@@ -17,8 +17,7 @@ args = parser.parse_args()
 
 # Device configuration
 device = "cuda" if torch.cuda.is_available() else "cpu"
-#dtype = torch.bfloat16 if device == "cuda" else torch.float32
-dtype = torch.float32
+dtype = torch.bfloat16 if device == "cuda" else torch.float32
 
 # Loading the model from the spiritual checkpoint
 print(f"Loading model from the checkpoint: {args.checkpoint_path}")
