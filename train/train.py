@@ -118,7 +118,7 @@ class MambaModel(pl.LightningModule):
     def save_pretrained(self, output, trainer):
         return self.model.save_pretrained_fsdp(output, trainer)
 
-    def on_save_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
+    def on_save_checkpoint(self, checkpoint):
         if not checkpoint.get("state_dict", None):
             state_dict = self.trainer.model.state_dict()
             checkpoint["state_dict"] = state_dict
