@@ -273,22 +273,3 @@ class MambaLMHeadModel(nn.Module, GenerationMixin):
         config_path = os.path.join(save_directory, 'config.json')
         with open(config_path, 'w') as f:
             json.dump(self.config.__dict__, f)
-
-    def save_pretrained_fsdp(self, save_directory, trainer):
-        """
-        Minimal implementation of save_pretrained for MambaLMHeadModel.
-        Adapted for FSDP training with lightning.
-        Save the model and its configuration file to a directory.
-        """
-        # Ensure save_directory exists
-        if not os.path.exists(save_directory):
-            os.makedirs(save_directory)
-
-        # Save the model checkpoint using Lightning's checkpointing system
-        model_path = os.path.join(save_directory, 'pytorch_model.bin')
-        trainer.save_checkpoint(model_path)
-
-        # Save the configuration of the model
-        config_path = os.path.join(save_directory, 'config.json')
-        with open(config_path, 'w') as f:
-            json.dump(self.config.__dict__, f)

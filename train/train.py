@@ -115,8 +115,8 @@ class MambaModel(pl.LightningModule):
         return {"optimizer": optimizer, "lr_scheduler": lr_scheduler, "monitor": "val_loss"}
 
     # forward save_pretrained to model
-    def save_pretrained(self, output, trainer):
-        return self.model.save_pretrained_fsdp(output, trainer)
+    def save_pretrained(self, *args, **kwargs):
+        return self.model.save_pretrained(*args, **kwargs)
 
 def main(args):
     pl.seed_everything(42)
