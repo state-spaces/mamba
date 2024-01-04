@@ -118,12 +118,6 @@ class MambaModel(pl.LightningModule):
     def save_pretrained(self, output, trainer):
         return self.model.save_pretrained_fsdp(output, trainer)
 
-    def on_save_checkpoint(self, checkpoint):
-        if not checkpoint.get("state_dict", None):
-            state_dict = self.trainer.model.state_dict()
-            checkpoint["state_dict"] = state_dict
-        return super().on_save_checkpoint(checkpoint)
-
 def main(args):
     pl.seed_everything(42)
 
@@ -162,7 +156,9 @@ def main(args):
     )
     trainer.fit(model, datamodule=data_module)
 
-    trainer.save_checkpoint(os.path.join(args.output_dir, "model.ckpt"))
+    # save the model
+    model_path = os.path.join(args.output_dir, args.model_name)
+    model.save_pretrained(model_path, trainer)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
