@@ -118,6 +118,15 @@ class MambaModel(pl.LightningModule):
     def save_pretrained(self, *args, **kwargs):
         return self.model.save_pretrained(*args, **kwargs)
 
+    #def on_save_checkpoint(self, checkpoint):
+    #    """
+    #    Tentative fix for FSDP checkpointing issue
+    #    """
+    #    if not checkpoint.get("state_dict", None):
+    #        state_dict = self.trainer.model.state_dict()
+    #        checkpoint["state_dict"] = state_dict
+    #    return super().on_save_checkpoint(checkpoint)
+
 def main(args):
     pl.seed_everything(42)
 
@@ -156,9 +165,16 @@ def main(args):
     )
     trainer.fit(model, datamodule=data_module)
 
+    # get the last checkpoint
+    checkpoint = torch.load(trainer.checkpoint_callback.best_model_path)
+    print(list(checkpoint["state_dict"].keys()))
+    for param in checkpoint["state_dict"].values():
+        print(param.shape)
+        print(param.sum())
+    
     # save the model
-    model_path = os.path.join(args.output_dir, args.model_name)
-    model.save_pretrained(model_path)
+    #model_path = os.path.join(args.output_dir, args.model_name)
+    #model.save_pretrained(model_path)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
