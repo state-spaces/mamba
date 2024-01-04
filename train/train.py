@@ -158,7 +158,7 @@ def main(args):
 
     # save the model
     model_path = os.path.join(args.output_dir, args.model_name)
-    model.save_pretrained(model_path)
+    model.save_pretrained_fsdp(model_path, trainer)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
