@@ -239,7 +239,6 @@ class MambaLMHeadModel(nn.Module, GenerationMixin):
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name, device=None, dtype=None, on_hf=True, **kwargs):
-        print("Loading pretrained model from {}".format(pretrained_model_name))
         if on_hf:
             config_data = load_config_hf(pretrained_model_name)
             config = MambaConfig(**config_data)

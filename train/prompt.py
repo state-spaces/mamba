@@ -20,7 +20,7 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 dtype = torch.bfloat16 if device == "cuda" else torch.float32
 
 # Loading the model from the spiritual checkpoint
-print(f"Loading model from the checkpoint: {args.checkpoint_path}")
+#print(f"Loading model from the checkpoint: {args.checkpoint_path}")
 tokenizer = AutoTokenizer.from_pretrained("EleutherAI/gpt-neox-20b")
 model = MambaLMHeadModel.from_pretrained(args.checkpoint_path, on_hf=False).to(device)
 model.eval()
