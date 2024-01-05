@@ -61,4 +61,6 @@ fn = lambda: model.generate(
 # Generate and decode the text
 out = fn()
 if args.prompt is not None:
-    print(tokenizer.batch_decode(out.sequences.tolist()))
+    for elem in tokenizer.batch_decode(out.sequences.tolist()):
+        print(elem)
+    
