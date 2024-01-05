@@ -169,8 +169,25 @@ def main(args):
 
     # save the model
     model_path = os.path.join(args.output_dir, args.model_name)
+    #if not os.path.exists(model_path):
+    #    os.makedirs(model_path)
+
+    # get the last checkpoint
+    checkpoint = torch.load(trainer.checkpoint_callback.best_model_path)
+
+    # load the last checkpoint on cpu
+    checkpoint.to("cpu")
+
+    checkpoint.save_pretrained(model_path)
+    
     # write it to the output path
-    model.model.save_pretrained(model_path)
+    #model.save_pretrained(model_path)
+    
+    #shutil.copyfile(trainer.checkpoint_callback.best_model_path, model_path + '/pytorch_model.bin')
+    # save the config
+    #config_path = os.path.join(model_path, 'config.json')
+    #with open(config_path, 'w') as f:
+    #    json.dump(mamba_config.__dict__, f)
 
 
 if __name__ == "__main__":
