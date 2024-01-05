@@ -108,6 +108,7 @@ def decode(
     input_ids,
     model,
     max_length,
+    attention_mask=None,
     top_k=1,
     top_p=0.0,
     temperature=1.0,
@@ -171,10 +172,11 @@ def decode(
                 position_ids=position_ids,
                 inference_params=inference_params,
                 num_last_tokens=1,
+                attention_mask=attention_mask,  # mask is not used in incremental step() calls, so don't update
             ).logits.squeeze(dim=1)
         else:
             logits = model._decoding_cache.run(
-                input_ids, position_ids, inference_params.seqlen_offset
+                input_ids, attention_mask, position_ids, inference_params.seqlen_offset
             ).squeeze(dim=1)
         return logits[..., :vocab_size] if vocab_size is not None else logits
 
@@ -234,6 +236,7 @@ class GenerationMixin:
         self,
         input_ids,
         max_length,
+        attention_mask=None,
         top_k=1,
         top_p=0.0,
         temperature=1.0,
@@ -242,7 +245,7 @@ class GenerationMixin:
         **kwargs,
     ):
         output = decode(
-            input_ids, self, max_length, top_k=top_k, top_p=top_p, temperature=temperature, **kwargs
+            input_ids, self, max_length, attention_mask=attention_mask, top_k=top_k, top_p=top_p, temperature=temperature, **kwargs
         )
         if not output_scores:
             output.scores = None
@@ -312,9 +315,9 @@ def update_graph_cache(
                 n_warmups=n_warmups,
             )
 
-    def dispatch(input_ids, position_ids, seqlen):
+    def dispatch(input_ids, attention_mask, position_ids, seqlen):
         batch_size, decoding_seqlen = input_ids.shape[:2]
-        return cache.callables[batch_size, decoding_seqlen](input_ids, position_ids, seqlen)
+        return cache.callables[batch_size, decoding_seqlen](input_ids, attention_mask, position_ids, seqlen)
 
     cache.run = dispatch
     cache.inference_params.seqlen_offset = 0  # Reset so it's not confusing
@@ -326,6 +329,7 @@ def capture_graph(
 ):
     device = next(iter(model.parameters())).device
     input_ids = torch.full((batch_size, decoding_seqlen), 0, dtype=torch.long, device=device)
+    attention_mask = torch.full((batch_size, decoding_seqlen), 1, dtype=torch.long, device=device)
     position_ids = torch.full((batch_size, decoding_seqlen), 0, dtype=torch.long, device=device)
     seqlen_offset_og = inference_params.seqlen_offset
     inference_params.seqlen_offset = max_seqlen - decoding_seqlen
@@ -338,6 +342,7 @@ def capture_graph(
         for _ in range(n_warmups):
             logits = model(
                 input_ids,
+                attention_mask=attention_mask,
                 position_ids=position_ids,
                 inference_params=inference_params,
                 num_last_tokens=decoding_seqlen,
@@ -355,12 +360,13 @@ def capture_graph(
     with torch.cuda.graph(graph, pool=mempool):
         logits = model(
             input_ids,
+            attention_mask=attention_mask,
             position_ids=position_ids,
             inference_params=inference_params,
             num_last_tokens=decoding_seqlen,
         ).logits
 
-    def run(new_input_ids, new_position_ids, seqlen):
+    def run(new_input_ids, attention_mask, new_position_ids, seqlen):
         inference_params.lengths_per_sample[:] = seqlen
         input_ids.copy_(new_input_ids)
         position_ids.copy_(new_position_ids)

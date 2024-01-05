@@ -31,11 +31,12 @@ def create_block(
     layer_idx=None,
     device=None,
     dtype=None,
+    use_fast_path=True,
 ):
     if ssm_cfg is None:
         ssm_cfg = {}
     factory_kwargs = {"device": device, "dtype": dtype}
-    mixer_cls = partial(Mamba, layer_idx=layer_idx, **ssm_cfg, **factory_kwargs)
+    mixer_cls = partial(Mamba, layer_idx=layer_idx, use_fast_path=use_fast_path, **ssm_cfg, **factory_kwargs)
     norm_cls = partial(
         nn.LayerNorm if not rms_norm else RMSNorm, eps=norm_epsilon, **factory_kwargs
     )
@@ -97,6 +98,7 @@ class MixerModel(nn.Module):
         residual_in_fp32=False,
         device=None,
         dtype=None,
+        use_fast_path=True,
     ) -> None:
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
@@ -124,6 +126,7 @@ class MixerModel(nn.Module):
                     residual_in_fp32=residual_in_fp32,
                     fused_add_norm=fused_add_norm,
                     layer_idx=i,
+                    use_fast_path=use_fast_path,
                     **factory_kwargs,
                 )
                 for i in range(n_layer)
@@ -148,12 +151,12 @@ class MixerModel(nn.Module):
             for i, layer in enumerate(self.layers)
         }
 
-    def forward(self, input_ids, inference_params=None):
+    def forward(self, input_ids, mask=None, inference_params=None):
         hidden_states = self.embedding(input_ids)
         residual = None
         for layer in self.layers:
             hidden_states, residual = layer(
-                hidden_states, residual, inference_params=inference_params
+                hidden_states, residual, mask=mask, inference_params=inference_params
             )
         if not self.fused_add_norm:
             residual = (hidden_states + residual) if residual is not None else hidden_states
@@ -205,6 +208,7 @@ class MambaLMHeadModel(nn.Module, GenerationMixin):
             initializer_cfg=initializer_cfg,
             fused_add_norm=fused_add_norm,
             residual_in_fp32=residual_in_fp32,
+            use_fast_path=config.use_fast_path,
             **factory_kwargs,
         )
         self.lm_head = nn.Linear(d_model, vocab_size, bias=False, **factory_kwargs)
@@ -225,12 +229,12 @@ class MambaLMHeadModel(nn.Module, GenerationMixin):
     def allocate_inference_cache(self, batch_size, max_seqlen, dtype=None, **kwargs):
         return self.backbone.allocate_inference_cache(batch_size, max_seqlen, dtype=dtype, **kwargs)
 
-    def forward(self, input_ids, position_ids=None, inference_params=None, num_last_tokens=0):
+    def forward(self, input_ids, attention_mask=None, position_ids=None, inference_params=None, num_last_tokens=0):
         """
         "position_ids" is just to be compatible with Transformer generation. We don't use it.
         num_last_tokens: if > 0, only return the logits for the last n tokens
         """
-        hidden_states = self.backbone(input_ids, inference_params=inference_params)
+        hidden_states = self.backbone(input_ids, mask=attention_mask, inference_params=inference_params)
         if num_last_tokens > 0:
             hidden_states = hidden_states[:, -num_last_tokens:]
         lm_logits = self.lm_head(hidden_states)
@@ -240,8 +244,8 @@ class MambaLMHeadModel(nn.Module, GenerationMixin):
     @classmethod
     def from_pretrained(cls, pretrained_model_name, device=None, dtype=None, **kwargs):
         config_data = load_config_hf(pretrained_model_name)
-        config = MambaConfig(**config_data)
-        model = cls(config, device=device, dtype=dtype, **kwargs)
+        config = MambaConfig(**config_data, **kwargs)
+        model = cls(config, device=device, dtype=dtype)
         model.load_state_dict(load_state_dict_hf(pretrained_model_name, device=device, dtype=dtype))
         return model
 
