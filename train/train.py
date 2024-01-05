@@ -164,7 +164,13 @@ def main(args):
         print("Saving model to {}".format(os.path.join(args.output_dir, args.model_name)))
         checkpoint = torch.load(checkpoint_callback.best_model_path)
         model = MambaLMHeadModel(mamba_config).to('cpu')
-        model.load_state_dict(checkpoint['state_dict'])
+        # rewrite the state dict to move keys prefixed by "model." to not have that prefix
+        new_state_dict = OrderedDict()
+        for k, v in checkpoint['state_dict'].items():
+            if k.startswith('model.'):
+                k = k[6:]
+            new_state_dict[k] = v
+        model.load_state_dict(new_state_dict)
         model.save_pretrained(os.path.join(args.output_dir, args.model_name))
 
 
