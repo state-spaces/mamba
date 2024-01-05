@@ -44,6 +44,7 @@ Source: [modules/mamba_simple.py](mamba_ssm/modules/mamba_simple.py).
 
 Usage:
 ```
+import torch
 from mamba_ssm import Mamba
 
 batch, length, dim = 2, 64, 16
