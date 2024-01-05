@@ -154,7 +154,6 @@ def main(args):
         log_every_n_steps=1,
         accelerator='gpu',
         strategy=FSDPStrategy(state_dict_type="full"),
-        use_distributed_sampler=False,
         devices=args.num_gpus,
         callbacks=[checkpoint_callback, lr_monitor],
         precision='16-mixed'  # Using 16 for mixed precision training while keeping model parameters in float32
