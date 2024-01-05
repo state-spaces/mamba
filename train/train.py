@@ -128,8 +128,8 @@ def main(args):
     os.makedirs(args.output_dir, exist_ok=True)
 
     mamba_config = MambaConfig(
-        d_model=1280,
-        n_layer=32,
+        d_model=2560,
+        n_layer=64,
         vocab_size=50277,
         ssm_cfg={},
         rms_norm=True,
