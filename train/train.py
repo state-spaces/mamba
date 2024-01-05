@@ -120,15 +120,7 @@ class MambaModel(pl.LightningModule):
     def save_pretrained(self, *args, **kwargs):
         return self.model.save_pretrained(*args, **kwargs)
 
-    #def on_save_checkpoint(self, checkpoint):
-    #    """
-    #    Tentative fix for FSDP checkpointing issue
-    #    """
-    #    if not checkpoint.get("state_dict", None):
-    #        state_dict = self.trainer.model.state_dict()
-    #        checkpoint["state_dict"] = state_dict
-    #    return super().on_save_checkpoint(checkpoint)
-
+    
 def main(args):
     pl.seed_everything(42)
 
@@ -167,27 +159,13 @@ def main(args):
     )
     trainer.fit(model, datamodule=data_module)
 
-    # save the model
-    model_path = os.path.join(args.output_dir, args.model_name)
-    #if not os.path.exists(model_path):
-    #    os.makedirs(model_path)
-
-    # get the last checkpoint
-    checkpoint = torch.load(trainer.checkpoint_callback.best_model_path)
-
-    # load the last checkpoint on cpu
-    checkpoint.to("cpu")
-
-    checkpoint.save_pretrained(model_path)
-    
-    # write it to the output path
-    #model.save_pretrained(model_path)
-    
-    #shutil.copyfile(trainer.checkpoint_callback.best_model_path, model_path + '/pytorch_model.bin')
-    # save the config
-    #config_path = os.path.join(model_path, 'config.json')
-    #with open(config_path, 'w') as f:
-    #    json.dump(mamba_config.__dict__, f)
+    # only do this in the main process
+    if trainer.is_global_zero:
+        print("Saving model to {}".format(os.path.join(args.output_dir, args.model_name)))
+        checkpoint = torch.load(checkpoint_callback.best_model_path)
+        model = MambaLMHeadModel(mamba_config).to('cpu')
+        model.load_state_dict(checkpoint['state_dict'])
+        model.save_pretrained(os.path.join(args.output_dir, args.model_name))
 
 
 if __name__ == "__main__":
