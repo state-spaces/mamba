@@ -87,11 +87,13 @@ class MambaModel(pl.LightningModule):
     def __init__(self, mamba_config):
         super().__init__()
         self.model = MambaLMHeadModel(mamba_config)
+        self.last_step_end_time = time.time()
 
     def forward(self, input_ids):
         return self.model(input_ids)
 
     def training_step(self, batch, batch_idx):
+        start_time = self.last_step_end_time
         input_ids = batch
         with torch.cuda.amp.autocast():  # Enable automatic mixed precision
             outputs = self(input_ids)
@@ -99,6 +101,18 @@ class MambaModel(pl.LightningModule):
             logits = outputs.logits[:, :-1, :].contiguous()
             loss = nn.CrossEntropyLoss()(logits.view(-1, logits.size(-1)), labels.view(-1))
             perplexity = torch.exp(loss)
+            # Calculate tokens in the current batch
+            tokens_in_batch = input_ids.numel()
+
+        # Update the end time for this step
+        self.last_step_end_time = time.time()
+
+        # Calculate and log tokens per second for this step
+        elapsed_time = self.last_step_end_time - start_time
+        if elapsed_time > 0:
+            tokens_per_second = tokens_in_batch / elapsed_time
+            self.log('tokens_per_second', tokens_per_second, on_step=True, on_epoch=False, sync_dist=True)
+
         self.log('train_loss', loss, sync_dist=True)
         self.log('train_perplexity', perplexity, sync_dist=True)
         return loss
@@ -154,6 +168,7 @@ def main(args):
         log_every_n_steps=1,
         accelerator='gpu',
         strategy=FSDPStrategy(state_dict_type="full"),
+        use_distributed_sampler=False,
         devices=args.num_gpus,
         callbacks=[checkpoint_callback, lr_monitor],
         precision='16-mixed'  # Using 16 for mixed precision training while keeping model parameters in float32
