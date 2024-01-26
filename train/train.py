@@ -17,20 +17,20 @@ from mamba_ssm.models.mixer_seq_simple import MambaLMHeadModel
 from mamba_ssm.models.config_mamba import MambaConfig
 
 class TextDataset(Dataset):
-    def __init__(self, file_path, block_size, eos_token=0):
-        self.block_size = block_size
+    def __init__(self, file_path, context_size, eos_token=0):
+        self.context_size = context_size
         self.eos_token = eos_token
         self.data_file = file_path
         self.mmap_array = np.memmap(self.data_file, dtype='uint8', mode='r')
         self.seed = 42
 
     def __len__(self):
-        return len(self.mmap_array) - self.block_size + 1
+        return len(self.mmap_array) - self.context_size + 1
 
     def __getitem__(self, idx):
         generator = random.Random(self.seed + idx)
         start = generator.randint(0, len(self.mmap_array) - 1)
-        end = start + self.block_size
+        end = start + self.context_size
         if end > len(self.mmap_array):
             padding_size = end - len(self.mmap_array)
             data_slice = np.concatenate(
@@ -44,16 +44,16 @@ def collate_batch(batch):
     return pad_sequence(batch, batch_first=True, padding_value=0)
 
 class MambaDataModule(pl.LightningDataModule):
-    def __init__(self, file_path, block_size, batch_size, num_workers, split_ratio=0.8):
+    def __init__(self, file_path, context_size, batch_size, num_workers, split_ratio=0.8):
         super().__init__()
         self.file_path = file_path
-        self.block_size = block_size
+        self.context_size = context_size
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.split_ratio = split_ratio
 
     def setup(self, stage=None):
-        dataset = TextDataset(self.file_path, self.block_size)
+        dataset = TextDataset(self.file_path, self.context_size)
         train_size = int(len(dataset) * self.split_ratio)
         val_size = len(dataset) - train_size
         self.train_dataset, self.val_dataset = random_split(dataset, [train_size, val_size])
@@ -128,7 +128,7 @@ def main(args):
     )
 
     model = MambaModel(mamba_config)
-    data_module = MambaDataModule(args.file_path, args.block_size, args.batch_size, args.num_workers)
+    data_module = MambaDataModule(args.file_path, args.context_size, args.batch_size, args.num_workers)
 
     checkpoint_dir = os.path.join(args.output_dir, 'checkpoints')
     os.makedirs(checkpoint_dir, exist_ok=True)
@@ -169,7 +169,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_epochs", type=int, default=10)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--num_workers", type=int, default=4)
-    parser.add_argument("--block_size", type=int, default=1024)
+    parser.add_argument("--context_size", type=int, default=1024)
     parser.add_argument("--file_path", type=str, required=True, help="Path to the input text file")
     parser.add_argument("--model_name", type=str, default="mamba_model")
     parser.add_argument("--output_dir", type=str, default="./")
