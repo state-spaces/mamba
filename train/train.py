@@ -13,8 +13,6 @@ from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.strategies import FSDPStrategy
 import time
 from collections import OrderedDict
-
-# Assuming the existence of MambaLMHeadModel and MambaConfig classes
 from mamba_ssm.models.mixer_seq_simple import MambaLMHeadModel
 from mamba_ssm.models.config_mamba import MambaConfig
 
@@ -78,7 +76,7 @@ class MambaModel(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         start_time = self.last_step_end_time
         input_ids = batch
-        with torch.cuda.amp.autocast():
+        with torch.cuda.amp.autocast(): # mixed precision training
             outputs = self(input_ids)
             labels = input_ids[:, 1:].contiguous()
             logits = outputs.logits[:, :-1, :].contiguous()
@@ -98,7 +96,7 @@ class MambaModel(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         input_ids = batch
-        with torch.cuda.amp.autocast():
+        with torch.cuda.amp.autocast(): # mixed precision training
             outputs = self(input_ids)
             labels = input_ids[:, 1:].contiguous()
             logits = outputs.logits[:, :-1, :].contiguous()
@@ -116,6 +114,8 @@ class MambaModel(pl.LightningModule):
 def main(args):
     pl.seed_everything(42)
 
+    os.makedirs(args.output_dir, exist_ok=True)
+    
     mamba_config = MambaConfig(
         d_model=2560,
         n_layer=64,
@@ -131,6 +131,7 @@ def main(args):
     data_module = MambaDataModule(args.file_path, args.block_size, args.batch_size, args.num_workers)
 
     checkpoint_dir = os.path.join(args.output_dir, 'checkpoints')
+    os.makedirs(checkpoint_dir, exist_ok=True)
     checkpoint_callback = ModelCheckpoint(dirpath=checkpoint_dir, monitor='val_loss', save_top_k=3, mode='min')
     lr_monitor = LearningRateMonitor(logging_interval='epoch')
 
