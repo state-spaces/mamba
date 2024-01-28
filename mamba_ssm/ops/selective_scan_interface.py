@@ -159,7 +159,7 @@ class MambaInnerFn(torch.autograd.Function):
     def forward(ctx, xz, conv1d_weight, conv1d_bias, x_proj_weight, delta_proj_weight,
                 out_proj_weight, out_proj_bias,
                 A, B=None, C=None, D=None, delta_bias=None, B_proj_bias=None,
-                C_proj_bias=None, delta_softplus=True, checkpoint_lvl=1):
+                C_proj_bias=None, mask=None, delta_softplus=True, checkpoint_lvl=1):
         """
              xz: (batch, dim, seqlen)
         """
@@ -177,6 +177,8 @@ class MambaInnerFn(torch.autograd.Function):
             xz = xz.contiguous()
         conv1d_weight = rearrange(conv1d_weight, "d 1 w -> d w")
         x, z = xz.chunk(2, dim=1)
+        if mask is not None:
+            x = x * mask.unsqueeze(1)
         conv1d_bias = conv1d_bias.contiguous() if conv1d_bias is not None else None
         conv1d_out = causal_conv1d_cuda.causal_conv1d_fwd(x, conv1d_weight, conv1d_bias, None, True)
         # We're being very careful here about the layout, to avoid extra transposes.
@@ -214,6 +216,8 @@ class MambaInnerFn(torch.autograd.Function):
                 C = C.contiguous()
         if D is not None:
             D = D.contiguous()
+        if mask is not None:
+            conv1d_out = conv1d_out * mask.unsqueeze(1)
         out, scan_intermediates, out_z = selective_scan_cuda.fwd(
             conv1d_out, delta, A, B, C, D, z, delta_bias, delta_softplus
         )
@@ -301,11 +305,11 @@ def mamba_inner_fn(
     xz, conv1d_weight, conv1d_bias, x_proj_weight, delta_proj_weight,
     out_proj_weight, out_proj_bias,
     A, B=None, C=None, D=None, delta_bias=None, B_proj_bias=None,
-    C_proj_bias=None, delta_softplus=True
+    C_proj_bias=None, mask=None, delta_softplus=True
 ):
     return MambaInnerFn.apply(xz, conv1d_weight, conv1d_bias, x_proj_weight, delta_proj_weight,
                               out_proj_weight, out_proj_bias,
-                              A, B, C, D, delta_bias, B_proj_bias, C_proj_bias, delta_softplus)
+                              A, B, C, D, delta_bias, B_proj_bias, C_proj_bias, mask, delta_softplus)
 
 
 def mamba_inner_ref(
