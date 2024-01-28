@@ -34,6 +34,12 @@ class InferenceParams:
             self.lengths_per_sample.zero_()
 
 
+def modify_logits_for_min_p_filtering(logits, min_p):
+    """Set the logits for none min_p values to -inf. Done in-place."""
+    if min_p <= 0.0 or min_p >= 1.0:
+        return
+    indices_to_remove = logits < min_p
+    logits.masked_fill_(indices_to_remove, float("-Inf"))
 # https://github.com/NVIDIA/Megatron-LM/blob/0bb597b42c53355a567aba2a1357cc34b9d99ddd/megatron/text_generation/sampling.py
 # https://github.com/huggingface/transformers/blob/a44985b41cfa2de48a5e1de7f1f93b7483da25d1/src/transformers/generation/logits_process.py#L231
 def modify_logits_for_top_k_filtering(logits, top_k):
@@ -74,7 +80,7 @@ def modify_logit_for_repetition_penalty(logits, prev_output_tokens, repetition_p
     return logits
 
 
-def sample(logits, top_k=1, top_p=0.0, temperature=1.0):
+def sample(logits, top_k=1, top_p=0.0, min_p=0.0, temperature=1.0):
     """Sample from top-k logits.
     Arguments:
         logits: Tensor of shape (batch_size, vocab_size)
@@ -95,6 +101,14 @@ def sample(logits, top_k=1, top_p=0.0, temperature=1.0):
                 torch.multinomial(torch.softmax(logits_top, dim=-1), num_samples=1).squeeze(dim=-1),
             ]
         else:
+            if min_p > 0.0:
+                logits_top = logits.clone()
+                max_prob = logits_top[..., 0].item()
+                min_prob = max_prob * min_p
+                modify_logits_for_min_p_filtering(logits_top, min_p)
+                if temperature != 1.0:
+                    logits_top /= temperature
+                return torch.multinomial(torch.softmax(logits_top, dim=-1), num_samples=1).squeeze(dim=-1)
             # Clone so that when we modify for top_p we don't change the original logits
             logits_top = logits / temperature if temperature != 1.0 else logits.clone()
             modify_logits_for_top_p_filtering(logits_top, top_p)
@@ -110,6 +124,7 @@ def decode(
     max_length,
     top_k=1,
     top_p=0.0,
+    min_p=0.0,
     temperature=1.0,
     repetition_penalty=1.0,
     eos_token_id=None,
@@ -180,7 +195,7 @@ def decode(
 
     def sample_tokens(logits, inference_params):
         if teacher_outputs is None or teacher_output_len <= inference_params.seqlen_offset:
-            token = sample(logits, top_k=top_k, top_p=top_p, temperature=temperature)
+            token = sample(logits, top_k=top_k, top_p=top_p, min_p=min_p, temperature=temperature)
         else:
             token = teacher_outputs[:, inference_params.seqlen_offset]
         # return rearrange(token, "b -> b 1")
@@ -242,7 +257,7 @@ class GenerationMixin:
         **kwargs,
     ):
         output = decode(
-            input_ids, self, max_length, top_k=top_k, top_p=top_p, temperature=temperature, **kwargs
+            input_ids, self, max_length, top_k=top_k, top_p=top_p, min_p = min_p, temperature=temperature, **kwargs
         )
         if not output_scores:
             output.scores = None
