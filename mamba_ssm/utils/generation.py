@@ -251,6 +251,7 @@ class GenerationMixin:
         max_length,
         top_k=1,
         top_p=0.0,
+        min_p=0.0,
         temperature=1.0,
         return_dict_in_generate=False,
         output_scores=False,
