@@ -1,5 +1,5 @@
-from dataclasses import dataclass, field
-
+from dataclasses import dataclass, field, asdict
+import json
 
 @dataclass
 class MambaConfig:
@@ -12,3 +12,7 @@ class MambaConfig:
     residual_in_fp32: bool = True
     fused_add_norm: bool = True
     pad_vocab_size_multiple: int = 8
+
+    def to_json_string(self):
+        """Serializes this instance to a JSON string."""
+        return json.dumps(asdict(self), indent=2)
