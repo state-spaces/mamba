@@ -28,6 +28,7 @@ struct Selective_Scan_fwd_kernel_traits {
     static constexpr int kMinBlocks = kNThreads < 128 ? 5 : 3;
     static constexpr int kNItems = kNItems_;
     static constexpr int kNRows = kNRows_;
+    static constexpr int MaxDState = MAX_DSTATE / kNRows;
     static constexpr int kNBytes = sizeof(input_t);
     static_assert(kNBytes == 2 || kNBytes == 4);
     static constexpr int kNElts = kNBytes == 4 ? 4 : std::min(8, kNItems);
@@ -82,8 +83,8 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     // Shared memory.
     extern __shared__ char smem_[];
     // cast to lvalue reference of expected type
-    // char *smem_loadstorescan = smem_ + 2 * MAX_DSTATE * sizeof(weight_t);
-    // auto& smem_load = reinterpret_cast<typename BlockLoadT::TempStorage&>(smem_ + 2 * MAX_DSTATE * sizeof(weight_t));
+    // char *smem_loadstorescan = smem_ + 2 * Ktraits::MaxDState * sizeof(weight_t);
+    // auto& smem_load = reinterpret_cast<typename BlockLoadT::TempStorage&>(smem_ + 2 * Ktraits::MaxDState * sizeof(weight_t));
     // auto& smem_load = reinterpret_cast<typename BlockLoadT::TempStorage&>(smem_loadstorescan);
     auto& smem_load = reinterpret_cast<typename Ktraits::BlockLoadT::TempStorage&>(smem_);
     auto& smem_load_weight = reinterpret_cast<typename Ktraits::BlockLoadWeightT::TempStorage&>(smem_);
@@ -91,12 +92,12 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     auto& smem_store = reinterpret_cast<typename Ktraits::BlockStoreT::TempStorage&>(smem_);
     auto& smem_scan = *reinterpret_cast<typename Ktraits::BlockScanT::TempStorage*>(smem_ + Ktraits::kSmemIOSize);
     // weight_t *smem_a = reinterpret_cast<weight_t *>(smem_ + smem_loadstorescan_size);
-    // weight_t *smem_bc = reinterpret_cast<weight_t *>(smem_a + MAX_DSTATE);
+    // weight_t *smem_bc = reinterpret_cast<weight_t *>(smem_a + Ktraits::MaxDState);
     scan_t *smem_running_prefix = reinterpret_cast<scan_t *>(smem_ + Ktraits::kSmemSize);
 
     const int batch_id = blockIdx.x;
     const int dim_id = blockIdx.y;
-    const int group_id = dim_id / (params.dim_ngroups_ratio);
+    const int group_id = dim_id * kNRows / (params.dim_ngroups_ratio); // Mzero: fixbug here for nrow
     input_t *u = reinterpret_cast<input_t *>(params.u_ptr) + batch_id * params.u_batch_stride
         + dim_id * kNRows * params.u_d_stride;
     input_t *delta = reinterpret_cast<input_t *>(params.delta_ptr) + batch_id * params.delta_batch_stride
@@ -236,10 +237,10 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                 scan_t running_prefix;
                 if constexpr (!kIsComplex) {
                     // If we use WARP_SCAN then all lane 0 of all warps (not just thread 0) needs to read
-                    running_prefix = chunk > 0 && threadIdx.x % 32 == 0 ? smem_running_prefix[state_idx + r * MAX_DSTATE] : make_float2(1.f, 0.f);
+                    running_prefix = chunk > 0 && threadIdx.x % 32 == 0 ? smem_running_prefix[state_idx + r * Ktraits::MaxDState] : make_float2(1.f, 0.f);
                     // running_prefix = chunk > 0 && threadIdx.x == 0 ? smem_running_prefix[state_idx] : make_float2(1.f, 0.f);
                 } else {
-                    running_prefix = chunk > 0 && threadIdx.x % 32 == 0 ? smem_running_prefix[state_idx + r * MAX_DSTATE] : make_float4(1.f, 0.f, 0.f, 0.f);
+                    running_prefix = chunk > 0 && threadIdx.x % 32 == 0 ? smem_running_prefix[state_idx + r * Ktraits::MaxDState] : make_float4(1.f, 0.f, 0.f, 0.f);
                     // running_prefix = chunk > 0 && threadIdx.x == 0 ? smem_running_prefix[state_idx] : make_float4(1.f, 0.f, 0.f, 0.f);
                 }
                 SSMScanPrefixCallbackOp<weight_t> prefix_op(running_prefix);
@@ -249,7 +250,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                 // There's a syncthreads in the scan op, so we don't need to sync here.
                 // Unless there's only 1 warp, but then it's the same thread (0) reading and writing.
                 if (threadIdx.x == 0) {
-                    smem_running_prefix[state_idx] = prefix_op.running_prefix;
+                    smem_running_prefix[state_idx + r * Ktraits::MaxDState] = prefix_op.running_prefix; // Mzero: fixbug here for nrow
                     x[(r * params.n_chunks + chunk) * params.dstate + state_idx] = prefix_op.running_prefix;
                 }
                 #pragma unroll
@@ -302,18 +303,15 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     }
 }
 
-template<int kNThreads, int kNItems, typename input_t, typename weight_t>
+template<int kNThreads, int kNItems, int kNRows, typename input_t, typename weight_t>
 void selective_scan_fwd_launch(SSMParamsBase &params, cudaStream_t stream) {
-    // Only kNRows == 1 is tested for now, which ofc doesn't differ from previously when we had each block
-    // processing 1 row.
-    constexpr int kNRows = 1;
     BOOL_SWITCH(params.seqlen % (kNThreads * kNItems) == 0, kIsEvenLen, [&] {
         BOOL_SWITCH(params.is_variable_B, kIsVariableB, [&] {
             BOOL_SWITCH(params.is_variable_C, kIsVariableC, [&] {
                 BOOL_SWITCH(params.z_ptr != nullptr , kHasZ, [&] {
                     using Ktraits = Selective_Scan_fwd_kernel_traits<kNThreads, kNItems, kNRows, kIsEvenLen, kIsVariableB, kIsVariableC, kHasZ, input_t, weight_t>;
                     // constexpr int kSmemSize = Ktraits::kSmemSize;
-                    constexpr int kSmemSize = Ktraits::kSmemSize + kNRows * MAX_DSTATE * sizeof(typename Ktraits::scan_t);
+                    constexpr int kSmemSize = Ktraits::kSmemSize + kNRows * Ktraits::MaxDState * sizeof(typename Ktraits::scan_t);
                     // printf("smem_size = %d\n", kSmemSize);
                     dim3 grid(params.batch, params.dim / kNRows);
                     auto kernel = &selective_scan_fwd_kernel<Ktraits>;
@@ -329,17 +327,17 @@ void selective_scan_fwd_launch(SSMParamsBase &params, cudaStream_t stream) {
     });
 }
 
-template<typename input_t, typename weight_t>
+template<int knrows, typename input_t, typename weight_t>
 void selective_scan_fwd_cuda(SSMParamsBase &params, cudaStream_t stream) {
     if (params.seqlen <= 128) {
-        selective_scan_fwd_launch<32, 4, input_t, weight_t>(params, stream);
+        selective_scan_fwd_launch<32, 4, knrows, input_t, weight_t>(params, stream);
     } else if (params.seqlen <= 256) {
-        selective_scan_fwd_launch<32, 8, input_t, weight_t>(params, stream);
+        selective_scan_fwd_launch<32, 8, knrows, input_t, weight_t>(params, stream);
     } else if (params.seqlen <= 512) {
-        selective_scan_fwd_launch<32, 16, input_t, weight_t>(params, stream);
+        selective_scan_fwd_launch<32, 16, knrows, input_t, weight_t>(params, stream);
     } else if (params.seqlen <= 1024) {
-        selective_scan_fwd_launch<64, 16, input_t, weight_t>(params, stream);
+        selective_scan_fwd_launch<64, 16, knrows, input_t, weight_t>(params, stream);
     } else {
-        selective_scan_fwd_launch<128, 16, input_t, weight_t>(params, stream);
+        selective_scan_fwd_launch<128, 16, knrows, input_t, weight_t>(params, stream);
     }
 }

@@ -6,4 +6,4 @@
 
 #include "selective_scan_bwd_kernel.cuh"
 
-template void selective_scan_bwd_cuda<float, float>(SSMParamsBwd &params, cudaStream_t stream);
+template void selective_scan_bwd_cuda<1, float, float>(SSMParamsBwd &params, cudaStream_t stream);

@@ -35,8 +35,9 @@ from mamba_ssm.ops.selective_scan_interface import mamba_inner_fn, mamba_inner_r
 @pytest.mark.parametrize("is_variable_C", [True])
 # @pytest.mark.parametrize("is_variable_B", [False, True])
 @pytest.mark.parametrize("is_variable_B", [True])
+@pytest.mark.parametrize("nrows", [1,3,4])
 def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D, has_z, has_delta_bias,
-                        delta_softplus, return_last_state, seqlen, itype, wtype):
+                        delta_softplus, return_last_state, seqlen, itype, wtype, nrows):
     if varBC_groups > 1 and (not is_variable_B or not is_variable_C):
         pytest.skip()  # This config is not applicable
     device = 'cuda'
@@ -50,7 +51,7 @@ def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D, has_z
     # set seed
     torch.random.manual_seed(0)
     batch_size = 2
-    dim = 4
+    dim = 24
     dstate = 8
     is_complex = wtype == torch.complex64
     A = (-0.5 * torch.rand(dim, dstate, device=device, dtype=wtype)).requires_grad_()

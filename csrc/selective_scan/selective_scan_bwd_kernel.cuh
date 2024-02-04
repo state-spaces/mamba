@@ -31,6 +31,8 @@ struct Selective_Scan_bwd_kernel_traits {
     using weight_t = weight_t_;
     static constexpr int kNThreads = kNThreads_;
     static constexpr int kNItems = kNItems_;
+    // we are about to add kNRows here
+    static constexpr int MaxDState = MAX_DSTATE / 1;
     static constexpr int kNBytes = sizeof(input_t);
     static_assert(kNBytes == 2 || kNBytes == 4);
     static constexpr int kNElts = kNBytes == 4 ? 4 : std::min(8, kNItems);
@@ -89,8 +91,8 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
     // Shared memory.
     extern __shared__ char smem_[];
     // cast to lvalue reference of expected type
-    // char *smem_loadstorescan = smem_ + 2 * MAX_DSTATE * sizeof(weight_t);
-    // auto& smem_load = reinterpret_cast<typename BlockLoadT::TempStorage&>(smem_ + 2 * MAX_DSTATE * sizeof(weight_t));
+    // char *smem_loadstorescan = smem_ + 2 * Ktraits::MaxDState * sizeof(weight_t);
+    // auto& smem_load = reinterpret_cast<typename BlockLoadT::TempStorage&>(smem_ + 2 * Ktraits::MaxDState * sizeof(weight_t));
     // auto& smem_load = reinterpret_cast<typename BlockLoadT::TempStorage&>(smem_loadstorescan);
     auto& smem_load = reinterpret_cast<typename Ktraits::BlockLoadT::TempStorage&>(smem_);
     auto& smem_load_weight = reinterpret_cast<typename Ktraits::BlockLoadWeightT::TempStorage&>(smem_);
@@ -104,9 +106,9 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
     auto& smem_scan = *reinterpret_cast<typename Ktraits::BlockScanT::TempStorage*>(reinterpret_cast<char *>(&smem_reduce) + Ktraits::kSmemReduceSize);
     auto& smem_reverse_scan = *reinterpret_cast<typename Ktraits::BlockReverseScanT::TempStorage*>(reinterpret_cast<char *>(&smem_scan) + sizeof(typename Ktraits::BlockScanT::TempStorage));
     weight_t *smem_delta_a = reinterpret_cast<weight_t *>(smem_ + Ktraits::kSmemSize);
-    scan_t *smem_running_postfix = reinterpret_cast<scan_t *>(smem_delta_a + 2 * MAX_DSTATE + kNThreads);
-    weight_t *smem_da = reinterpret_cast<weight_t *>(smem_running_postfix + MAX_DSTATE);
-    weight_t *smem_dbc = reinterpret_cast<weight_t *>(smem_da + MAX_DSTATE);
+    scan_t *smem_running_postfix = reinterpret_cast<scan_t *>(smem_delta_a + 2 * Ktraits::MaxDState + kNThreads);
+    weight_t *smem_da = reinterpret_cast<weight_t *>(smem_running_postfix + Ktraits::MaxDState);
+    weight_t *smem_dbc = reinterpret_cast<weight_t *>(smem_da + Ktraits::MaxDState);
 
     const int batch_id = blockIdx.x;
     const int dim_id = blockIdx.y;
@@ -247,7 +249,7 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
                     const float delta_a_exp = exp2f(delta_vals[i] * A_scaled);
                     thread_data[i] = make_float2(delta_a_exp, !kIsVariableB ? delta_vals[i] * float(u_vals[i]) : delta_vals[i] * float(u_vals[i]) * B_vals[i]);
                     if (i == 0) {
-                        smem_delta_a[threadIdx.x == 0 ? state_idx + (chunk % 2) * MAX_DSTATE : threadIdx.x + 2 * MAX_DSTATE] = delta_a_exp;
+                        smem_delta_a[threadIdx.x == 0 ? state_idx + (chunk % 2) * Ktraits::MaxDState : threadIdx.x + 2 * Ktraits::MaxDState] = delta_a_exp;
                     } else {
                         thread_reverse_data[i - 1].x = delta_a_exp;
                     }
@@ -258,8 +260,8 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
                 }
                 __syncthreads();
                 thread_reverse_data[kNItems - 1].x = threadIdx.x == kNThreads - 1
-                    ? (chunk == params.n_chunks - 1 ? 1.f : smem_delta_a[state_idx + ((chunk + 1) % 2) * MAX_DSTATE])
-                    : smem_delta_a[threadIdx.x + 1 + 2 * MAX_DSTATE];
+                    ? (chunk == params.n_chunks - 1 ? 1.f : smem_delta_a[state_idx + ((chunk + 1) % 2) * Ktraits::MaxDState])
+                    : smem_delta_a[threadIdx.x + 1 + 2 * Ktraits::MaxDState];
                 // Initialize running total
                 scan_t running_prefix = chunk > 0 && threadIdx.x % 32 == 0 ? x[(chunk - 1) * params.dstate + state_idx] : make_float2(1.f, 0.f);
                 SSMScanPrefixCallbackOp<weight_t> prefix_op(running_prefix);
@@ -335,7 +337,7 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
                     weight_t B_delta_u_val = !kIsVariableB ? delta_vals[i] * float(u_vals[i]) : B_vals[i] * delta_vals[i] * float(u_vals[i]);
                     thread_data[i] = make_float4(delta_a_exp.real_, delta_a_exp.imag_, B_delta_u_val.real_, B_delta_u_val.imag_);
                     if (i == 0) {
-                        smem_delta_a[threadIdx.x == 0 ? state_idx + (chunk % 2) * MAX_DSTATE : threadIdx.x + 2 * MAX_DSTATE] = delta_a_exp;
+                        smem_delta_a[threadIdx.x == 0 ? state_idx + (chunk % 2) * Ktraits::MaxDState : threadIdx.x + 2 * Ktraits::MaxDState] = delta_a_exp;
                     } else {
                         thread_reverse_data[i - 1].x = delta_a_exp.real_;
                         thread_reverse_data[i - 1].y = -delta_a_exp.imag_;
@@ -349,8 +351,8 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
                 }
                 __syncthreads();
                 complex_t delta_a_exp = threadIdx.x == kNThreads - 1
-                    ? (chunk == params.n_chunks - 1 ? 1.f : smem_delta_a[state_idx + ((chunk + 1) % 2) * MAX_DSTATE])
-                    : smem_delta_a[threadIdx.x + 1 + 2 * MAX_DSTATE];
+                    ? (chunk == params.n_chunks - 1 ? 1.f : smem_delta_a[state_idx + ((chunk + 1) % 2) * Ktraits::MaxDState])
+                    : smem_delta_a[threadIdx.x + 1 + 2 * Ktraits::MaxDState];
                 thread_reverse_data[kNItems - 1].x = delta_a_exp.real_;
                 thread_reverse_data[kNItems - 1].y = -delta_a_exp.imag_;
                 // Initialize running total
@@ -488,7 +490,7 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
     }
 }
 
-template<int kNThreads, int kNItems, typename input_t, typename weight_t>
+template<int kNThreads, int kNItems, int kNRows, typename input_t, typename weight_t>
 void selective_scan_bwd_launch(SSMParamsBwd &params, cudaStream_t stream) {
     BOOL_SWITCH(params.seqlen % (kNThreads * kNItems) == 0, kIsEvenLen, [&] {
         BOOL_SWITCH(params.is_variable_B, kIsVariableB, [&] {
@@ -498,7 +500,7 @@ void selective_scan_bwd_launch(SSMParamsBwd &params, cudaStream_t stream) {
                         using Ktraits = Selective_Scan_bwd_kernel_traits<kNThreads, kNItems, kIsEvenLen, kIsVariableB, kIsVariableC, kDeltaSoftplus, kHasZ, input_t, weight_t>;
                         // using Ktraits = Selective_Scan_bwd_kernel_traits<kNThreads, kNItems, true, kIsVariableB, kIsVariableC, kDeltaSoftplus, kHasZ, input_t, weight_t>;
                         // TODO: check this
-                        constexpr int kSmemSize = Ktraits::kSmemSize + MAX_DSTATE * sizeof(typename Ktraits::scan_t) + (kNThreads + 4 * MAX_DSTATE) * sizeof(typename Ktraits::weight_t);
+                        constexpr int kSmemSize = Ktraits::kSmemSize + Ktraits::MaxDState * sizeof(typename Ktraits::scan_t) + (kNThreads + 4 * Ktraits::MaxDState) * sizeof(typename Ktraits::weight_t);
                         // printf("smem_size = %d\n", kSmemSize);
                         dim3 grid(params.batch, params.dim);
                         auto kernel = &selective_scan_bwd_kernel<Ktraits>;
@@ -515,17 +517,17 @@ void selective_scan_bwd_launch(SSMParamsBwd &params, cudaStream_t stream) {
     });
 }
 
-template<typename input_t, typename weight_t>
+template<int knrows, typename input_t, typename weight_t>
 void selective_scan_bwd_cuda(SSMParamsBwd &params, cudaStream_t stream) {
     if (params.seqlen <= 128) {
-        selective_scan_bwd_launch<32, 4, input_t, weight_t>(params, stream);
+        selective_scan_bwd_launch<32, 4, knrows, input_t, weight_t>(params, stream);
     } else if (params.seqlen <= 256) {
-        selective_scan_bwd_launch<32, 8, input_t, weight_t>(params, stream);
+        selective_scan_bwd_launch<32, 8, knrows, input_t, weight_t>(params, stream);
     } else if (params.seqlen <= 512) {
-        selective_scan_bwd_launch<32, 16, input_t, weight_t>(params, stream);
+        selective_scan_bwd_launch<32, 16, knrows, input_t, weight_t>(params, stream);
     } else if (params.seqlen <= 1024) {
-        selective_scan_bwd_launch<64, 16, input_t, weight_t>(params, stream);
+        selective_scan_bwd_launch<64, 16, knrows, input_t, weight_t>(params, stream);
     } else {
-        selective_scan_bwd_launch<128, 16, input_t, weight_t>(params, stream);
+        selective_scan_bwd_launch<128, 16, knrows, input_t, weight_t>(params, stream);
     }
 }
