@@ -1,4 +1,6 @@
 # Copyright (C) 2023, Tri Dao.
+# here we have a simple test just verify the selective scan in csrc/
+# you should delete it when pull request...
 
 import math
 
@@ -8,8 +10,156 @@ import pytest
 
 from einops import rearrange
 
-from mamba_ssm.ops.selective_scan_interface import selective_scan_fn, selective_scan_ref
-from mamba_ssm.ops.selective_scan_interface import mamba_inner_fn, mamba_inner_ref
+import torch
+import torch.nn.functional as F
+from torch.cuda.amp import custom_bwd, custom_fwd
+from einops import rearrange, repeat
+import selective_scan_cuda
+# print(selective_scan_cuda)
+
+
+class SelectiveScanFn(torch.autograd.Function):
+
+    @staticmethod
+    def forward(ctx, u, delta, A, B, C, D=None, z=None, delta_bias=None, delta_softplus=False,
+                return_last_state=False, nrows=1):
+        if u.stride(-1) != 1:
+            u = u.contiguous()
+        if delta.stride(-1) != 1:
+            delta = delta.contiguous()
+        if D is not None:
+            D = D.contiguous()
+        if B.stride(-1) != 1:
+            B = B.contiguous()
+        if C.stride(-1) != 1:
+            C = C.contiguous()
+        if z is not None and z.stride(-1) != 1:
+            z = z.contiguous()
+        if B.dim() == 3:
+            B = rearrange(B, "b dstate l -> b 1 dstate l")
+            ctx.squeeze_B = True
+        if C.dim() == 3:
+            C = rearrange(C, "b dstate l -> b 1 dstate l")
+            ctx.squeeze_C = True
+        out, x, *rest = selective_scan_cuda.fwd(u, delta, A, B, C, D, z, delta_bias, delta_softplus, nrows)
+        ctx.delta_softplus = delta_softplus
+        ctx.has_z = z is not None
+        ctx.nrows = nrows
+        last_state = x[:, :, -1, 1::2]  # (batch, dim, dstate)
+        if not ctx.has_z:
+            ctx.save_for_backward(u, delta, A, B, C, D, delta_bias, x)
+            return out if not return_last_state else (out, last_state)
+        else:
+            ctx.save_for_backward(u, delta, A, B, C, D, z, delta_bias, x, out)
+            out_z = rest[0]
+            return out_z if not return_last_state else (out_z, last_state)
+
+    @staticmethod
+    def backward(ctx, dout, *args):
+        if not ctx.has_z:
+            u, delta, A, B, C, D, delta_bias, x = ctx.saved_tensors
+            z = None
+            out = None
+        else:
+            u, delta, A, B, C, D, z, delta_bias, x, out = ctx.saved_tensors
+        if dout.stride(-1) != 1:
+            dout = dout.contiguous()
+        nrows = 1 # ctx.nrows # we have not implemented the nrows for bwd yet
+        # The kernel supports passing in a pre-allocated dz (e.g., in case we want to fuse the
+        # backward of selective_scan_cuda with the backward of chunk).
+        # Here we just pass in None and dz will be allocated in the C++ code.
+        du, ddelta, dA, dB, dC, dD, ddelta_bias, *rest = selective_scan_cuda.bwd(
+            u, delta, A, B, C, D, z, delta_bias, dout, x, out, None, ctx.delta_softplus,
+            False, nrows  # option to recompute out_z, not used here
+        )
+        dz = rest[0] if ctx.has_z else None
+        dB = dB.squeeze(1) if getattr(ctx, "squeeze_B", False) else dB
+        dC = dC.squeeze(1) if getattr(ctx, "squeeze_C", False) else dC
+        return (du, ddelta, dA, dB, dC,
+                dD if D is not None else None,
+                dz,
+                ddelta_bias if delta_bias is not None else None,
+                None,
+                None,
+                None)
+
+
+def selective_scan_fn(u, delta, A, B, C, D=None, z=None, delta_bias=None, delta_softplus=False,
+                     return_last_state=False, nrows=1):
+    """if return_last_state is True, returns (out, last_state)
+    last_state has shape (batch, dim, dstate). Note that the gradient of the last state is
+    not considered in the backward pass.
+    """
+    return SelectiveScanFn.apply(u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state, nrows)
+
+
+def selective_scan_ref(u, delta, A, B, C, D=None, z=None, delta_bias=None, delta_softplus=False,
+                      return_last_state=False):
+    """
+    u: r(B D L)
+    delta: r(B D L)
+    A: c(D N) or r(D N)
+    B: c(D N) or r(B N L) or r(B N 2L) or r(B G N L) or (B G N L)
+    C: c(D N) or r(B N L) or r(B N 2L) or r(B G N L) or (B G N L)
+    D: r(D)
+    z: r(B D L)
+    delta_bias: r(D), fp32
+
+    out: r(B D L)
+    last_state (optional): r(B D dstate) or c(B D dstate)
+    """
+    dtype_in = u.dtype
+    u = u.float()
+    delta = delta.float()
+    if delta_bias is not None:
+        delta = delta + delta_bias[..., None].float()
+    if delta_softplus:
+        delta = F.softplus(delta)
+    batch, dim, dstate = u.shape[0], A.shape[0], A.shape[1]
+    is_variable_B = B.dim() >= 3
+    is_variable_C = C.dim() >= 3
+    if A.is_complex():
+        if is_variable_B:
+            B = torch.view_as_complex(rearrange(B.float(), "... (L two) -> ... L two", two=2))
+        if is_variable_C:
+            C = torch.view_as_complex(rearrange(C.float(), "... (L two) -> ... L two", two=2))
+    else:
+        B = B.float()
+        C = C.float()
+    x = A.new_zeros((batch, dim, dstate))
+    ys = []
+    deltaA = torch.exp(torch.einsum('bdl,dn->bdln', delta, A))
+    if not is_variable_B:
+        deltaB_u = torch.einsum('bdl,dn,bdl->bdln', delta, B, u)
+    else:
+        if B.dim() == 3:
+            deltaB_u = torch.einsum('bdl,bnl,bdl->bdln', delta, B, u)
+        else:
+            B = repeat(B, "B G N L -> B (G H) N L", H=dim // B.shape[1])
+            deltaB_u = torch.einsum('bdl,bdnl,bdl->bdln', delta, B, u)
+    if is_variable_C and C.dim() == 4:
+        C = repeat(C, "B G N L -> B (G H) N L", H=dim // C.shape[1])
+    last_state = None
+    for i in range(u.shape[2]):
+        x = deltaA[:, :, i] * x + deltaB_u[:, :, i]
+        if not is_variable_C:
+            y = torch.einsum('bdn,dn->bd', x, C)
+        else:
+            if C.dim() == 3:
+                y = torch.einsum('bdn,bn->bd', x, C[:, :, i])
+            else:
+                y = torch.einsum('bdn,bdn->bd', x, C[:, :, :, i])
+        if i == u.shape[2] - 1:
+            last_state = x
+        if y.is_complex():
+            y = y.real * 2
+        ys.append(y)
+    y = torch.stack(ys, dim=2) # (batch dim L)
+    out = y if D is None else y + u * rearrange(D, "d -> d 1")
+    if z is not None:
+        out = out * F.silu(z)
+    out = out.to(dtype=dtype_in)
+    return out if not return_last_state else (out, last_state)
 
 
 # @pytest.mark.parametrize('wtype', [torch.float32, torch.complex64])
@@ -147,102 +297,15 @@ def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D, has_z
     if has_delta_bias:
         assert torch.allclose(delta_bias.grad, delta_bias_ref.grad, rtol=rtolw, atol=atolw)
 
+"""
+(mamba) (base) LiuYue@Turing17:~/Workspace/GITHUB/mamba$ pytest tests/ops/test_selective_scan_.py
+========================================== test session starts ===========================================
+platform linux -- Python 3.10.13, pytest-7.4.3, pluggy-1.0.0
+rootdir: /Workspace/LiuYue/GITHUB/mamba
+plugins: anyio-4.2.0
+collected 48 items                                                                                       
 
-@pytest.mark.parametrize('wtype', [torch.float32, torch.complex64])
-# @pytest.mark.parametrize('wtype', [torch.complex64])
-# @pytest.mark.parametrize('itype', [torch.float32, torch.float16, torch.bfloat16])
-@pytest.mark.parametrize('itype', [torch.float32])
-# @pytest.mark.parametrize('seqlen', [8, 16, 32, 64, 128, 256, 372, 512, 784, 1024, 1134, 2048, 4096])
-@pytest.mark.parametrize('seqlen', [128])
-@pytest.mark.parametrize("is_variable_C", [False, True])
-# @pytest.mark.parametrize("is_variable_C", [False])
-@pytest.mark.parametrize("is_variable_B", [False, True])
-# @pytest.mark.parametrize("is_variable_B", [True])
-def test_mamba_inner_fn(is_variable_B, is_variable_C, seqlen, itype, wtype):
-    device = 'cuda'
-    rtol, atol = (6e-4, 2e-3) if itype == torch.float32 else (3e-3, 5e-3)
-    if itype == torch.bfloat16:
-        rtol, atol = 3e-2, 5e-2
-    rtolw, atolw = (1e-3, 1e-3)
-    # If we have z, the errors on the weights seem higher
-    rtolw = max(rtolw, rtol)
-    atolw = max(atolw, atol)
-    # set seed
-    torch.random.manual_seed(0)
-    batch_size = 2
-    dim = 768
-    dstate = 8
-    dt_rank = 48
-    is_complex = wtype == torch.complex64
-    xz = torch.randn(batch_size, 2 * dim, seqlen, device=device, dtype=itype, requires_grad=True)
-    conv1d_weight = torch.randn(dim, 1, 3, device=device, dtype=torch.float32, requires_grad=True)
-    conv1d_bias = torch.randn(dim, device=device, dtype=torch.float32, requires_grad=True)
-    x_proj_weight = torch.randn(dt_rank + (bool(is_variable_B) + bool(is_variable_C)) * dstate
-                                * (1 if not is_complex else 2),
-                                dim, device=device, dtype=itype, requires_grad=True)
-    delta_proj_weight = torch.randn(dim, dt_rank, device=device, dtype=itype, requires_grad=True)
-    out_proj_weight = torch.randn(dim // 2, dim, device=device, dtype=itype, requires_grad=True)
-    out_proj_bias = None
-    A = (-0.5 * torch.rand(dim, dstate, device=device, dtype=wtype)).requires_grad_()
-    B = (torch.randn(dim, dstate, device=device, dtype=wtype, requires_grad=True)
-         if not is_variable_B else None)
-    C = (torch.randn(dim, dstate, device=device, dtype=wtype, requires_grad=True)
-         if not is_variable_C else None)
-    D = torch.randn(dim, device=device, dtype=torch.float32, requires_grad=True)
-    delta_bias = (0.5 * torch.rand(dim, device=device, dtype=torch.float32)).requires_grad_()
-    B_proj_bias = None
-    C_proj_bias = None
-    xz_ref = xz.detach().clone().requires_grad_()
-    conv1d_weight_ref = conv1d_weight.detach().clone().requires_grad_()
-    conv1d_bias_ref = conv1d_bias.detach().clone().requires_grad_()
-    x_proj_weight_ref = x_proj_weight.detach().clone().requires_grad_()
-    delta_proj_weight_ref = delta_proj_weight.detach().clone().requires_grad_()
-    out_proj_weight_ref = out_proj_weight.detach().clone().requires_grad_()
-    out_proj_bias_ref = (out_proj_bias.detach().clone().requires_grad_()
-                         if out_proj_bias is not None else None)
-    A_ref = A.detach().clone().requires_grad_()
-    B_ref = B.detach().clone().requires_grad_() if B is not None else None
-    C_ref = C.detach().clone().requires_grad_() if C is not None else None
-    D_ref = D.detach().clone().requires_grad_()
-    delta_bias_ref = delta_bias.detach().clone().requires_grad_() if delta_bias is not None else None
-    out = mamba_inner_fn(xz, conv1d_weight, conv1d_bias, x_proj_weight, delta_proj_weight,
-                         out_proj_weight, out_proj_bias,
-                         A, B, C, D, delta_bias=delta_bias, delta_softplus=True)
-    out_ref = mamba_inner_ref(xz_ref, conv1d_weight_ref, conv1d_bias_ref, x_proj_weight_ref,
-                              delta_proj_weight_ref, out_proj_weight_ref, out_proj_bias_ref,
-                              A_ref, B_ref, C_ref, D_ref,
-                              delta_bias=delta_bias_ref, delta_softplus=True)
-    # dA = torch.exp(torch.einsum('bdl,dn->bdln', delta, A))
-    # dt_u = delta * u
+tests/ops/test_selective_scan_.py ................................................                 [100%]
 
-    print(f'Output max diff: {(out - out_ref).abs().max().item()}')
-    print(f'Output mean diff: {(out - out_ref).abs().mean().item()}')
-    assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
-
-    g = torch.randn_like(out)
-    out_ref.backward(g)
-    out.backward(g)
-
-    print(f'dxz max diff: {(xz.grad - xz_ref.grad).abs().max().item()}')
-    print(f'dA max diff: {(A.grad - A_ref.grad).abs().max().item()}')
-    if not is_variable_B:
-        print(f'dB max diff: {(B.grad - B_ref.grad).abs().max().item()}')
-    if not is_variable_C:
-        print(f'dC max diff: {(C.grad - C_ref.grad).abs().max().item()}')
-    print(f'dD max diff: {(D.grad - D_ref.grad).abs().max().item()}')
-    print(f'ddelta_bias max diff: {(delta_bias.grad - delta_bias_ref.grad).abs().max().item()}')
-    print(f'dout_proj_weight max diff: {(out_proj_weight.grad - out_proj_weight_ref.grad).abs().max().item()}')
-    print(f'ddelta_proj_weight max diff: {(delta_proj_weight.grad - delta_proj_weight_ref.grad).abs().max().item()}')
-    print(f'dx_proj_weight max diff: {(x_proj_weight.grad - x_proj_weight_ref.grad).abs().max().item()}')
-    print(f'dconv1d_weight max diff: {(conv1d_weight.grad - conv1d_weight_ref.grad).abs().max().item()}')
-    print(f'dconv1d_bias max diff: {(conv1d_bias.grad - conv1d_bias_ref.grad).abs().max().item()}')
-
-    # assert torch.allclose(xz.grad, xz_ref.grad.to(dtype=itype), rtol=rtol * 2, atol=atol * 2)
-    # assert torch.allclose(delta.grad, delta_ref.grad.to(dtype=itype), rtol=rtol * 5, atol=atol * 10)
-    # assert torch.allclose(A.grad, A_ref.grad, rtol=rtolw, atol=atolw * 5)
-    # assert torch.allclose(B.grad, B_ref.grad, rtol=rtolw if not is_variable_B else rtol,
-    #                       atol=atolw if not is_variable_B else atol)
-    # assert torch.allclose(C.grad, C_ref.grad, rtol=rtolw if not is_variable_C else rtol,
-    #                       atol=atolw if not is_variable_C else atol)
-    # assert torch.allclose(D.grad, D_ref.grad, rtol=rtolw, atol=atolw)
-    # assert torch.allclose(delta_bias.grad, delta_bias_ref.grad, rtol=rtolw, atol=atolw)
+========================================== 48 passed in 42.40s ===========================================
+"""

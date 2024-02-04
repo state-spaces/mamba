@@ -133,6 +133,9 @@ if not SKIP_CUDA_BUILD:
                 "csrc/selective_scan/selective_scan_bwd_fp16_complex.cu",
                 "csrc/selective_scan/selective_scan_bwd_bf16_real.cu",
                 "csrc/selective_scan/selective_scan_bwd_bf16_complex.cu",
+                "csrc/selective_scan/selective_scan_fwd2.cu",
+                "csrc/selective_scan/selective_scan_fwd3.cu",
+                "csrc/selective_scan/selective_scan_fwd4.cu",
             ],
             extra_compile_args={
                 "cxx": ["-O3", "-std=c++17"],
