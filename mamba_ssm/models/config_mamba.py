@@ -16,3 +16,6 @@ class MambaConfig:
 
     def to_json_string(self):
         return json.dumps(asdict(self))
+
+    def to_dict(self):
+        return asdict(self)
