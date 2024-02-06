@@ -246,7 +246,7 @@ def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D, has_z
     out, *rest = selective_scan_fn(
         u, delta, A, B, C, D, z=z,
         delta_bias=delta_bias, delta_softplus=delta_softplus,
-        return_last_state=return_last_state
+        return_last_state=return_last_state, nrows=nrows
     )
     if return_last_state:
         state = rest[0]
