@@ -277,7 +277,7 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
                         const float delta_a_exp = exp2f(delta_vals[r][i] * A_scaled[r]);
                         thread_data[i] = make_float2(delta_a_exp, !kIsVariableB ? delta_vals[r][i] * float(u_vals[r][i]) : delta_vals[r][i] * float(u_vals[r][i]) * B_vals[i]);
                         if (i == 0) {
-                            smem_delta_a[threadIdx.x == 0 ? (state_idx + (chunk % 2) * Ktraits::MaxDState + r * 2 * Ktraits::MaxDState) : (threadIdx.x + kNRows * 2 * Ktraits::MaxDState)] = delta_a_exp;
+                            smem_delta_a[threadIdx.x == 0 ? (state_idx + (chunk % 2) * Ktraits::MaxDState + r * 2 * Ktraits::MaxDState) : (threadIdx.x + 2 * Ktraits::MaxDState + r * 2 * Ktraits::MaxDState)] = delta_a_exp;
                         } else {
                             thread_reverse_data[i - 1].x = delta_a_exp;
                         }
@@ -366,7 +366,7 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
                         weight_t B_delta_u_val = !kIsVariableB ? delta_vals[r][i] * float(u_vals[r][i]) : B_vals[i] * delta_vals[r][i] * float(u_vals[r][i]);
                         thread_data[i] = make_float4(delta_a_exp.real_, delta_a_exp.imag_, B_delta_u_val.real_, B_delta_u_val.imag_);
                         if (i == 0) {
-                            smem_delta_a[threadIdx.x == 0 ? (state_idx + (chunk % 2) * Ktraits::MaxDState + r * 2 * Ktraits::MaxDState) : threadIdx.x + kNRows * 2 * Ktraits::MaxDState] = delta_a_exp;
+                            smem_delta_a[threadIdx.x == 0 ? (state_idx + (chunk % 2) * Ktraits::MaxDState + r * 2 * Ktraits::MaxDState) : (threadIdx.x + 2 * Ktraits::MaxDState) + r * 2 * Ktraits::MaxDState] = delta_a_exp;
                         } else {
                             thread_reverse_data[i - 1].x = delta_a_exp.real_;
                             thread_reverse_data[i - 1].y = -delta_a_exp.imag_;
@@ -381,7 +381,7 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
                     __syncthreads();
                     complex_t delta_a_exp = threadIdx.x == kNThreads - 1
                         ? (chunk == params.n_chunks - 1 ? 1.f : smem_delta_a[state_idx + ((chunk + 1) % 2) * Ktraits::MaxDState + r * 2 * Ktraits::MaxDState])
-                        : smem_delta_a[threadIdx.x + 1 + kNRows * 2 * Ktraits::MaxDState];
+                        : smem_delta_a[threadIdx.x + 1 + 2 * Ktraits::MaxDState + r * 2 * Ktraits::MaxDState];
                     thread_reverse_data[kNItems - 1].x = delta_a_exp.real_;
                     thread_reverse_data[kNItems - 1].y = -delta_a_exp.imag_;
                     // Initialize running total

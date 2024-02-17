@@ -51,7 +51,14 @@
         AT_ERROR(#NAME, " not implemented for weight type '", toString(WTYPE), "'"); \
     }
 
-#define INT_SWITCH(INT, NAME, ...) [&] {                         \
+#define INT_SWITCH_FWD(INT, NAME, ...) [&] {                     \
+    if (INT == 2) {constexpr int NAME = 2; __VA_ARGS__(); }      \
+    else if (INT == 3) {constexpr int NAME = 3; __VA_ARGS__(); } \
+    else if (INT == 4) {constexpr int NAME = 4; __VA_ARGS__(); } \
+    else {constexpr int NAME = 1; __VA_ARGS__(); }               \
+}()                                                              \
+
+#define INT_SWITCH_BWD(INT, NAME, ...) [&] {                     \
     if (INT == 2) {constexpr int NAME = 2; __VA_ARGS__(); }      \
     else if (INT == 3) {constexpr int NAME = 3; __VA_ARGS__(); } \
     else if (INT == 4) {constexpr int NAME = 4; __VA_ARGS__(); } \
@@ -232,6 +239,7 @@ void set_ssm_params_bwd(SSMParamsBwd &params,
     }
 }
 
+template <bool is_complex>
 std::vector<at::Tensor>
 selective_scan_fwd(const at::Tensor &u, const at::Tensor &delta,
                   const at::Tensor &A, const at::Tensor &B, const at::Tensor &C,
@@ -244,11 +252,14 @@ selective_scan_fwd(const at::Tensor &u, const at::Tensor &delta,
     auto input_type = u.scalar_type();
     auto weight_type = A.scalar_type();
     TORCH_CHECK(input_type == at::ScalarType::Float || input_type == at::ScalarType::Half || input_type == at::ScalarType::BFloat16);
-    TORCH_CHECK(weight_type == at::ScalarType::Float || weight_type == at::ScalarType::ComplexFloat);
+    // TORCH_CHECK(weight_type == at::ScalarType::Float || weight_type == at::ScalarType::ComplexFloat);
+    
+    using weight_t = std::conditional_t<!is_complex, float, c10::complex<float>>;
+    TORCH_CHECK(weight_type == (is_complex ? at::ScalarType::ComplexFloat : at::ScalarType::Float));
 
     const bool is_variable_B = B.dim() >= 3;
     const bool is_variable_C = C.dim() >= 3;
-    const bool is_complex = weight_type == at::ScalarType::ComplexFloat;
+    // const bool is_complex = weight_type == at::ScalarType::ComplexFloat;
 
     TORCH_CHECK(delta.scalar_type() == input_type);
     TORCH_CHECK(B.scalar_type() == (!is_variable_B ? weight_type : input_type));
@@ -338,17 +349,18 @@ selective_scan_fwd(const at::Tensor &u, const at::Tensor &delta,
     at::cuda::CUDAGuard device_guard{(char)u.get_device()};
     auto stream = at::cuda::getCurrentCUDAStream().stream();
     DISPATCH_ITYPE_FLOAT_AND_HALF_AND_BF16(u.scalar_type(), "selective_scan_fwd", [&] {
-        DISPATCH_WTYPE_FLOAT_AND_COMPLEX(A.scalar_type(), "selective_scan_fwd", [&] {
-            INT_SWITCH(nrows, kNRows, [&] {
+        // DISPATCH_WTYPE_FLOAT_AND_COMPLEX(A.scalar_type(), "selective_scan_fwd", [&] {
+            INT_SWITCH_FWD(nrows, kNRows, [&] {
                 selective_scan_fwd_cuda<kNRows, input_t, weight_t>(params, stream);
             });
-        });
+        // });
     });
     std::vector<at::Tensor> result = {out, x};
     if (has_z) { result.push_back(out_z); }
     return result;
 }
 
+template <bool is_complex>
 std::vector<at::Tensor>
 selective_scan_bwd(const at::Tensor &u, const at::Tensor &delta,
                   const at::Tensor &A, const at::Tensor &B, const at::Tensor &C,
@@ -366,11 +378,14 @@ selective_scan_bwd(const at::Tensor &u, const at::Tensor &delta,
     auto input_type = u.scalar_type();
     auto weight_type = A.scalar_type();
     TORCH_CHECK(input_type == at::ScalarType::Float || input_type == at::ScalarType::Half || input_type == at::ScalarType::BFloat16);
-    TORCH_CHECK(weight_type == at::ScalarType::Float || weight_type == at::ScalarType::ComplexFloat);
+    // TORCH_CHECK(weight_type == at::ScalarType::Float || weight_type == at::ScalarType::ComplexFloat);
+    
+    using weight_t = std::conditional_t<!is_complex, float, c10::complex<float>>;
+    TORCH_CHECK(weight_type == (is_complex ? at::ScalarType::ComplexFloat : at::ScalarType::Float));
 
     const bool is_variable_B = B.dim() >= 3;
     const bool is_variable_C = C.dim() >= 3;
-    const bool is_complex = weight_type == at::ScalarType::ComplexFloat;
+    // const bool is_complex = weight_type == at::ScalarType::ComplexFloat;
 
     TORCH_CHECK(delta.scalar_type() == input_type);
     TORCH_CHECK(B.scalar_type() == (!is_variable_B ? weight_type : input_type));
@@ -498,12 +513,11 @@ selective_scan_bwd(const at::Tensor &u, const at::Tensor &delta,
     at::cuda::CUDAGuard device_guard{(char)u.get_device()};
     auto stream = at::cuda::getCurrentCUDAStream().stream();
     DISPATCH_ITYPE_FLOAT_AND_HALF_AND_BF16(u.scalar_type(), "selective_scan_bwd", [&] {
-        DISPATCH_WTYPE_FLOAT_AND_COMPLEX(A.scalar_type(), "selective_scan_bwd", [&] {
-            constexpr int kNRows = 1;
-            // INT_SWITCH(nrows, kNRows, [&] {
+        // DISPATCH_WTYPE_FLOAT_AND_COMPLEX(A.scalar_type(), "selective_scan_bwd", [&] {
+            INT_SWITCH_BWD(nrows, kNRows, [&] {
                 selective_scan_bwd_cuda<kNRows, input_t, weight_t>(params, stream);
-            // });
-        });
+            });
+        // });
     });
     std::vector<at::Tensor> result = {du, ddelta, dA, dB.to(B.dtype()), dC.to(C.dtype()), dD, ddelta_bias};
     if (has_z) { result.push_back(dz); }
@@ -512,6 +526,8 @@ selective_scan_bwd(const at::Tensor &u, const at::Tensor &delta,
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("fwd", &selective_scan_fwd, "Selective scan forward");
-    m.def("bwd", &selective_scan_bwd, "Selective scan backward");
+    m.def("fwd", &selective_scan_fwd<false>, "Selective scan forward");
+    m.def("bwd", &selective_scan_bwd<false>, "Selective scan backward");
+    // m.def("fwdc", &selective_scan_fwd<true>, "Selective scan forward for complex");
+    // m.def("bwdc", &selective_scan_bwd<true>, "Selective scan backward for complex");
 }
