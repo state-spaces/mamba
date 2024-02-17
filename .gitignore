@@ -1,4 +1,5 @@
 *__pycache__/
 *.egg-info/
 build/
-**.so
+*.so
+*.whl
