@@ -5,6 +5,7 @@ import pandas
 import torch
 from tqdm import tqdm
 import triton
+from einops import rearrange, repeat
 
 try:
     from flash_attn.bert_padding import pad_input, unpad_input
@@ -13,11 +14,7 @@ except:
     pass
 
 
-
-
 def benchmark_mamba(batch, head, length, dim_head, d_state, selective_scan_cuda, *args):
-   from einops import rearrange, repeat
-
    d_model = dim_head * head
    expand = 2
    d_inner = d_model * expand
@@ -264,8 +261,6 @@ def build_selective_scan_fn(selective_scan_cuda: object = None, mode="mamba_ssm"
 
 
 def benchmark_mamba_fwdbwd(batch, head, length, dim_head, d_state, selective_scan_fn, *args):
-   from einops import rearrange, repeat
-
    d_model = dim_head * head
    expand = 2
    d_inner = d_model * expand
