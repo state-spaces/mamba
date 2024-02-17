@@ -141,7 +141,7 @@ def build_selective_scan_fn(selective_scan_cuda: object = None, mode="mamba_ssm"
         return SelectiveScanFn.apply(u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state, nrows, backnrows)
 
     selective_scan_fn.__repr__ = lambda *_ :f"selective_scan_fn | {mode} | {tag}"
-    print(repr(selective_scan_fn), "==", selective_scan_fn.__repr__())
+    # print(repr(selective_scan_fn), "==", selective_scan_fn.__repr__())
 
     return selective_scan_fn
 
@@ -297,15 +297,15 @@ def test_speed():
         partial(build_selective_scan_fn(selective_scan_cuda_test, mode="sstest", tag="f2b2"), u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state=True, nrows=2, backnrows=2),
         partial(build_selective_scan_fn(selective_scan_cuda_test, mode="sstest", tag="f3b3"), u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state=True, nrows=3, backnrows=3),
         partial(build_selective_scan_fn(selective_scan_cuda_test, mode="sstest", tag="f4b4"), u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state=True, nrows=4, backnrows=4),
-        # partial(build_selective_scan_fn(selective_scan_cuda_core, mode="sscore", tag="f1b1"), u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state=True, nrows=1, backnrows=1),
-        # partial(build_selective_scan_fn(selective_scan_cuda_core, mode="sscore", tag="f2b1"), u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state=True, nrows=2, backnrows=1),
-        # partial(build_selective_scan_fn(selective_scan_cuda_core, mode="sscore", tag="f3b1"), u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state=True, nrows=3, backnrows=1),
-        # partial(build_selective_scan_fn(selective_scan_cuda_core, mode="sscore", tag="f4b1"), u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state=True, nrows=4, backnrows=1),
-        # partial(build_selective_scan_fn(selective_scan_cuda_core, mode="sscore", tag="f1b2"), u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state=True, nrows=1, backnrows=2),
-        # partial(build_selective_scan_fn(selective_scan_cuda_core, mode="sscore", tag="f2b2"), u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state=True, nrows=2, backnrows=2),
-        # partial(build_selective_scan_fn(selective_scan_cuda_core, mode="sscore", tag="f2b3"), u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state=True, nrows=3, backnrows=3),
-        # partial(build_selective_scan_fn(selective_scan_cuda_core, mode="sscore", tag="f4b4"), u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state=True, nrows=4, backnrows=4),
-        
+        partial(build_selective_scan_fn(selective_scan_cuda_core, mode="sscore", tag="f1b1"), u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state=True, nrows=1, backnrows=1),
+        partial(build_selective_scan_fn(selective_scan_cuda_core, mode="sscore", tag="f2b1"), u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state=True, nrows=2, backnrows=1),
+        partial(build_selective_scan_fn(selective_scan_cuda_core, mode="sscore", tag="f3b1"), u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state=True, nrows=3, backnrows=1),
+        partial(build_selective_scan_fn(selective_scan_cuda_core, mode="sscore", tag="f4b1"), u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state=True, nrows=4, backnrows=1),
+        partial(build_selective_scan_fn(selective_scan_cuda_core, mode="sscore", tag="f1b2"), u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state=True, nrows=1, backnrows=2),
+        partial(build_selective_scan_fn(selective_scan_cuda_core, mode="sscore", tag="f2b2"), u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state=True, nrows=2, backnrows=2),
+        partial(build_selective_scan_fn(selective_scan_cuda_core, mode="sscore", tag="f2b3"), u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state=True, nrows=3, backnrows=3),
+        partial(build_selective_scan_fn(selective_scan_cuda_core, mode="sscore", tag="f4b4"), u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state=True, nrows=4, backnrows=4),
+        partial(build_selective_scan_fn(selective_scan_cuda, mode="mamba_ssm", tag="ori"), u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state=True),
     ]
 
     for test in tests:
@@ -318,7 +318,7 @@ def test_speed():
         e = time.time()
         starts.append(s)
         ends.append(e)
-        print("fwd", test.func, e - s, flush=True)
+        print("fwd", test.func.__repr__(), e - s, flush=True)
     for test in tests:
         s = time.time()
         for _ in range(TIMES):
@@ -329,6 +329,6 @@ def test_speed():
         e = time.time()
         starts.append(s)
         ends.append(e)
-        print("fwdbwd", test.func, e - s, flush=True)
+        print("fwdbwd", test.func.__repr__(), e - s, flush=True)
 
 test_speed()
