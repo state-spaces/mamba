@@ -1,4 +1,5 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
+import json
 
 
 @dataclass
@@ -12,3 +13,9 @@ class MambaConfig:
     residual_in_fp32: bool = True
     fused_add_norm: bool = True
     pad_vocab_size_multiple: int = 8
+
+    def to_json_string(self):
+        return json.dumps(asdict(self))
+
+    def to_dict(self):
+        return asdict(self)
