@@ -13,7 +13,7 @@ with an efficient hardware-aware design and implementation in the spirit of [Fla
 
 ## Installation
 
-- `pip install causal-conv1d>=1.1.0`: an efficient implementation of a simple causal Conv1d layer used inside the Mamba block.
+- `pip install causal-conv1d>=1.1.0,<1.2.0`: an efficient implementation of a simple causal Conv1d layer used inside the Mamba block.
 - `pip install mamba-ssm`: the core Mamba package.
 
 It can also be built from source with `pip install .` from this repository.
@@ -44,6 +44,7 @@ Source: [modules/mamba_simple.py](mamba_ssm/modules/mamba_simple.py).
 
 Usage:
 ```
+import torch
 from mamba_ssm import Mamba
 
 batch, length, dim = 2, 64, 16
@@ -137,6 +138,7 @@ To test generation latency (e.g. batch size = 1) with different sampling strateg
 ```
 python benchmarks/benchmark_generation_mamba_simple.py --model-name "state-spaces/mamba-2.8b" --prompt "My cat wrote all this CUDA code for a new language model and" --topp 0.9 --temperature 0.7 --repetition-penalty 1.2
 python benchmarks/benchmark_generation_mamba_simple.py --model-name "EleutherAI/pythia-2.8b" --prompt "My cat wrote all this CUDA code for a new language model and" --topp 0.9 --temperature 0.7 --repetition-penalty 1.2
+python benchmarks/benchmark_generation_mamba_simple.py --model-name "state-spaces/mamba-2.8b" --prompt "My cat wrote all this CUDA code for a new language model and" --minp 0.05 --topk 0 --temperature 0.7 --repetition-penalty 1.2
 ```
 
 To test generation throughput with random prompts (e.g. large batch size):
