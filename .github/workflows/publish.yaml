@@ -44,7 +44,7 @@ jobs:
           # manylinux docker image, but I haven't figured out how to install CUDA on manylinux.
           os: [ubuntu-20.04]
           python-version: ['3.7', '3.8', '3.9', '3.10', '3.11', '3.12']
-          torch-version: ['1.12.1', '1.13.1', '2.0.1', '2.1.2', '2.2.0']
+          torch-version: ['1.12.1', '1.13.1', '2.0.1', '2.1.2', '2.2.0', '2.3.0.dev20240126']
           cuda-version: ['11.8.0', '12.2.2']
           # We need separate wheels that either uses C++11 ABI (-D_GLIBCXX_USE_CXX11_ABI) or not.
           # Pytorch wheels currently don't use it, but nvcr images have Pytorch compiled with C++11 ABI.
@@ -70,6 +70,8 @@ jobs:
             - torch-version: '2.1.2'
               python-version: '3.7'
             - torch-version: '2.2.0'
+              python-version: '3.7'
+            - torch-version: '2.3.0.dev20240126'
               python-version: '3.7'
             # Pytorch <= 2.0 only supports CUDA <= 11.8
             - torch-version: '1.12.1'
@@ -133,9 +135,19 @@ jobs:
           # We want to figure out the CUDA version to download pytorch
           # e.g. we can have system CUDA version being 11.7 but if torch==1.12 then we need to download the wheel from cu116
           # This code is ugly, maybe there's a better way to do this.
-          export TORCH_CUDA_VERSION=$(python -c "import os; minv = {'1.12': 113, '1.13': 116, '2.0': 117, '2.1': 118, '2.2': 118}[os.environ['MATRIX_TORCH_VERSION']]; maxv = {'1.12': 116, '1.13': 117, '2.0': 118, '2.1': 121, '2.2': 121}[os.environ['MATRIX_TORCH_VERSION']]; print(max(min(int(os.environ['MATRIX_CUDA_VERSION']), maxv), minv))")
+          export TORCH_CUDA_VERSION=$(python -c "from os import environ as env; \
+            minv = {'1.12': 113, '1.13': 116, '2.0': 117, '2.1': 118, '2.2': 118, '2.3': 118}[env['MATRIX_TORCH_VERSION']]; \
+            maxv = {'1.12': 116, '1.13': 117, '2.0': 118, '2.1': 121, '2.2': 121, '2.3': 121}[env['MATRIX_TORCH_VERSION']]; \
+            print(max(min(int(env['MATRIX_CUDA_VERSION']), maxv), minv))" \
+          )
           if [[ ${{ matrix.torch-version }} == *"dev"* ]]; then
-            pip install --no-cache-dir --pre torch==${{ matrix.torch-version }} --index-url https://download.pytorch.org/whl/nightly/cu${TORCH_CUDA_VERSION}
+            if [[ ${MATRIX_TORCH_VERSION} == "2.2" ]]; then
+              # --no-deps because we can't install old versions of pytorch-triton
+              pip install typing-extensions jinja2
+              pip install --no-cache-dir --no-deps --pre https://download.pytorch.org/whl/nightly/cu${TORCH_CUDA_VERSION}/torch-${{ matrix.torch-version }}%2Bcu${TORCH_CUDA_VERSION}-cp${MATRIX_PYTHON_VERSION}-cp${MATRIX_PYTHON_VERSION}-linux_x86_64.whl
+            else
+              pip install --no-cache-dir --pre torch==${{ matrix.torch-version }} --index-url https://download.pytorch.org/whl/nightly/cu${TORCH_CUDA_VERSION}
+            fi
           else
             pip install --no-cache-dir torch==${{ matrix.torch-version }} --index-url https://download.pytorch.org/whl/cu${TORCH_CUDA_VERSION}
           fi
