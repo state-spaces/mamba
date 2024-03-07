@@ -14,7 +14,7 @@ from transformers.modeling_outputs import CausalLMOutput
 
 from mamba_ssm.models.config_mamba import MambaConfig
 from mamba_ssm.modules.mamba_simple import Mamba, Block
-from mamba_ssm.utils.generation import GenerationMixin
+from mamba_ssm.utils.generation import MambaGenerationMixin as GenerationMixin
 from mamba_ssm.utils.hf import load_config_hf, load_state_dict_hf
 
 try:
