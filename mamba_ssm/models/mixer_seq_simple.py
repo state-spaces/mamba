@@ -9,6 +9,8 @@ from collections import namedtuple
 
 import torch
 import torch.nn as nn
+from transformers import PreTrainedModel
+from transformers.modeling_outputs import CausalLMOutput
 
 from mamba_ssm.models.config_mamba import MambaConfig
 from mamba_ssm.modules.mamba_simple import Mamba, Block
@@ -173,7 +175,7 @@ class MixerModel(nn.Module):
         return hidden_states
 
 
-class MambaLMHeadModel(nn.Module, GenerationMixin):
+class MambaLMHeadModel(PreTrainedModel, GenerationMixin):
 
     def __init__(
         self,
@@ -193,7 +195,8 @@ class MambaLMHeadModel(nn.Module, GenerationMixin):
         pad_vocab_size_multiple = config.pad_vocab_size_multiple
         factory_kwargs = {"device": device, "dtype": dtype}
 
-        super().__init__()
+        PreTrainedModel.__init__(self, config)
+        GenerationMixin.__init__(self)
         if vocab_size % pad_vocab_size_multiple != 0:
             vocab_size += pad_vocab_size_multiple - (vocab_size % pad_vocab_size_multiple)
         self.backbone = MixerModel(
@@ -235,7 +238,6 @@ class MambaLMHeadModel(nn.Module, GenerationMixin):
         if num_last_tokens > 0:
             hidden_states = hidden_states[:, -num_last_tokens:]
         lm_logits = self.lm_head(hidden_states)
-        CausalLMOutput = namedtuple("CausalLMOutput", ["logits"])
         return CausalLMOutput(logits=lm_logits)
 
     @classmethod
