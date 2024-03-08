@@ -116,7 +116,7 @@ class Mamba(nn.Module):
 
         self.out_proj = nn.Linear(self.d_inner, self.d_model, bias=bias, **factory_kwargs)
 
-    def forward(self, hidden_states, inference_params=None):
+    def forward(self, hidden_states, cu_seqlens=None, inference_params=None):
         """
         hidden_states: (B, L, D)
         Returns: same shape as hidden_states
@@ -160,6 +160,18 @@ class Mamba(nn.Module):
             )
         else:
             x, z = xz.chunk(2, dim=1)
+
+            # (Optional Step1 for cu_seqlens): Right padding zeros at sequence boundary for con1d ops in cumulative sequences
+            if cu_seqlens is not None:
+                padded_x = x
+                count = 0
+                for idx in cu_seqlens[0][1:-1].tolist():
+                    padded_idx = idx + count*(self.d_conv - 1)
+                    padded_x = torch.cat((padded_x[:, :, :padded_idx], torch.zeros(1, x.shape[1], self.d_conv - 1, dtype=x.dtype, device=x.device), padded_x[:, :, padded_idx:]), dim=2)
+                    count = count + 1
+                x = padded_x
+                assert x.shape[2] == (self.d_conv - 1) * len(cu_seqlens[0][1:-1]) + z.shape[2]
+
             # Compute short convolution
             if conv_state is not None:
                 # If we just take x[:, :, -self.d_conv :], it will error if seqlen < self.d_conv
@@ -175,6 +187,17 @@ class Mamba(nn.Module):
                     bias=self.conv1d.bias,
                     activation=self.activation,
                 )
+            
+            # (Optional Step2 for cu_seqlens): Mask conv1d ops in cumulative sequences
+            if cu_seqlens is not None:
+                mask = []
+                for seq_len in (cu_seqlens[0][1:] - cu_seqlens[0][:-1]).tolist():
+                    mask.extend([True] * seq_len)
+                    mask.extend([False] * (self.d_conv - 1))
+                mask = mask[:-(self.d_conv - 1)]
+                assert x.shape[2] == len(mask)
+                x = x[:, :, mask]
+                assert x.shape[2] == z.shape[2]
 
             # We're careful here about the layout, to avoid extra transposes.
             # We want dt to have d as the slowest moving dimension
@@ -185,6 +208,13 @@ class Mamba(nn.Module):
             dt = rearrange(dt, "d (b l) -> b d l", l=seqlen)
             B = rearrange(B, "(b l) dstate -> b dstate l", l=seqlen).contiguous()
             C = rearrange(C, "(b l) dstate -> b dstate l", l=seqlen).contiguous()
+
+            # (Optional Step3 for cu_seqlens): Boundary restting for cumulative sequences, a.k.a, delta -> inf
+            if cu_seqlens is not None:
+                for idx in cu_seqlens[0][1:-1].tolist():    
+                    # TODO: refactor boundary restting values for numerical stability
+                    dt[:, :, idx] = torch.tensor(float(1000))
+
             assert self.activation in ["silu", "swish"]
             y = selective_scan_fn(
                 x,
