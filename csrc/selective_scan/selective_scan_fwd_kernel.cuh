@@ -107,6 +107,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     weight_t *C = reinterpret_cast<weight_t *>(params.C_ptr) + dim_id * kNRows * params.C_d_stride;
     input_t *Cvar = reinterpret_cast<input_t *>(params.C_ptr) + batch_id * params.C_batch_stride + group_id * params.C_group_stride;
     scan_t *x = reinterpret_cast<scan_t *>(params.x_ptr) + (batch_id * params.dim + dim_id * kNRows) * params.n_chunks * params.dstate;
+    long *cu_seqlens = reinterpret_cast<long *>(params.cu_seqlens_ptr) + batch_id * params.u_batch_stride
 
     float D_val[kNRows] = {0};
     if (params.D_ptr != nullptr) {
@@ -215,6 +216,20 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                     if constexpr (!kIsComplex) {
                         thread_data[i] = make_float2(exp2f(delta_vals[r][i] * A_val[r]),
                                                      !kIsVariableB ? delta_u_vals[r][i] : B_vals[i] * delta_u_vals[r][i]);
+                        
+                        // Reset A bar for cumulative sequences (Real)
+                        int left = 1;
+                        int right = params.cu_seqlens_size - 2;
+                        while (left <= right) {
+                            if (cu_seqlens[(left + right) >> 1] == threadIdx.x * kNItems + i + chunk * kChunkSize) {
+                                thread_data[i].x = 0.f;
+                            } else if (cu_seqlens[(left + right) >> 1] < threadIdx.x * kNItems + i + chunk * kChunkSize) {
+                                left = ((left + right) >> 1) + 1;
+                            } else {
+                                right = ((left + right) >> 1) - 1;
+                            }
+                        }
+
                         if constexpr (!Ktraits::kIsEvenLen) {  // So that the last state is correct
                             if (threadIdx.x * kNItems + i >= params.seqlen - chunk * kChunkSize) {
                                 thread_data[i] = make_float2(1.f, 0.f);
@@ -225,6 +240,21 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                         complex_t delta_a_exp = cexp2f(delta_vals[r][i] * A_val[r]);
                         weight_t B_delta_u_val = !kIsVariableB ? delta_u_vals[r][i] : B_vals[i] * delta_u_vals[r][i];
                         thread_data[i] = make_float4(delta_a_exp.real_, delta_a_exp.imag_, B_delta_u_val.real_, B_delta_u_val.imag_);
+
+                        // Reset A bar for cumulative sequences (Complex)
+                        int left = 1;
+                        int right = params.cu_seqlens_size - 2;
+                        while (left <= right) {
+                            if (cu_seqlens[(left + right) >> 1] == threadIdx.x * kNItems + i + chunk * kChunkSize) {
+                                thread_data[i].x = 0.f;
+                                thread_data[i].y = 0.f;
+                            } else if (cu_seqlens[(left + right) >> 1] < threadIdx.x * kNItems + i + chunk * kChunkSize) {
+                                left = ((left + right) >> 1) + 1;
+                            } else {
+                                right = ((left + right) >> 1) - 1;
+                            }
+                        }
+
                         if constexpr (!Ktraits::kIsEvenLen) {  // So that the last state is correct
                             if (threadIdx.x * kNItems + i >= params.seqlen - chunk * kChunkSize) {
                                 thread_data[i] = make_float4(1.f, 0.f, 0.f, 0.f);

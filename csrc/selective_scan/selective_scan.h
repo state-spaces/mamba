@@ -33,6 +33,8 @@ struct SSMParamsBase {
 
     bool delta_softplus;
 
+    int cu_seqlens_size;
+
     index_t A_d_stride;
     index_t A_dstate_stride;
     index_t B_batch_stride;
@@ -66,6 +68,8 @@ struct SSMParamsBase {
     void *__restrict__ x_ptr;
     void *__restrict__ z_ptr;
     void *__restrict__ out_z_ptr;
+
+    void *__restrict__ cu_seqlens_ptr;
 };
 
 struct SSMParamsBwd: public SSMParamsBase {
