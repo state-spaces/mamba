@@ -252,8 +252,7 @@ class MambaLMHeadModel(nn.Module, GenerationMixin):
         Save the model and its configuration file to a directory.
         """
         # Ensure save_directory exists
-        if not os.path.exists(save_directory):
-            os.makedirs(save_directory)
+        os.makedirs(save_directory, exist_ok=True)
 
         # Save the model's state_dict
         model_path = os.path.join(save_directory, 'pytorch_model.bin')
