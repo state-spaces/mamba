@@ -157,6 +157,7 @@ class Mamba(nn.Module):
                 self.D.float(),
                 delta_bias=self.dt_proj.bias.float(),
                 delta_softplus=True,
+                cu_seqlens=cu_seqlens[0],
             )
         else:
             x, z = xz.chunk(2, dim=1)
