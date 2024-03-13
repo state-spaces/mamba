@@ -215,6 +215,14 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                     if constexpr (!kIsComplex) {
                         thread_data[i] = make_float2(exp2f(delta_vals[r][i] * A_val[r]),
                                                      !kIsVariableB ? delta_u_vals[r][i] : B_vals[i] * delta_u_vals[r][i]);
+                        
+                        // Reset hidden_states for cumulative sequences
+                        for (int idx = 0; idx < params.cu_seqlens_size; idx++) {
+                            if (threadIdx.x * kNItems + i == reinterpret_cast<long *>(params.cu_seqlens_ptr)[idx + batch_id * params.u_batch_stride] - chunk * kChunkSize) {
+                                thread_data[i].x = 0;
+                            }
+                        }
+
                         if constexpr (!Ktraits::kIsEvenLen) {  // So that the last state is correct
                             if (threadIdx.x * kNItems + i >= params.seqlen - chunk * kChunkSize) {
                                 thread_data[i] = make_float2(1.f, 0.f);

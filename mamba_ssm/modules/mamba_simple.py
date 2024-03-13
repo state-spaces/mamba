@@ -10,7 +10,7 @@ from torch import Tensor
 
 from einops import rearrange, repeat
 
-from mamba_ssm.ops.selective_scan_interface import selective_scan_fn, mamba_inner_fn
+from mamba_ssm.ops.selective_scan_interface import selective_scan_fn, mamba_inner_fn, selective_scan_ref
 
 try:
     from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
@@ -157,7 +157,7 @@ class Mamba(nn.Module):
                 self.D.float(),
                 delta_bias=self.dt_proj.bias.float(),
                 delta_softplus=True,
-                cu_seqlens=cu_seqlens[0],
+                cu_seqlens=cu_seqlens[0] if cu_seqlens is not None else None,
             )
         else:
             x, z = xz.chunk(2, dim=1)
@@ -210,12 +210,6 @@ class Mamba(nn.Module):
             B = rearrange(B, "(b l) dstate -> b dstate l", l=seqlen).contiguous()
             C = rearrange(C, "(b l) dstate -> b dstate l", l=seqlen).contiguous()
 
-            # (Optional Step3 for cu_seqlens): Boundary restting for cumulative sequences, a.k.a, delta -> inf
-            if cu_seqlens is not None:
-                for idx in cu_seqlens[0][1:-1].tolist():    
-                    # TODO: refactor boundary restting values for numerical stability
-                    dt[:, :, idx] = torch.tensor(float(1000))
-
             assert self.activation in ["silu", "swish"]
             y = selective_scan_fn(
                 x,
@@ -228,6 +222,7 @@ class Mamba(nn.Module):
                 delta_bias=self.dt_proj.bias.float(),
                 delta_softplus=True,
                 return_last_state=ssm_state is not None,
+                cu_seqlens=cu_seqlens[0] if cu_seqlens is not None else None,
             )
             if ssm_state is not None:
                 y, last_state = y
