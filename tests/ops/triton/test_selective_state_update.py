@@ -19,7 +19,7 @@ from mamba_ssm.ops.triton.selective_state_update import selective_state_update, 
 # @pytest.mark.parametrize("dstate", [16])
 @pytest.mark.parametrize("dim", [2048, 2048 + 16, 4096])
 # @pytest.mark.parametrize("dim", [2048])
-def test_causal_conv1d_update(dim, dstate, has_z, itype):
+def test_selective_state_update(dim, dstate, has_z, itype):
     device = "cuda"
     rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (5e-3, 1e-2)
     if itype == torch.bfloat16:
