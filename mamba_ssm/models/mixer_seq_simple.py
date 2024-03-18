@@ -220,8 +220,9 @@ class MambaLMHeadModel(nn.Module, GenerationMixin):
         self.tie_weights()
 
     def tie_weights(self):
-        self.lm_head.weight = self.backbone.embedding.weight
-
+        if self.config.tie_embeddings:
+            self.lm_head.weight = self.backbone.embedding.weight
+    
     def allocate_inference_cache(self, batch_size, max_seqlen, dtype=None, **kwargs):
         return self.backbone.allocate_inference_cache(batch_size, max_seqlen, dtype=dtype, **kwargs)
 
@@ -251,8 +252,7 @@ class MambaLMHeadModel(nn.Module, GenerationMixin):
         Save the model and its configuration file to a directory.
         """
         # Ensure save_directory exists
-        if not os.path.exists(save_directory):
-            os.makedirs(save_directory)
+        os.makedirs(save_directory, exist_ok=True)
 
         # Save the model's state_dict
         model_path = os.path.join(save_directory, 'pytorch_model.bin')
