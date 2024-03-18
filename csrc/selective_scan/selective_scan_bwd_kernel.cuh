@@ -253,6 +253,7 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
                     while (left <= right) {
                         if (cu_seqlens[(left + right) >> 1] == threadIdx.x * kNItems + i + chunk * kChunkSize) {
                             delta_a_exp = 0.f;
+                            break;
                         } else if (cu_seqlens[(left + right) >> 1] < threadIdx.x * kNItems + i + chunk * kChunkSize) {
                             left = ((left + right) >> 1) + 1;
                         } else {
@@ -356,6 +357,7 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
                         if (cu_seqlens[(left + right) >> 1] == threadIdx.x * kNItems + i + chunk * kChunkSize) {
                             delta_a_exp.real_ = 0.f;
                             delta_a_exp.imag_ = 0.f;
+                            break;
                         } else if (cu_seqlens[(left + right) >> 1] < threadIdx.x * kNItems + i + chunk * kChunkSize) {
                             left = ((left + right) >> 1) + 1;
                         } else {
