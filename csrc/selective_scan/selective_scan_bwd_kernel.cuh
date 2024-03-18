@@ -245,7 +245,7 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
             if constexpr (!kIsComplex) {
                 #pragma unroll
                 for (int i = 0; i < kNItems; ++i) {
-                    const float delta_a_exp = exp2f(delta_vals[i] * A_scaled);
+                    float delta_a_exp = exp2f(delta_vals[i] * A_scaled);
 
                     // Reset A bar for cumulative sequences (Real)
                     int left = 1;
