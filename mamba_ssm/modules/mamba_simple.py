@@ -159,6 +159,7 @@ class Mamba(nn.Module):
                 delta_bias=self.dt_proj.bias.float(),
                 delta_softplus=True,
                 cu_seqlens=cu_seqlens,
+                d_conv=self.d_conv,
             )
         else:
             x, z = xz.chunk(2, dim=1)
@@ -172,7 +173,6 @@ class Mamba(nn.Module):
                     padded_x = torch.cat((padded_x[:, :, :padded_idx], torch.zeros(1, x.shape[1], self.d_conv - 1, dtype=x.dtype, device=x.device), padded_x[:, :, padded_idx:]), dim=2)
                     count = count + 1
                 x = padded_x
-                # assert x.shape[2] == (self.d_conv - 1) * len(cu_seqlens[1:-1]) + z.shape[2]
 
             # Compute short convolution
             if conv_state is not None:
@@ -197,9 +197,7 @@ class Mamba(nn.Module):
                     mask.extend([True] * seq_len)
                     mask.extend([False] * (self.d_conv - 1))
                 mask = mask[:-(self.d_conv - 1)]
-                # assert x.shape[2] == len(mask)
                 x = x[:, :, mask]
-                # assert x.shape[2] == z.shape[2]
 
             # We're careful here about the layout, to avoid extra transposes.
             # We want dt to have d as the slowest moving dimension
