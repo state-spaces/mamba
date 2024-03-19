@@ -9,7 +9,6 @@ import pytest
 from einops import rearrange
 
 from mamba_ssm.ops.selective_scan_interface import selective_scan_fn, selective_scan_ref
-from mamba_ssm.ops.selective_scan_interface import mamba_inner_fn, mamba_inner_ref
 
 
 @pytest.mark.parametrize('wtype', [torch.float32])
@@ -138,19 +137,3 @@ def test_selective_scan_variable_length(is_variable_B, is_variable_C, varBC_grou
         assert torch.allclose(z.grad, z_ref.grad, rtol=rtolw, atol=atolw)
     if has_delta_bias:
         assert torch.allclose(delta_bias.grad, delta_bias_ref.grad, rtol=rtolw, atol=atolw)
-
-if __name__ == "__main__" :
-    wtype = torch.float32
-    itype = torch.float32
-    seqlen = 8
-    return_last_state = True
-    has_delta_bias = True
-    delta_softplus = False
-    has_z = True
-    has_D = True
-    varBC_groups = 1
-    is_variable_C = True
-    is_variable_B = True
-    seq_num = 4
-    test_selective_scan_variable_length(is_variable_B, is_variable_C, varBC_groups, has_D, has_z, has_delta_bias,
-                        delta_softplus, return_last_state, seqlen, itype, wtype, seq_num)
