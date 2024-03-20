@@ -31,6 +31,12 @@ constexpr size_t my_max(std::initializer_list<size_t> ilist)
     return *std::max_element(ilist.begin(), ilist.end());
 }
 
+// added adeem
+template<typename T>
+constexpr T constexpr_min(T a, T b) {
+    return a < b ? a : b;
+}
+
 template<int kNThreads_, int kNItems_, int kNRows_, bool kIsEvenLen_,
          bool kIsVariableB_, bool kIsVariableC_,
          bool kHasZ_, typename input_t_, typename weight_t_>
@@ -45,7 +51,7 @@ struct Selective_Scan_fwd_kernel_traits {
     static constexpr int kNRows = kNRows_;
     static constexpr int kNBytes = sizeof(input_t);
     static_assert(kNBytes == 2 || kNBytes == 4);
-    static constexpr int kNElts = kNBytes == 4 ? 4 : std::min(8, kNItems);
+    static constexpr int kNElts = kNBytes == 4 ? 4 : constexpr_min(8, kNItems);
     static_assert(kNItems % kNElts == 0);
     static constexpr int kNLoads = kNItems / kNElts;
     static constexpr bool kIsComplex = std::is_same_v<weight_t, complex_t>;

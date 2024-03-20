@@ -186,8 +186,8 @@ if not SKIP_CUDA_BUILD:
             sources=[
                 "csrc/selective_scan/selective_scan.cu",
                 "csrc/selective_scan/selective_scan_fwd_fp32.cu",
-                #"csrc/selective_scan/selective_scan_fwd_fp16.cu",
-                #"csrc/selective_scan/selective_scan_fwd_bf16.cu",
+                # "csrc/selective_scan/selective_scan_fwd_fp16.cu",
+                # "csrc/selective_scan/selective_scan_fwd_bf16.cu",
                 
                 #"csrc/selective_scan/selective_scan_bwd_fp32_real.cu",
                 #"csrc/selective_scan/selective_scan_bwd_fp32_complex.cu",

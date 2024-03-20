@@ -34,6 +34,14 @@
         AT_ERROR(#NAME, " not implemented for input type '", toString(ITYPE), "'"); \
     }
 
+// #define DISPATCH_ITYPE_FLOAT_AND_HALF_AND_BF16(ITYPE, NAME, ...)                    \
+//     if (ITYPE == at::ScalarType::Half) {                                            \
+//         using input_t = at::Half;                                                   \
+//         __VA_ARGS__();                                                              \
+//     } else {                                                                        \
+//         AT_ERROR(#NAME, " not implemented for input type '", toString(ITYPE), "'"); \
+//     }
+
 
 #define DISPATCH_WTYPE_FLOAT_AND_HALF_AND_BF16(WTYPE, NAME, ...)                     \
     if (WTYPE == at::ScalarType::Float)  {                                    \

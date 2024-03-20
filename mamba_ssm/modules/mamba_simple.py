@@ -124,7 +124,10 @@ class Mamba(nn.Module):
         batch, seqlen, dim = hidden_states.shape
 
         conv_state, ssm_state = None, None
+
+        print("testing coverage for mamba forward ")
         if inference_params is not None:
+            print("testing coverage for prefil ")
             conv_state, ssm_state = self._get_states_from_cache(inference_params, batch)
             if inference_params.seqlen_offset > 0:
                 # The states are updated inplace
@@ -206,6 +209,7 @@ class Mamba(nn.Module):
         return out
 
     def step(self, hidden_states, conv_state, ssm_state):
+        print("mamba step called")
         dtype = hidden_states.dtype
         assert hidden_states.shape[1] == 1, "Only support decoding with 1 token at a time for now"
         xz = self.in_proj(hidden_states.squeeze(1))  # (B 2D)

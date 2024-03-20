@@ -29,7 +29,8 @@ args = parser.parse_args()
 
 repeats = 3
 device = "cuda"
-dtype = torch.float16
+# TODO fix fp16 support
+dtype = torch.float32
 
 print(f"Loading model {args.model_name}")
 is_mamba = args.model_name.startswith("state-spaces/mamba-")
