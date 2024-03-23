@@ -54,7 +54,7 @@ max_length = input_ids.shape[1] + args.genlen
 
 if is_mamba:
     fn = lambda: model.generate(
-        input_ids=input_ids,
+        inputs=input_ids,
         max_length=max_length,
         cg=True,
         return_dict_in_generate=True,
