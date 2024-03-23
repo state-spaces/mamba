@@ -42,6 +42,7 @@ FORCE_BUILD = os.getenv("MAMBA_FORCE_BUILD", "FALSE") == "TRUE"
 SKIP_CUDA_BUILD = os.getenv("MAMBA_SKIP_CUDA_BUILD", "FALSE") == "TRUE"
 # For CI, we want the option to build with C++11 ABI since the nvcr images use C++11 ABI
 FORCE_CXX11_ABI = os.getenv("MAMBA_FORCE_CXX11_ABI", "FALSE") == "TRUE"
+bare_metal_version = Version("0.0")  # Dummy version
 
 
 def get_platform():
@@ -89,7 +90,7 @@ def append_nvcc_threads(nvcc_extra_args):
 cmdclass = {}
 ext_modules = []
 
-if not SKIP_CUDA_BUILD:
+if not SKIP_CUDA_BUILD and CUDA_HOME is not None:
     print("\n\ntorch.__version__  = {}\n\n".format(torch.__version__))
     TORCH_MAJOR = int(torch.__version__.split(".")[0])
     TORCH_MINOR = int(torch.__version__.split(".")[1])
@@ -179,7 +180,33 @@ def get_package_version():
         return str(public_version)
 
 
+
+
+
 def get_wheel_url():
+    if not torch.cuda.is_available():
+        return get_wheel_url_cpu()
+    else:
+        return get_wheel_url_cuda()
+
+def get_wheel_url_cpu():
+    torch_version = parse(torch.__version__)
+    torch_version_raw = parse(torch.__version__)
+    python_version = f"cp{sys.version_info.major}{sys.version_info.minor}"
+    platform_name = get_platform()
+    mamba_ssm_version = get_package_version()
+    # cuda_version = f"{cuda_version_raw.major}{cuda_version_raw.minor}"
+    cuda_version = f"{torch_version.major}{torch_version.minor}"
+    torch_version = f"{torch_version_raw.major}.{torch_version_raw.minor}"
+    cxx11_abi = str(torch._C._GLIBCXX_USE_CXX11_ABI).upper()
+    # Determine wheel URL based on CUDA version, torch version, python version and OS
+    wheel_filename = f"{PACKAGE_NAME}-{mamba_ssm_version}+cu{cuda_version}torch{torch_version}cxx11abi{cxx11_abi}-{python_version}-{python_version}-{platform_name}.whl"
+    wheel_url = BASE_WHEEL_URL.format(
+        tag_name=f"v{mamba_ssm_version}", wheel_name=wheel_filename
+    )
+    return wheel_url, wheel_filename
+
+def get_wheel_url_cuda():
     # Determine the version numbers that will be used to determine the correct wheel
     # We're using the CUDA version used to build torch, not the one currently installed
     # _, cuda_version_raw = get_cuda_bare_metal_version(CUDA_HOME)
@@ -277,7 +304,7 @@ setup(
         "packaging",
         "ninja",
         "einops",
-        "triton",
+        'triton; python_version<"3.11"',
         "transformers",
         # "causal_conv1d>=1.2.0",
     ],
