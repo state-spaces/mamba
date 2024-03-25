@@ -20,7 +20,7 @@ class SelectiveScanFn(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, u, delta, A, B, C, D=None, z=None, delta_bias=None, delta_softplus=False,
-                return_last_state=False):
+                return_last_state=False, cu_seqlens=None):
         if u.stride(-1) != 1:
             u = u.contiguous()
         if delta.stride(-1) != 1:
@@ -39,26 +39,26 @@ class SelectiveScanFn(torch.autograd.Function):
         if C.dim() == 3:
             C = rearrange(C, "b dstate l -> b 1 dstate l")
             ctx.squeeze_C = True
-        out, x, *rest = selective_scan_cuda.fwd(u, delta, A, B, C, D, z, delta_bias, delta_softplus)
+        out, x, *rest = selective_scan_cuda.fwd(u, delta, A, B, C, D, z, delta_bias, delta_softplus, cu_seqlens)
         ctx.delta_softplus = delta_softplus
         ctx.has_z = z is not None
         last_state = x[:, :, -1, 1::2]  # (batch, dim, dstate)
         if not ctx.has_z:
-            ctx.save_for_backward(u, delta, A, B, C, D, delta_bias, x)
+            ctx.save_for_backward(u, delta, A, B, C, D, delta_bias, x, cu_seqlens)
             return out if not return_last_state else (out, last_state)
         else:
-            ctx.save_for_backward(u, delta, A, B, C, D, z, delta_bias, x, out)
+            ctx.save_for_backward(u, delta, A, B, C, D, z, delta_bias, x, out, cu_seqlens)
             out_z = rest[0]
             return out_z if not return_last_state else (out_z, last_state)
 
     @staticmethod
     def backward(ctx, dout, *args):
         if not ctx.has_z:
-            u, delta, A, B, C, D, delta_bias, x = ctx.saved_tensors
+            u, delta, A, B, C, D, delta_bias, x, cu_seqlens = ctx.saved_tensors
             z = None
             out = None
         else:
-            u, delta, A, B, C, D, z, delta_bias, x, out = ctx.saved_tensors
+            u, delta, A, B, C, D, z, delta_bias, x, out, cu_seqlens = ctx.saved_tensors
         if dout.stride(-1) != 1:
             dout = dout.contiguous()
         # The kernel supports passing in a pre-allocated dz (e.g., in case we want to fuse the
@@ -66,7 +66,8 @@ class SelectiveScanFn(torch.autograd.Function):
         # Here we just pass in None and dz will be allocated in the C++ code.
         du, ddelta, dA, dB, dC, dD, ddelta_bias, *rest = selective_scan_cuda.bwd(
             u, delta, A, B, C, D, z, delta_bias, dout, x, out, None, ctx.delta_softplus,
-            False  # option to recompute out_z, not used here
+            False,  # option to recompute out_z, not used here
+            cu_seqlens
         )
         dz = rest[0] if ctx.has_z else None
         dB = dB.squeeze(1) if getattr(ctx, "squeeze_B", False) else dB
@@ -76,20 +77,21 @@ class SelectiveScanFn(torch.autograd.Function):
                 dz,
                 ddelta_bias if delta_bias is not None else None,
                 None,
+                None,
                 None)
 
 
 def selective_scan_fn(u, delta, A, B, C, D=None, z=None, delta_bias=None, delta_softplus=False,
-                     return_last_state=False):
+                     return_last_state=False, cu_seqlens=None):
     """if return_last_state is True, returns (out, last_state)
     last_state has shape (batch, dim, dstate). Note that the gradient of the last state is
     not considered in the backward pass.
     """
-    return SelectiveScanFn.apply(u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state)
+    return SelectiveScanFn.apply(u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state, cu_seqlens)
 
 
 def selective_scan_ref(u, delta, A, B, C, D=None, z=None, delta_bias=None, delta_softplus=False,
-                      return_last_state=False):
+                      return_last_state=False, cu_seqlens=None):
     """
     u: r(B D L)
     delta: r(B D L)
@@ -136,7 +138,10 @@ def selective_scan_ref(u, delta, A, B, C, D=None, z=None, delta_bias=None, delta
         C = repeat(C, "B G N L -> B (G H) N L", H=dim // C.shape[1])
     last_state = None
     for i in range(u.shape[2]):
-        x = deltaA[:, :, i] * x + deltaB_u[:, :, i]
+        if cu_seqlens is not None and i in cu_seqlens[1:-1].tolist():
+            x = deltaB_u[:, :, i]
+        else:
+            x = deltaA[:, :, i] * x + deltaB_u[:, :, i]
         if not is_variable_C:
             y = torch.einsum('bdn,dn->bd', x, C)
         else:
@@ -164,7 +169,7 @@ class MambaInnerFn(torch.autograd.Function):
     def forward(ctx, xz, conv1d_weight, conv1d_bias, x_proj_weight, delta_proj_weight,
                 out_proj_weight, out_proj_bias,
                 A, B=None, C=None, D=None, delta_bias=None, B_proj_bias=None,
-                C_proj_bias=None, delta_softplus=True, checkpoint_lvl=1):
+                C_proj_bias=None, delta_softplus=True, cu_seqlens=None, d_conv=None, checkpoint_lvl=1):
         """
              xz: (batch, dim, seqlen)
         """
@@ -183,15 +188,35 @@ class MambaInnerFn(torch.autograd.Function):
             xz = xz.contiguous()
         conv1d_weight = rearrange(conv1d_weight, "d 1 w -> d w")
         x, z = xz.chunk(2, dim=1)
+
+        # (Optional Step1 for cu_seqlens): Right padding zeros at sequence boundary for con1d ops in cumulative sequences
+        if cu_seqlens is not None:
+            padded_x = x
+            count = 0
+            for idx in cu_seqlens[1:-1].tolist():
+                padded_idx = idx + count*(d_conv - 1)
+                padded_x = torch.cat((padded_x[:, :, :padded_idx], torch.zeros(1, x.shape[1], d_conv - 1, dtype=x.dtype, device=x.device), padded_x[:, :, padded_idx:]), dim=2)
+                count = count + 1
+            x = padded_x
+
         conv1d_bias = conv1d_bias.contiguous() if conv1d_bias is not None else None
-        conv1d_out = causal_conv1d_cuda.causal_conv1d_fwd(
-            x, conv1d_weight, conv1d_bias, None, None, None, True
-        )
+        conv1d_out = causal_conv1d_cuda.causal_conv1d_fwd(x, conv1d_weight, conv1d_bias, None, None, None, True)
+
+        # (Optional Step2 for cu_seqlens): Mask conv1d ops in cumulative sequences
+        if cu_seqlens is not None:
+            mask = []
+            for seq_len in (cu_seqlens[1:] - cu_seqlens[:-1]).tolist():
+                mask.extend([True] * seq_len)
+                mask.extend([False] * (d_conv - 1))
+            mask = mask[:-(d_conv - 1)]
+            conv1d_out = conv1d_out[:, :, mask]
+
         # We're being very careful here about the layout, to avoid extra transposes.
         # We want delta to have d as the slowest moving dimension
         # and L as the fastest moving dimension, since those are what the ssm_scan kernel expects.
         x_dbl = F.linear(rearrange(conv1d_out, 'b d l -> (b l) d'), x_proj_weight)  # (bl d)
         delta = rearrange(delta_proj_weight @ x_dbl[:, :delta_rank].t(), "d (b l) -> b d l", l = L)
+
         ctx.is_variable_B = B is None
         ctx.is_variable_C = C is None
         ctx.B_proj_bias_is_None = B_proj_bias is None
@@ -223,7 +248,7 @@ class MambaInnerFn(torch.autograd.Function):
         if D is not None:
             D = D.contiguous()
         out, scan_intermediates, out_z = selective_scan_cuda.fwd(
-            conv1d_out, delta, A, B, C, D, z, delta_bias, delta_softplus
+            conv1d_out, delta, A, B, C, D, z, delta_bias, delta_softplus, cu_seqlens
         )
         ctx.delta_softplus = delta_softplus
         ctx.out_proj_bias_is_None = out_proj_bias is None
@@ -232,7 +257,7 @@ class MambaInnerFn(torch.autograd.Function):
             conv1d_out, delta = None, None
         ctx.save_for_backward(xz, conv1d_weight, conv1d_bias, x_dbl, x_proj_weight,
                               delta_proj_weight, out_proj_weight, conv1d_out, delta,
-                              A, B, C, D, delta_bias, scan_intermediates, out)
+                              A, B, C, D, delta_bias, scan_intermediates, out, cu_seqlens, torch.tensor([d_conv]))
         return F.linear(rearrange(out_z, "b d l -> b l d"), out_proj_weight, out_proj_bias)
 
     @staticmethod
@@ -241,19 +266,42 @@ class MambaInnerFn(torch.autograd.Function):
         # dout: (batch, seqlen, dim)
         assert causal_conv1d_cuda is not None, "causal_conv1d_cuda is not available. Please install causal-conv1d."
         (xz, conv1d_weight, conv1d_bias, x_dbl, x_proj_weight, delta_proj_weight, out_proj_weight,
-         conv1d_out, delta, A, B, C, D, delta_bias, scan_intermediates, out) = ctx.saved_tensors
+         conv1d_out, delta, A, B, C, D, delta_bias, scan_intermediates, out, cu_seqlens, d_conv) = ctx.saved_tensors
+        d_conv = d_conv.item()
         L = xz.shape[-1]
         delta_rank = delta_proj_weight.shape[1]
         d_state = A.shape[-1] * (1 if not A.is_complex() else 2)
         x, z = xz.chunk(2, dim=1)
         if dout.stride(-1) != 1:
             dout = dout.contiguous()
+
+        x_bak = x
         if ctx.checkpoint_lvl == 1:
-            conv1d_out = causal_conv1d_cuda.causal_conv1d_fwd(
-                x, conv1d_weight, conv1d_bias, None, None, None, True
-            )
+            # (Optional Step1 for cu_seqlens): Right padding zeros at sequence boundary for con1d ops in cumulative sequences
+            if cu_seqlens is not None:
+                padded_x = x
+                count = 0
+                for idx in cu_seqlens[1:-1].tolist():
+                    padded_idx = idx + count*(d_conv - 1)
+                    padded_x = torch.cat((padded_x[:, :, :padded_idx], torch.zeros(1, x.shape[1], d_conv - 1, dtype=x.dtype, device=x.device), padded_x[:, :, padded_idx:]), dim=2)
+                    count = count + 1
+                x = padded_x
+            
+            conv1d_out = causal_conv1d_cuda.causal_conv1d_fwd(x, conv1d_weight, conv1d_bias, None, None, None, True)
+            
+            # (Optional Step2 for cu_seqlens): Mask conv1d ops in cumulative sequences
+            if cu_seqlens is not None:
+                mask = []
+                for seq_len in (cu_seqlens[1:] - cu_seqlens[:-1]).tolist():
+                    mask.extend([True] * seq_len)
+                    mask.extend([False] * (d_conv - 1))
+                mask = mask[:-(d_conv - 1)]
+                conv1d_out = conv1d_out[:, :, mask]
+
             delta = rearrange(delta_proj_weight @ x_dbl[:, :delta_rank].t(),
                               "d (b l) -> b d l", l = L)
+        x = x_bak
+        
         # The kernel supports passing in a pre-allocated dz (e.g., in case we want to fuse the
         # backward of selective_scan_cuda with the backward of chunk).
         dxz = torch.empty_like(xz)  # (batch, dim, seqlen)
@@ -263,7 +311,8 @@ class MambaInnerFn(torch.autograd.Function):
         dconv1d_out, ddelta, dA, dB, dC, dD, ddelta_bias, dz, out_z = selective_scan_cuda.bwd(
             conv1d_out, delta, A, B, C, D, z, delta_bias, dout_y, scan_intermediates, out, dz,
             ctx.delta_softplus,
-            True  # option to recompute out_z
+            True,  # option to recompute out_z
+            cu_seqlens
         )
         dout_proj_weight = torch.einsum("eB,dB->ed", dout, rearrange(out_z, "b d l -> d (b l)"))
         dout_proj_bias = dout.sum(dim=(0, 1)) if not ctx.out_proj_bias_is_None else None
@@ -305,32 +354,53 @@ class MambaInnerFn(torch.autograd.Function):
                 dout_proj_weight, dout_proj_bias,
                 dA, dB, dC, dD,
                 ddelta_bias if delta_bias is not None else None,
-                dB_proj_bias, dC_proj_bias, None)
+                dB_proj_bias, dC_proj_bias, None, None, None)
 
 
 def mamba_inner_fn(
     xz, conv1d_weight, conv1d_bias, x_proj_weight, delta_proj_weight,
     out_proj_weight, out_proj_bias,
     A, B=None, C=None, D=None, delta_bias=None, B_proj_bias=None,
-    C_proj_bias=None, delta_softplus=True
+    C_proj_bias=None, delta_softplus=True, cu_seqlens=None, d_conv=None
 ):
     return MambaInnerFn.apply(xz, conv1d_weight, conv1d_bias, x_proj_weight, delta_proj_weight,
                               out_proj_weight, out_proj_bias,
-                              A, B, C, D, delta_bias, B_proj_bias, C_proj_bias, delta_softplus)
+                              A, B, C, D, delta_bias, B_proj_bias, C_proj_bias, delta_softplus, cu_seqlens, d_conv)
 
 
 def mamba_inner_ref(
     xz, conv1d_weight, conv1d_bias, x_proj_weight, delta_proj_weight,
     out_proj_weight, out_proj_bias,
     A, B=None, C=None, D=None, delta_bias=None, B_proj_bias=None,
-    C_proj_bias=None, delta_softplus=True
+    C_proj_bias=None, delta_softplus=True, cu_seqlens=None, d_conv=None
 ):
     assert causal_conv1d_fn is not None, "causal_conv1d_fn is not available. Please install causal-conv1d."
     L = xz.shape[-1]
     delta_rank = delta_proj_weight.shape[1]
     d_state = A.shape[-1] * (1 if not A.is_complex() else 2)
     x, z = xz.chunk(2, dim=1)
+
+    # (Optional Step1 for cu_seqlens): Right padding zeros at sequence boundary for con1d ops in cumulative sequences
+    if cu_seqlens is not None:
+        padded_x = x
+        count = 0
+        for idx in cu_seqlens[1:-1].tolist():
+            padded_idx = idx + count*(d_conv - 1)
+            padded_x = torch.cat((padded_x[:, :, :padded_idx], torch.zeros(1, x.shape[1], d_conv - 1, dtype=x.dtype, device=x.device), padded_x[:, :, padded_idx:]), dim=2)
+            count = count + 1
+        x = padded_x
+
     x = causal_conv1d_fn(x, rearrange(conv1d_weight, "d 1 w -> d w"), conv1d_bias, activation="silu")
+
+    # (Optional Step2 for cu_seqlens): Mask conv1d ops in cumulative sequences
+    if cu_seqlens is not None:
+        mask = []
+        for seq_len in (cu_seqlens[1:] - cu_seqlens[:-1]).tolist():
+            mask.extend([True] * seq_len)
+            mask.extend([False] * (d_conv - 1))
+        mask = mask[:-(d_conv - 1)]
+        x = x[:, :, mask]
+
     # We're being very careful here about the layout, to avoid extra transposes.
     # We want delta to have d as the slowest moving dimension
     # and L as the fastest moving dimension, since those are what the ssm_scan kernel expects.
