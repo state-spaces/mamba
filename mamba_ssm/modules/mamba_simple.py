@@ -10,7 +10,7 @@ from torch import Tensor
 
 from einops import rearrange, repeat
 
-from mamba_ssm.ops.selective_scan_interface import selective_scan_fn, mamba_inner_fn
+from mamba_ssm.ops.selective_scan_interface import selective_scan_fn, mamba_inner_fn, selective_scan_ref
 
 try:
     from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
@@ -116,9 +116,10 @@ class Mamba(nn.Module):
 
         self.out_proj = nn.Linear(self.d_inner, self.d_model, bias=bias, **factory_kwargs)
 
-    def forward(self, hidden_states, inference_params=None):
+    def forward(self, hidden_states, cu_seqlens=None, inference_params=None):
         """
         hidden_states: (B, L, D)
+        cu_seqlens: one-dimensional tensor like flash-attn varlen API, only used for variable-length sequences and packing variable-length sequences into one, a.k.a., batch_size B=1
         Returns: same shape as hidden_states
         """
         batch, seqlen, dim = hidden_states.shape
@@ -157,9 +158,22 @@ class Mamba(nn.Module):
                 self.D.float(),
                 delta_bias=self.dt_proj.bias.float(),
                 delta_softplus=True,
+                cu_seqlens=cu_seqlens,
+                d_conv=self.d_conv,
             )
         else:
             x, z = xz.chunk(2, dim=1)
+
+            # (Optional Step1 for cu_seqlens): Right padding zeros at sequence boundary for con1d ops in cumulative sequences
+            if cu_seqlens is not None:
+                padded_x = x
+                count = 0
+                for idx in cu_seqlens[1:-1].tolist():
+                    padded_idx = idx + count*(self.d_conv - 1)
+                    padded_x = torch.cat((padded_x[:, :, :padded_idx], torch.zeros(1, x.shape[1], self.d_conv - 1, dtype=x.dtype, device=x.device), padded_x[:, :, padded_idx:]), dim=2)
+                    count = count + 1
+                x = padded_x
+
             # Compute short convolution
             if conv_state is not None:
                 # If we just take x[:, :, -self.d_conv :], it will error if seqlen < self.d_conv
@@ -175,6 +189,15 @@ class Mamba(nn.Module):
                     bias=self.conv1d.bias,
                     activation=self.activation,
                 )
+            
+            # (Optional Step2 for cu_seqlens): Mask conv1d ops in cumulative sequences
+            if cu_seqlens is not None:
+                mask = []
+                for seq_len in (cu_seqlens[1:] - cu_seqlens[:-1]).tolist():
+                    mask.extend([True] * seq_len)
+                    mask.extend([False] * (self.d_conv - 1))
+                mask = mask[:-(self.d_conv - 1)]
+                x = x[:, :, mask]
 
             # We're careful here about the layout, to avoid extra transposes.
             # We want dt to have d as the slowest moving dimension
@@ -185,6 +208,7 @@ class Mamba(nn.Module):
             dt = rearrange(dt, "d (b l) -> b d l", l=seqlen)
             B = rearrange(B, "(b l) dstate -> b dstate l", l=seqlen).contiguous()
             C = rearrange(C, "(b l) dstate -> b dstate l", l=seqlen).contiguous()
+
             assert self.activation in ["silu", "swish"]
             y = selective_scan_fn(
                 x,
@@ -197,6 +221,7 @@ class Mamba(nn.Module):
                 delta_bias=self.dt_proj.bias.float(),
                 delta_softplus=True,
                 return_last_state=ssm_state is not None,
+                cu_seqlens=cu_seqlens,
             )
             if ssm_state is not None:
                 y, last_state = y
