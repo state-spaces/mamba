@@ -16,12 +16,10 @@ from mamba_ssm.utils.generation import GenerationMixin
 from mamba_ssm.utils.hf import load_config_hf, load_state_dict_hf
 
 try:
-    from mamba_ssm.ops.triton.layernorm import RMSNorm, layer_norm_fn, rms_norm_fn, layer_norm_ref, rms_norm_ref
+    from mamba_ssm.ops.triton.layernorm import RMSNorm, layer_norm_fn, rms_norm_fn
 except ImportError:
     RMSNorm, layer_norm_fn, rms_norm_fn = None, None, None
-# TODO quick and dirty fix
-layer_norm_fn = layer_norm_ref
-rms_norm_fn = rms_norm_ref
+
 
 def create_block(
     d_model,

@@ -31,8 +31,8 @@ def layer_norm_ref(x, weight, bias, residual=None, eps=1e-6, prenorm=False, upca
     )
     return out if not prenorm else (out, x)
 
-# modifying signature to match  rms_norm_fn
-def rms_norm_ref(x, weight, bias, residual=None, eps=1e-6, prenorm=False, residual_in_fp32=False, upcast=False):
+
+def rms_norm_ref(x, weight, bias, residual=None, eps=1e-6, prenorm=False, upcast=False):
     dtype = x.dtype
     if upcast:
         weight = weight.float()
@@ -48,17 +48,18 @@ def rms_norm_ref(x, weight, bias, residual=None, eps=1e-6, prenorm=False, residu
     return out if not prenorm else (out, x)
 
 
-# @triton.autotune(
-#     configs=[
-#         triton.Config({}, num_warps=1),
-#         triton.Config({}, num_warps=2),
-#         triton.Config({}, num_warps=4),
-#         triton.Config({}, num_warps=8),
-#         triton.Config({}, num_warps=16),
-#         triton.Config({}, num_warps=32),
-#     ],
-#     key=["N", "HAS_RESIDUAL", "STORE_RESIDUAL_OUT", "IS_RMS_NORM", "HAS_BIAS"],
-# )
+@triton.autotune(
+    configs=[
+        triton.Config({}, num_warps=1),
+        triton.Config({}, num_warps=2),
+        triton.Config({}, num_warps=4),
+        triton.Config({}, num_warps=8),
+        triton.Config({}, num_warps=16),
+        # disable num_warps=32 for amd arch
+        # triton.Config({}, num_warps=32),
+    ],
+    key=["N", "HAS_RESIDUAL", "STORE_RESIDUAL_OUT", "IS_RMS_NORM", "HAS_BIAS"],
+)
 # @triton.heuristics({"HAS_BIAS": lambda args: args["B"] is not None})
 # @triton.heuristics({"HAS_RESIDUAL": lambda args: args["RESIDUAL"] is not None})
 @triton.jit
@@ -184,7 +185,8 @@ def _layer_norm_fwd(
         triton.Config({}, num_warps=4),
         triton.Config({}, num_warps=8),
         triton.Config({}, num_warps=16),
-        triton.Config({}, num_warps=32),
+        # disable num_warps=32 for amd arch
+        # triton.Config({}, num_warps=32),
     ],
     key=["N", "HAS_DRESIDUAL", "STORE_DRESIDUAL", "IS_RMS_NORM", "HAS_BIAS"],
 )

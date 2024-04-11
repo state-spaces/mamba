@@ -25,18 +25,22 @@ parser.add_argument("--topp", type=float, default=1.0)
 parser.add_argument("--minp", type=float, default=0.0)
 parser.add_argument("--repetition-penalty", type=float, default=1.0)
 parser.add_argument("--batch", type=int, default=1)
+parser.add_argument("--txt-file", type=str, default=None)
 args = parser.parse_args()
-
+# TODO set back to 3
 repeats = 3
 device = "cuda"
 # TODO fix fp16 support
-dtype = torch.float32
+dtype = torch.bfloat16
+# dtype = torch.float16
 
 print(f"Loading model {args.model_name}")
+print(f"running for dtype {dtype}")
 is_mamba = args.model_name.startswith("state-spaces/mamba-")
 if is_mamba:
     tokenizer = AutoTokenizer.from_pretrained("EleutherAI/gpt-neox-20b")
     model = MambaLMHeadModel.from_pretrained(args.model_name, device=device, dtype=dtype)
+    print(model)
 else:
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     model = AutoModelForCausalLM.from_pretrained(args.model_name, device_map={"": device}, torch_dtype=dtype)
@@ -53,6 +57,7 @@ else:
     attn_mask = tokens.attention_mask.to(device=device)
 max_length = input_ids.shape[1] + args.genlen
 
+print("input_ids:", input_ids)
 if is_mamba:
     fn = lambda: model.generate(
         input_ids=input_ids,
@@ -81,8 +86,8 @@ else:
         repetition_penalty=args.repetition_penalty,
     )
 out = fn()
-if args.prompt is not None:
-    print(tokenizer.batch_decode(out.sequences.tolist()))
+# if args.prompt is not None:
+#     print(tokenizer.batch_decode(out.sequences.tolist()))
 
 torch.cuda.synchronize()
 start = time.time()
@@ -91,3 +96,12 @@ for _ in range(repeats):
 torch.cuda.synchronize()
 print(f"Prompt length: {len(input_ids[0])}, generation length: {len(out.sequences[0]) - len(input_ids[0])}")
 print(f"{args.model_name} prompt processing + decoding time: {(time.time() - start) / repeats * 1000:.0f}ms")
+
+if args.prompt is not None:
+    print(tokenizer.batch_decode(out.sequences.tolist()))
+print("output_ids:", out.sequences.tolist()[0])
+# added for comparison testing
+if args.txt_file is not None and args.batch == 1:
+    with open(args.txt_file, 'w') as file:
+        for ele in out.sequences.tolist()[0]:
+            file.write(str(ele) + '\n')

@@ -11,82 +11,44 @@
 
 #define CHECK_SHAPE(x, ...) TORCH_CHECK(x.sizes() == torch::IntArrayRef({__VA_ARGS__}), #x " must have shape (" #__VA_ARGS__ ")")
 
-// TODO
-// #define DISPATCH_ITYPE_FLOAT_AND_HALF_AND_BF16(ITYPE, NAME, ...)                    \
-//     if (ITYPE == at::ScalarType::Half) {                                            \
-//         using input_t = at::Half;                                                   \
-//         __VA_ARGS__();                                                              \
-//     } else if (ITYPE == at::ScalarType::BFloat16) {                                 \
-//         using input_t = at::BFloat16;                                               \
-//         __VA_ARGS__();                                                              \
-//     } else if (ITYPE == at::ScalarType::Float)  {                                   \
-//         using input_t = float;                                                      \
-//         __VA_ARGS__();                                                              \
-//     } else {                                                                        \
-//         AT_ERROR(#NAME, " not implemented for input type '", toString(ITYPE), "'"); \
-//     }
-
 #define DISPATCH_ITYPE_FLOAT_AND_HALF_AND_BF16(ITYPE, NAME, ...)                    \
-    if (ITYPE == at::ScalarType::Float)  {                                   \
+    if (ITYPE == at::ScalarType::Half) {                                            \
+        using input_t = at::Half;                                                   \
+        __VA_ARGS__();                                                              \
+    } else if (ITYPE == at::ScalarType::BFloat16) {                                 \
+        using input_t = at::BFloat16;                                               \
+        __VA_ARGS__();                                                              \
+    } else if (ITYPE == at::ScalarType::Float)  {                                   \
         using input_t = float;                                                      \
         __VA_ARGS__();                                                              \
     } else {                                                                        \
         AT_ERROR(#NAME, " not implemented for input type '", toString(ITYPE), "'"); \
     }
 
-// #define DISPATCH_ITYPE_FLOAT_AND_HALF_AND_BF16(ITYPE, NAME, ...)                    \
-//     if (ITYPE == at::ScalarType::Half) {                                            \
-//         using input_t = at::Half;                                                   \
-//         __VA_ARGS__();                                                              \
-//     } else {                                                                        \
-//         AT_ERROR(#NAME, " not implemented for input type '", toString(ITYPE), "'"); \
-//     }
-
-
 #define DISPATCH_WTYPE_FLOAT_AND_HALF_AND_BF16(WTYPE, NAME, ...)                     \
-    if (WTYPE == at::ScalarType::Float)  {                                    \
+    if (WTYPE == at::ScalarType::Half) {                                             \
+        using weight_t = at::Half;                                                   \
+        __VA_ARGS__();                                                               \
+    } else if (WTYPE == at::ScalarType::BFloat16) {                                  \
+        using weight_t = at::BFloat16;                                               \
+        __VA_ARGS__();                                                               \
+    } else if (WTYPE == at::ScalarType::Float)  {                                    \
         using weight_t = float;                                                      \
         __VA_ARGS__();                                                               \
     } else {                                                                         \
         AT_ERROR(#NAME, " not implemented for weight type '", toString(WTYPE), "'"); \
     }
 
-// TODO
-// #define DISPATCH_WTYPE_FLOAT_AND_HALF_AND_BF16(WTYPE, NAME, ...)                     \
-//     if (WTYPE == at::ScalarType::Half) {                                             \
-//         using weight_t = at::Half;                                                   \
-//         __VA_ARGS__();                                                               \
-//     } else if (WTYPE == at::ScalarType::BFloat16) {                                  \
-//         using weight_t = at::BFloat16;                                               \
-//         __VA_ARGS__();                                                               \
-//     } else if (WTYPE == at::ScalarType::Float)  {                                    \
-//         using weight_t = float;                                                      \
-//         __VA_ARGS__();                                                               \
-//     } else {                                                                         \
-//         AT_ERROR(#NAME, " not implemented for weight type '", toString(WTYPE), "'"); \
-//     }
-
-
 #define DISPATCH_WTYPE_FLOAT_AND_COMPLEX(WTYPE, NAME, ...)                           \
     if (WTYPE == at::ScalarType::Float) {                                            \
        using weight_t = float;                                                       \
         __VA_ARGS__();                                                               \
+    } else if (WTYPE == at::ScalarType::ComplexFloat) {                              \
+        using weight_t = c10::complex<float>;                                        \
+        __VA_ARGS__();                                                               \
     } else {                                                                         \
         AT_ERROR(#NAME, " not implemented for weight type '", toString(WTYPE), "'"); \
     }
-
-
-// // TODO
-// #define DISPATCH_WTYPE_FLOAT_AND_COMPLEX(WTYPE, NAME, ...)                           \
-//     if (WTYPE == at::ScalarType::Float) {                                            \
-//        using weight_t = float;                                                       \
-//         __VA_ARGS__();                                                               \
-//     } else if (WTYPE == at::ScalarType::ComplexFloat) {                              \
-//         using weight_t = c10::complex<float>;                                        \
-//         __VA_ARGS__();                                                               \
-//     } else {                                                                         \
-//         AT_ERROR(#NAME, " not implemented for weight type '", toString(WTYPE), "'"); \
-//     }
 
 template<typename input_t, typename weight_t>
 void selective_scan_fwd_cuda(SSMParamsBase &params, cudaStream_t stream);
