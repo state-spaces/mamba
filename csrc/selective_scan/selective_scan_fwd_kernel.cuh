@@ -18,6 +18,25 @@
 #include "selective_scan_common.h"
 #include "static_switch.h"
 
+#include <algorithm>
+
+
+// TODO (two lines below): remove, here for debugging only
+#include <stdio.h>
+#include <typeinfo>
+
+
+constexpr size_t my_max(std::initializer_list<size_t> ilist)
+{
+    return *std::max_element(ilist.begin(), ilist.end());
+}
+
+// added adeem
+template<typename T>
+constexpr T constexpr_min(T a, T b) {
+    return a < b ? a : b;
+}
+
 template<int kNThreads_, int kNItems_, int kNRows_, bool kIsEvenLen_,
          bool kIsVariableB_, bool kIsVariableC_,
          bool kHasZ_, typename input_t_, typename weight_t_>
@@ -32,7 +51,7 @@ struct Selective_Scan_fwd_kernel_traits {
     static constexpr int kNRows = kNRows_;
     static constexpr int kNBytes = sizeof(input_t);
     static_assert(kNBytes == 2 || kNBytes == 4);
-    static constexpr int kNElts = kNBytes == 4 ? 4 : std::min(8, kNItems);
+    static constexpr int kNElts = kNBytes == 4 ? 4 : constexpr_min(8, kNItems);
     static_assert(kNItems % kNElts == 0);
     static constexpr int kNLoads = kNItems / kNElts;
     static constexpr bool kIsComplex = std::is_same_v<weight_t, complex_t>;
@@ -57,7 +76,7 @@ struct Selective_Scan_fwd_kernel_traits {
     // using BlockScanT = hipcub::BlockScan<scan_t, kNThreads, hipcub::BLOCK_SCAN_RAKING_MEMOIZE>;
     // using BlockScanT = hipcub::BlockScan<scan_t, kNThreads, hipcub::BLOCK_SCAN_RAKING>;
     using BlockScanT = hipcub::BlockScan<scan_t, kNThreads, hipcub::BLOCK_SCAN_WARP_SCANS>;
-    static constexpr int kSmemIOSize = std::max({sizeof(typename BlockLoadT::TempStorage),
+    static constexpr int kSmemIOSize = my_max({sizeof(typename BlockLoadT::TempStorage),
                                                  sizeof(typename BlockLoadVecT::TempStorage),
                                                  (int(kIsVariableB) + int(kIsVariableC)) * sizeof(typename BlockLoadWeightT::TempStorage),
                                                  (int(kIsVariableB) + int(kIsVariableC)) * sizeof(typename BlockLoadWeightVecT::TempStorage),
@@ -83,6 +102,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
 
     // Shared memory.
     extern __shared__ char smem_[];
+
     // cast to lvalue reference of expected type
     // char *smem_loadstorescan = smem_ + 2 * MAX_DSTATE * sizeof(weight_t);
     // auto& smem_load = reinterpret_cast<typename BlockLoadT::TempStorage&>(smem_ + 2 * MAX_DSTATE * sizeof(weight_t));
@@ -95,6 +115,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     // weight_t *smem_a = reinterpret_cast<weight_t *>(smem_ + smem_loadstorescan_size);
     // weight_t *smem_bc = reinterpret_cast<weight_t *>(smem_a + MAX_DSTATE);
     scan_t *smem_running_prefix = reinterpret_cast<scan_t *>(smem_ + Ktraits::kSmemSize);
+    
 
     const int batch_id = blockIdx.x;
     const int dim_id = blockIdx.y;
@@ -109,6 +130,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     weight_t *C = reinterpret_cast<weight_t *>(params.C_ptr) + dim_id * kNRows * params.C_d_stride;
     input_t *Cvar = reinterpret_cast<input_t *>(params.C_ptr) + batch_id * params.C_batch_stride + group_id * params.C_group_stride;
     scan_t *x = reinterpret_cast<scan_t *>(params.x_ptr) + (batch_id * params.dim + dim_id * kNRows) * params.n_chunks * params.dstate;
+
 
     float D_val[kNRows] = {0};
     if (params.D_ptr != nullptr) {
@@ -146,6 +168,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
         u += kChunkSize;
         delta += kChunkSize;
 
+    
         float delta_vals[kNRows][kNItems], delta_u_vals[kNRows][kNItems], out_vals[kNRows][kNItems];
         #pragma unroll
         for (int r = 0; r < kNRows; ++r) {
@@ -160,6 +183,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                 out_vals[r][i] = D_val[r] * u_val;
             }
         }
+
 
         __syncthreads();
         for (int state_idx = 0; state_idx < params.dstate; ++state_idx) {
@@ -245,7 +269,9 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                     // running_prefix = chunk > 0 && threadIdx.x == 0 ? smem_running_prefix[state_idx] : make_float4(1.f, 0.f, 0.f, 0.f);
                 }
                 SSMScanPrefixCallbackOp<weight_t> prefix_op(running_prefix);
-                Ktraits::BlockScanT(smem_scan).InclusiveScan(
+                
+                // ROCM
+                typename Ktraits::BlockScanT(smem_scan).InclusiveScan(
                     thread_data, thread_data, SSMScanOp<weight_t>(), prefix_op
                 );
                 // There's a syncthreads in the scan op, so we don't need to sync here.
@@ -268,6 +294,9 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
             }
         }
 
+
+
+        
         input_t *out = reinterpret_cast<input_t *>(params.out_ptr) + batch_id * params.out_batch_stride
             + dim_id * kNRows * params.out_d_stride + chunk * kChunkSize;
         __syncthreads();
@@ -318,12 +347,29 @@ void selective_scan_fwd_launch(SSMParamsBase &params, cudaStream_t stream) {
                     constexpr int kSmemSize = Ktraits::kSmemSize + kNRows * MAX_DSTATE * sizeof(typename Ktraits::scan_t);
                     // printf("smem_size = %d\n", kSmemSize);
                     dim3 grid(params.batch, params.dim / kNRows);
-                    auto kernel = &selective_scan_fwd_kernel<Ktraits>;
+
+                    // Had to change this substantially since potentially the hip 
+                    // interface for setting kernel launch attributes is slightly different from 
+                    // cuda's. In particualar, it seems to expect a plain const void * pointer.
+
+
+                    // // TODO: this does not properly allocate shared memory, fix.
+                    const void * kernel = (void*) &selective_scan_fwd_kernel<Ktraits>; // TODO: change to reinterpret cast.
+
+                    //const decltype(&selective_scan_fwd_kernel<Ktraits>) kernel = &selective_scan_fwd_kernel<Ktraits>;
+
                     if (kSmemSize >= 48 * 1024) {
                         C10_CUDA_CHECK(cudaFuncSetAttribute(
                             kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
-                    }
-                    kernel<<<grid, Ktraits::kNThreads, kSmemSize, stream>>>(params);
+                    } 
+
+                    auto kernel_fn = (void (*const)(SSMParamsBase)) kernel; // Todo - double-check. Had to add this C-style conversion. // TODO: change to reinterpret cast?
+
+                    // TODO: remove and replace with the above
+                    // auto kernel_fn = &selective_scan_fwd_kernel<Ktraits>;
+                    
+                    
+                    kernel_fn<<<grid, Ktraits::kNThreads, kSmemSize, stream>>>(params);
                     C10_CUDA_KERNEL_LAUNCH_CHECK();
                 });
             });
@@ -333,12 +379,13 @@ void selective_scan_fwd_launch(SSMParamsBase &params, cudaStream_t stream) {
 
 template<typename input_t, typename weight_t>
 void selective_scan_fwd_cuda(SSMParamsBase &params, cudaStream_t stream) {
-    if (params.seqlen <= 128) {
-        selective_scan_fwd_launch<32, 4, input_t, weight_t>(params, stream);
+    /// TODO: make launch parameters platform-dependent!
+    if (params.seqlen <= 128) {           
+        selective_scan_fwd_launch<64, 4, input_t, weight_t>(params, stream);
     } else if (params.seqlen <= 256) {
-        selective_scan_fwd_launch<32, 8, input_t, weight_t>(params, stream);
+        selective_scan_fwd_launch<64, 8, input_t, weight_t>(params, stream);
     } else if (params.seqlen <= 512) {
-        selective_scan_fwd_launch<32, 16, input_t, weight_t>(params, stream);
+        selective_scan_fwd_launch<64, 16, input_t, weight_t>(params, stream);
     } else if (params.seqlen <= 1024) {
         selective_scan_fwd_launch<64, 16, input_t, weight_t>(params, stream);
     } else {
