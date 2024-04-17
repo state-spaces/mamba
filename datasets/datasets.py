@@ -1,7 +1,5 @@
 import torch
 
-from src.data_loaders.data_sets.utils.signals import ConstSignalGenerator
-
 
 def delay_l2(lag):
     def delay_loss_func(output: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -11,7 +9,7 @@ def delay_l2(lag):
     return delay_loss_func
 
 
-class NormalNoiseSignalGenerator(SignalGenerator):
+class NormalNoiseSignalGenerator():
     def __init__(self, std=1, mean=0):
         self.std = std
         self.mean = mean
@@ -32,7 +30,8 @@ class DelayedSignalDatasetRegenerated(torch.utils.data.TensorDataset):
         assert lag_type in ["zero"]
 
         if signal_generator is None:
-            signal_generator = ConstSignalGenerator(0)
+            signal_generator = NormalNoiseSignalGenerator()
+            # raise ValueError("signal_generator must be provided")
 
         self.signal_generator = signal_generator
         self.samples_num = samples_num

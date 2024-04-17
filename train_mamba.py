@@ -6,6 +6,7 @@ from transformers import AutoTokenizer, TrainingArguments
 from trainer.data import ChatDataModule
 from trainer.mamba_trainer import MambaTrainer
 from simple_mamba.mamba_lm import from_pretrained
+from datasets.datasets import DelayedSignalDatasetRegenerated
 
 
 
@@ -16,24 +17,22 @@ def run(args):
     # tokenizer.eos_token = "<|endoftext|>"
     # tokenizer.pad_token = tokenizer.eos_token
     # tokenizer.chat_template = AutoTokenizer.from_pretrained("HuggingFaceH4/zephyr-7b-beta").chat_template
-
+    # data_module = ChatDataModule(
+    #     tokenizer=tokenizer,
+    #     data_path=args.data_path,
+    #     conversation_template=tokenizer.chat_template,
+    #     max_tokens=2048
+    # )
+    
     model = from_pretrained('state-spaces/mamba-130m').to('cuda')
     tokenizer = AutoTokenizer.from_pretrained('EleutherAI/gpt-neox-20b')
 
     output = model.generate(tokenizer, "Mamba is a type of")
     print("Output: ", output)
 
-    data_module = ChatDataModule(
-        tokenizer=tokenizer,
-        data_path=args.data_path,
-        conversation_template=tokenizer.chat_template,
-        max_tokens=2048
-    )
-
-
     trainer = MambaTrainer(
         model=model,
-        train_dataset=data_module.dataset,
+        train_dataset=DelayedSignalDatasetRegenerated(),
         tokenizer=tokenizer,
         args=TrainingArguments(
             learning_rate=args.learning_rate,
@@ -45,7 +44,7 @@ def run(args):
             logging_steps=50,
             save_steps=500,
         ),
-        data_collator=data_module.data_collator,
+        # data_collator=data_module.data_collator,
     )
 
     trainer.train()
