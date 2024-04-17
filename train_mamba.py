@@ -5,17 +5,23 @@ from mamba_ssm.models.mixer_seq_simple import MambaLMHeadModel
 from transformers import AutoTokenizer, TrainingArguments
 from trainer.data import ChatDataModule
 from trainer.mamba_trainer import MambaTrainer
+from simple_mamba.mamba_lm import from_pretrained
+
 
 
 def run(args):
         
-    model = MambaLMHeadModel.from_pretrained(args.model, dtype=torch.bfloat16, device="cuda")
+    # model = MambaLMHeadModel.from_pretrained(args.model, dtype=torch.bfloat16, device="cuda")
+    # tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
+    # tokenizer.eos_token = "<|endoftext|>"
+    # tokenizer.pad_token = tokenizer.eos_token
+    # tokenizer.chat_template = AutoTokenizer.from_pretrained("HuggingFaceH4/zephyr-7b-beta").chat_template
 
-    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
-    tokenizer.eos_token = "<|endoftext|>"
-    tokenizer.pad_token = tokenizer.eos_token
-    tokenizer.chat_template = AutoTokenizer.from_pretrained("HuggingFaceH4/zephyr-7b-beta").chat_template
+    model = from_pretrained('state-spaces/mamba-130m').to('cuda')
+    tokenizer = AutoTokenizer.from_pretrained('EleutherAI/gpt-neox-20b')
 
+    output = model.generate(tokenizer, "Mamba is a type of")
+    print("Output: ", output)
 
     data_module = ChatDataModule(
         tokenizer=tokenizer,
