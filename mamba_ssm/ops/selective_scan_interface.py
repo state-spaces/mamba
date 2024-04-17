@@ -184,15 +184,17 @@ class MambaInnerFn(torch.autograd.Function):
         conv1d_weight = rearrange(conv1d_weight, "d 1 w -> d w")
         x, z = xz.chunk(2, dim=1)
         conv1d_bias = conv1d_bias.contiguous() if conv1d_bias is not None else None
-        # conv1d_out = causal_conv1d_cuda.causal_conv1d_fwd(
-        #     x, conv1d_weight, conv1d_bias, None, None, None, True
-        # )
-        width = conv1d_weight.shape[1]
-        dim = conv1d_weight.shape[0]
-        seqlen = x.shape[-1]
-        conv1d_out = F.conv1d(
-            x, conv1d_weight.unsqueeze(1), conv1d_bias, padding=width - 1, groups=dim, 
-        )[..., :seqlen]
+        if causal_conv1d_cuda is not None:
+            conv1d_out = causal_conv1d_cuda.causal_conv1d_fwd(
+               x, conv1d_weight, conv1d_bias, None, None, None, True
+            )
+        else:
+            width = conv1d_weight.shape[1]
+            dim = conv1d_weight.shape[0]
+            seqlen = x.shape[-1]
+            conv1d_out = F.conv1d(
+                x, conv1d_weight.unsqueeze(1), conv1d_bias, padding=width - 1, groups=dim, 
+            )[..., :seqlen]
         # We're being very careful here about the layout, to avoid extra transposes.
         # We want delta to have d as the slowest moving dimension
         # and L as the fastest moving dimension, since those are what the ssm_scan kernel expects.
@@ -336,13 +338,15 @@ def mamba_inner_ref(
     delta_rank = delta_proj_weight.shape[1]
     d_state = A.shape[-1] * (1 if not A.is_complex() else 2)
     x, z = xz.chunk(2, dim=1)
-    # x = causal_conv1d_fn(x, rearrange(conv1d_weight, "d 1 w -> d w"), conv1d_bias, activation="silu")
-    width = rearrange(conv1d_weight, "d 1 w -> d w").shape[1]
-    dim = rearrange(conv1d_weight, "d 1 w -> d w").shape[0]
-    seqlen = x.shape[-1]
-    x = F.conv1d(
-        x, rearrange(conv1d_weight, "d 1 w -> d w").unsqueeze(1), conv1d_bias, padding=width - 1, groups=dim, 
-    )[..., :seqlen]
+    if causal_conv1d_fn is not None:
+        x = causal_conv1d_fn(x, rearrange(conv1d_weight, "d 1 w -> d w"), conv1d_bias, activation="silu")
+    else:
+        width = rearrange(conv1d_weight, "d 1 w -> d w").shape[1]
+        dim = rearrange(conv1d_weight, "d 1 w -> d w").shape[0]
+        seqlen = x.shape[-1]
+        x = F.conv1d(
+            x, rearrange(conv1d_weight, "d 1 w -> d w").unsqueeze(1), conv1d_bias, padding=width - 1, groups=dim, 
+        )[..., :seqlen]
     # We're being very careful here about the layout, to avoid extra transposes.
     # We want delta to have d as the slowest moving dimension
     # and L as the fastest moving dimension, since those are what the ssm_scan kernel expects.
