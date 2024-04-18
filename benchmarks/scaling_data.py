@@ -47,7 +47,6 @@ is_mamba = args.model_name.startswith("state-spaces/mamba-")
 if is_mamba:
     tokenizer = AutoTokenizer.from_pretrained("EleutherAI/gpt-neox-20b")
     model = MambaLMHeadModel.from_pretrained(args.model_name, device=device, dtype=dtype)
-    print(model)
 else:
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     model = AutoModelForCausalLM.from_pretrained(args.model_name, device_map={"": device}, torch_dtype=dtype)
