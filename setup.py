@@ -75,7 +75,6 @@ def check_if_cuda_home_none(global_option: str) -> None:
         return
     # warn instead of error because user could be downloading prebuilt wheels, so nvcc won't be necessary
     # in that case.
-
     warnings.warn(
         f"{global_option} was requested, but nvcc was not found.  Are you sure your environment has nvcc available?  "
         "If you're installing within a container from https://hub.docker.com/r/pytorch/pytorch, "
@@ -184,7 +183,7 @@ if not SKIP_CUDA_BUILD:
         CUDAExtension(
             name="selective_scan_cuda",
             sources=[
-                "csrc/selective_scan/selective_scan.cu",
+                "csrc/selective_scan/selective_scan.cpp",
                 "csrc/selective_scan/selective_scan_fwd_fp32.cu",
                 "csrc/selective_scan/selective_scan_fwd_fp16.cu",
                 "csrc/selective_scan/selective_scan_fwd_bf16.cu",

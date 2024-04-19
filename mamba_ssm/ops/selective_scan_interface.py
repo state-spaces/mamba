@@ -168,7 +168,7 @@ class MambaInnerFn(torch.autograd.Function):
         """
              xz: (batch, dim, seqlen)
         """
-        # assert causal_conv1d_cuda is not None, "causal_conv1d_cuda is not available. Please install causal-conv1d."
+        assert causal_conv1d_cuda is not None, "causal_conv1d_cuda is not available. Please install causal-conv1d."
         assert checkpoint_lvl in [0, 1]
         L = xz.shape[-1]
         delta_rank = delta_proj_weight.shape[1]
@@ -184,15 +184,9 @@ class MambaInnerFn(torch.autograd.Function):
         conv1d_weight = rearrange(conv1d_weight, "d 1 w -> d w")
         x, z = xz.chunk(2, dim=1)
         conv1d_bias = conv1d_bias.contiguous() if conv1d_bias is not None else None
-        # conv1d_out = causal_conv1d_cuda.causal_conv1d_fwd(
-        #     x, conv1d_weight, conv1d_bias, None, None, None, True
-        # )
-        width = conv1d_weight.shape[1]
-        dim = conv1d_weight.shape[0]
-        seqlen = x.shape[-1]
-        conv1d_out = F.conv1d(
-            x, conv1d_weight.unsqueeze(1), conv1d_bias, padding=width - 1, groups=dim, 
-        )[..., :seqlen]
+        conv1d_out = causal_conv1d_cuda.causal_conv1d_fwd(
+            x, conv1d_weight, conv1d_bias, None, None, None, True
+        )
         # We're being very careful here about the layout, to avoid extra transposes.
         # We want delta to have d as the slowest moving dimension
         # and L as the fastest moving dimension, since those are what the ssm_scan kernel expects.
@@ -331,18 +325,12 @@ def mamba_inner_ref(
     A, B=None, C=None, D=None, delta_bias=None, B_proj_bias=None,
     C_proj_bias=None, delta_softplus=True
 ):
-    # assert causal_conv1d_fn is not None, "causal_conv1d_fn is not available. Please install causal-conv1d."
+    assert causal_conv1d_fn is not None, "causal_conv1d_fn is not available. Please install causal-conv1d."
     L = xz.shape[-1]
     delta_rank = delta_proj_weight.shape[1]
     d_state = A.shape[-1] * (1 if not A.is_complex() else 2)
     x, z = xz.chunk(2, dim=1)
-    # x = causal_conv1d_fn(x, rearrange(conv1d_weight, "d 1 w -> d w"), conv1d_bias, activation="silu")
-    width = rearrange(conv1d_weight, "d 1 w -> d w").shape[1]
-    dim = rearrange(conv1d_weight, "d 1 w -> d w").shape[0]
-    seqlen = x.shape[-1]
-    x = F.conv1d(
-        x, rearrange(conv1d_weight, "d 1 w -> d w").unsqueeze(1), conv1d_bias, padding=width - 1, groups=dim, 
-    )[..., :seqlen]
+    x = causal_conv1d_fn(x, rearrange(conv1d_weight, "d 1 w -> d w"), conv1d_bias, activation="silu")
     # We're being very careful here about the layout, to avoid extra transposes.
     # We want delta to have d as the slowest moving dimension
     # and L as the fastest moving dimension, since those are what the ssm_scan kernel expects.

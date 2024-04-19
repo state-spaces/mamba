@@ -55,7 +55,6 @@ def rms_norm_ref(x, weight, bias, residual=None, eps=1e-6, prenorm=False, upcast
         triton.Config({}, num_warps=4),
         triton.Config({}, num_warps=8),
         triton.Config({}, num_warps=16),
-        # disable num_warps=32 for amd arch
         # triton.Config({}, num_warps=32),
     ],
     key=["N", "HAS_RESIDUAL", "STORE_RESIDUAL_OUT", "IS_RMS_NORM", "HAS_BIAS"],
@@ -493,8 +492,7 @@ class RMSNorm(torch.nn.Module):
         torch.nn.init.ones_(self.weight)
 
     def forward(self, x, residual=None, prenorm=False, residual_in_fp32=False):
-        # TODO quick and dirty fix
-        return rms_norm_ref(
+        return rms_norm_fn(
             x,
             self.weight,
             self.bias,
