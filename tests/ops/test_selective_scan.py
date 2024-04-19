@@ -14,9 +14,8 @@ from mamba_ssm.ops.selective_scan_interface import mamba_inner_fn, mamba_inner_r
 
 # @pytest.mark.parametrize('wtype', [torch.float32, torch.complex64])
 @pytest.mark.parametrize('wtype', [torch.float32])
-@pytest.mark.parametrize('itype', [torch.float32, torch.float16, torch.bfloat16])
-# @pytest.mark.parametrize('itype', [torch.float32])
-# @pytest.mark.parametrize('itype', [torch.float16])
+# @pytest.mark.parametrize('itype', [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize('itype', [torch.float32])
 # @pytest.mark.parametrize('seqlen', [8, 16, 32, 64, 128, 256, 372, 512, 784, 1024, 1134, 2048, 4096])
 @pytest.mark.parametrize('seqlen', [128, 256, 512, 1024, 2048, 4096])
 # @pytest.mark.parametrize('seqlen', [128])
@@ -148,7 +147,7 @@ def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D, has_z
 #     #     assert torch.allclose(delta_bias.grad, delta_bias_ref.grad, rtol=rtolw, atol=atolw)
 
 
-@pytest.mark.parametrize('wtype', [torch.float32])
+@pytest.mark.parametrize('wtype', [torch.float32, torch.complex64])
 # @pytest.mark.parametrize('wtype', [torch.complex64])
 # @pytest.mark.parametrize('itype', [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize('itype', [torch.float32])
@@ -175,10 +174,8 @@ def test_mamba_inner_fn(is_variable_B, is_variable_C, seqlen, itype, wtype):
     dt_rank = 48
     is_complex = wtype == torch.complex64
     xz = torch.randn(batch_size, 2 * dim, seqlen, device=device, dtype=itype, requires_grad=True)
-    # conv1d_weight = torch.randn(dim, 1, 3, device=device, dtype=torch.float32, requires_grad=True)
-    # conv1d_bias = torch.randn(dim, device=device, dtype=torch.float32, requires_grad=True)
-    conv1d_weight = torch.randn(dim, 1, 3, device=device, dtype=itype, requires_grad=True)
-    conv1d_bias = torch.randn(dim, device=device, dtype=itype, requires_grad=True)
+    conv1d_weight = torch.randn(dim, 1, 3, device=device, dtype=torch.float32, requires_grad=True)
+    conv1d_bias = torch.randn(dim, device=device, dtype=torch.float32, requires_grad=True)
     x_proj_weight = torch.randn(dt_rank + (bool(is_variable_B) + bool(is_variable_C)) * dstate
                                 * (1 if not is_complex else 2),
                                 dim, device=device, dtype=itype, requires_grad=True)
@@ -190,8 +187,7 @@ def test_mamba_inner_fn(is_variable_B, is_variable_C, seqlen, itype, wtype):
          if not is_variable_B else None)
     C = (torch.randn(dim, dstate, device=device, dtype=wtype, requires_grad=True)
          if not is_variable_C else None)
-    # TODO: testing purposes
-    D = 0*torch.randn(dim, device=device, dtype=torch.float32, requires_grad=True)
+    D = torch.randn(dim, device=device, dtype=torch.float32, requires_grad=True)
     delta_bias = (0.5 * torch.rand(dim, device=device, dtype=torch.float32)).requires_grad_()
     B_proj_bias = None
     C_proj_bias = None
