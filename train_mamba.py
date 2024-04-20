@@ -6,7 +6,7 @@ from transformers import AutoTokenizer, TrainingArguments
 from trainer.data import ChatDataModule
 from trainer.mamba_trainer import MambaTrainer
 from simple_mamba.mamba_lm import from_pretrained
-from datasets.datasets import DelayedSignalDatasetRegenerated
+from ds.datasets import DelayedSignalDatasetRegenerated
 
 
 

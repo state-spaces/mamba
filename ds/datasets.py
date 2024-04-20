@@ -1,6 +1,6 @@
 import torch
 from torch.utils.data import Dataset
-
+import numpy as np
 
 def delay_l2(lag):
     def delay_loss_func(output: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
