@@ -152,23 +152,12 @@ except ImportError:
 
 # Fallback versions
 def cauchy_naive(v, z, w):
-    """
-    v: (..., N)
-    z: (..., L)
-    w: (..., N)
-    returns: (..., L) \sum v/(z-w)
-    """
     v = _conj(v)
     w = _conj(w)
     cauchy_matrix = v.unsqueeze(-1) / (z.unsqueeze(-2) - w.unsqueeze(-1)) # (... N L)
     return torch.sum(cauchy_matrix, dim=-2)
 
 def log_vandermonde_naive(v, x, L, conj=True):
-    """
-    v: (..., N)
-    x: (..., N)
-    returns: (..., L) \sum v x^l
-    """
     vandermonde_matrix = torch.exp(x.unsqueeze(-1) * torch.arange(L).to(x)) # (... N L)
     vandermonde_prod = contract('... n, ... n l -> ... l', v, vandermonde_matrix) # (... L)
     return 2*vandermonde_prod.real
