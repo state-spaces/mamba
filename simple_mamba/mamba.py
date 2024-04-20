@@ -176,6 +176,11 @@ class MambaBlock(nn.Module):
                                       transposed=False,
                                       mode='s4d',
                                       is_real=True)
+        elif config.ssm_type == "conv":
+            self.ssm_kernel = nn.Conv1d(in_channels=config.d_inner, out_channels=config.d_inner, 
+                              kernel_size=config.d_state, bias=False, 
+                              groups=config.d_inner,
+                              padding=config.d_conv - 1)
         else:
             raise NotImplementedError
 
@@ -229,6 +234,11 @@ class MambaBlock(nn.Module):
             return y
         elif self.config.ssm_type == "S4D-Complex" or self.config.ssm_type == "S4D-Real":
             return self.ssm_kernel(x)[0]
+        elif self.config.ssm_type == "conv":
+            x_bdl = x.transpose(-1, -2)
+            L = x_bdl.size(-1)
+            out = self.ssm_kernel(x_bdl)[:, :, :L]
+            return out.transpose(-1, -2)
         else:
             raise NotImplementedError
     

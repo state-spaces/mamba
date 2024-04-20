@@ -47,7 +47,7 @@ class Config:
     n_layers: int
     n_categories: int
     lag: int
-    seq_len: int
+    extra: int
     batch_size: int
     epoch_size: int
     epochs: int
@@ -65,13 +65,15 @@ def experiments(kwargs):
         yield dict(zip(arg_names, values))
 
 def run_experiment(config):
-    mamba_config = MambaLMConfig(d_model=config.d_model, 
+    mamba_config = MambaLMConfig(
+                           ssm_type=config.ssm_type,
+                           d_model=config.d_model, 
                            n_layers=config.n_layers, 
                            vocab_size=config.n_categories, 
                            pad_vocab_size_multiple=config.n_categories)
     
     dataset = DynamicCategoricalDataset(config.epoch_size, 
-                                        config.seq_len, 
+                                        config.extra + config.lag, 
                                         config.n_categories, 
                                         config.lag)
     data_loader = torch.utils.data.DataLoader(dataset, 
@@ -83,23 +85,23 @@ def run_experiment(config):
 
 def name(config):
     # short name for display on wandb
-    return f"{config.ssm_type}-lag{config.lag}-seq{config.seq_len}"
+    return f"{config.ssm_type}-lag{config.lag}-extra{config.extra}"
 
 def main():
     for i, config in enumerate(experiments({
-            "ssm_type":              ["S6-Real", "S4D-Complex", "S4D-Real"],
+            "ssm_type":              ["S4D-Complex", "S4D-Real"],
             "d_model":               [16],
             "n_layers":              [2],
             "n_categories":          [16],
-            "lag":                   [1],
-            "seq_len":               [256],
+            "lag":                   [1, 2, 4, 8, 16, 32],
+            "extra":                 [1],
             "batch_size":            [8],
-            "epochs":                [1000],
-            "epoch_size":            [1024],
+            "epochs":                [500],
+            "epoch_size":            [128],
             "lr":                    [1e-3],
             })):
-        exp_name = name(config)
         config.update({"comment": ""})
+        exp_name = name(Config(**config))
         wandb.init(
             project="mamba",
             entity="complex-team",
