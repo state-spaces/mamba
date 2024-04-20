@@ -3,7 +3,7 @@ from tqdm import tqdm
 import wandb
 import torch
 from torch import optim
-from datasets.datasets import DynamicCategoricalDataset
+from ds.datasets import DynamicCategoricalDataset
 from simple_mamba.mamba_lm import MambaLM, MambaLMConfig
 import itertools
 from dataclasses import dataclass
