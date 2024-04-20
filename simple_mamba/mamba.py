@@ -168,9 +168,7 @@ class MambaBlock(nn.Module):
                                       activation='id', 
                                       transposed=False,
                                       mode='s4d',
-                                      kernel_args={
-                                         "is_real": False,
-                                      })
+                                      is_real=False)
         elif config.ssm_type == "S4D-Real":
             raise NotImplementedError
         else:
@@ -199,7 +197,6 @@ class MambaBlock(nn.Module):
 
         # z branch
         z = F.silu(z)
-
         output = y * z
         output = self.out_proj(output) # (B, L, D)
 
@@ -226,7 +223,7 @@ class MambaBlock(nn.Module):
 
             return y
         elif self.config.ssm_type == "S4D-Complex":
-            return self.ssm_kernel(x)
+            return self.ssm_kernel(x)[0]
         elif self.config.ssm_type == "S4D-Real":
             raise NotImplementedError
         else:

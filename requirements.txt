@@ -5,3 +5,4 @@ accelerate==0.25.0
 bitsandbytes==0.41.3
 scipy==1.11.4
 einops
+pytorch-lightning
