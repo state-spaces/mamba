@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from simple_mamba.pscan import pscan
+from s4 import SSMKernelDiag
 
 """
 
@@ -128,36 +129,44 @@ class MambaBlock(nn.Module):
                               groups=config.d_inner,
                               padding=config.d_conv - 1)
         
-        # projects x to input-dependent Δ, B, C
-        self.x_proj = nn.Linear(config.d_inner, config.dt_rank + 2 * config.d_state, bias=False)
+        if config.ssm_type == "S6-Real":
+            # projects x to input-dependent Δ, B, C
+            self.x_proj = nn.Linear(config.d_inner, config.dt_rank + 2 * config.d_state, bias=False)
 
-        # projects Δ from dt_rank to d_inner
-        self.dt_proj = nn.Linear(config.dt_rank, config.d_inner, bias=True)
+            # projects Δ from dt_rank to d_inner
+            self.dt_proj = nn.Linear(config.dt_rank, config.d_inner, bias=True)
 
-        # dt initialization
-        # dt weights
-        dt_init_std = config.dt_rank**-0.5 * config.dt_scale
-        if config.dt_init == "constant":
-            nn.init.constant_(self.dt_proj.weight, dt_init_std)
-        elif config.dt_init == "random":
-            nn.init.uniform_(self.dt_proj.weight, -dt_init_std, dt_init_std)
+            # dt initialization
+            # dt weights
+            dt_init_std = config.dt_rank**-0.5 * config.dt_scale
+            if config.dt_init == "constant":
+                nn.init.constant_(self.dt_proj.weight, dt_init_std)
+            elif config.dt_init == "random":
+                nn.init.uniform_(self.dt_proj.weight, -dt_init_std, dt_init_std)
+            else:
+                raise NotImplementedError
+            
+            # dt bias
+            dt = torch.exp(
+                torch.rand(config.d_inner) * (math.log(config.dt_max) - math.log(config.dt_min)) + math.log(config.dt_min)
+            ).clamp(min=config.dt_init_floor)
+            inv_dt = dt + torch.log(-torch.expm1(-dt)) # inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
+            with torch.no_grad():
+                self.dt_proj.bias.copy_(inv_dt)
+            #self.dt_proj.bias._no_reinit = True # initialization would set all Linear.bias to zero, need to mark this one as _no_reinit
+            # todo : explain why removed
+
+            # S4D real initialization
+            A = torch.arange(1, config.d_state + 1, dtype=torch.float32).repeat(config.d_inner, 1)
+            self.A_log = nn.Parameter(torch.log(A)) # why store A in log ? to keep A < 0 (cf -torch.exp(...)) ? for gradient stability ?
+            self.D = nn.Parameter(torch.ones(config.d_inner))
+
+        elif config.ssm_type == "S4D-Complex":
+            self.ssm_kernel = SSMKernelDiag({'d_state':}
+        elif config.ssm_type == "S4D-Real":
+            
         else:
             raise NotImplementedError
-        
-        # dt bias
-        dt = torch.exp(
-            torch.rand(config.d_inner) * (math.log(config.dt_max) - math.log(config.dt_min)) + math.log(config.dt_min)
-        ).clamp(min=config.dt_init_floor)
-        inv_dt = dt + torch.log(-torch.expm1(-dt)) # inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
-        with torch.no_grad():
-            self.dt_proj.bias.copy_(inv_dt)
-        #self.dt_proj.bias._no_reinit = True # initialization would set all Linear.bias to zero, need to mark this one as _no_reinit
-        # todo : explain why removed
-
-        # S4D real initialization
-        A = torch.arange(1, config.d_state + 1, dtype=torch.float32).repeat(config.d_inner, 1)
-        self.A_log = nn.Parameter(torch.log(A)) # why store A in log ? to keep A < 0 (cf -torch.exp(...)) ? for gradient stability ?
-        self.D = nn.Parameter(torch.ones(config.d_inner))
 
         # projects block output from ED back to D
         self.out_proj = nn.Linear(config.d_inner, config.d_model, bias=config.bias)
@@ -192,22 +201,22 @@ class MambaBlock(nn.Module):
         # x : (B, L, ED)
 
         # y : (B, L, ED)
+        if self.config.ssm_type == "S6-Real":
+            A = -torch.exp(self.A_log.float()) # (ED, N)
+            D = self.D.float()
+            # TODO remove .float()
 
-        A = -torch.exp(self.A_log.float()) # (ED, N)
-        D = self.D.float()
-        # TODO remove .float()
+            deltaBC = self.x_proj(x) # (B, L, dt_rank+2*N)
 
-        deltaBC = self.x_proj(x) # (B, L, dt_rank+2*N)
+            delta, B, C = torch.split(deltaBC, [self.config.dt_rank, self.config.d_state, self.config.d_state], dim=-1) # (B, L, dt_rank), (B, L, N), (B, L, N)
+            delta = F.softplus(self.dt_proj(delta)) # (B, L, ED)
 
-        delta, B, C = torch.split(deltaBC, [self.config.dt_rank, self.config.d_state, self.config.d_state], dim=-1) # (B, L, dt_rank), (B, L, N), (B, L, N)
-        delta = F.softplus(self.dt_proj(delta)) # (B, L, ED)
+            if self.config.pscan:
+                y = self.selective_scan(x, delta, A, B, C, D)
+            else:
+                y = self.selective_scan_seq(x, delta, A, B, C, D)
 
-        if self.config.pscan:
-            y = self.selective_scan(x, delta, A, B, C, D)
-        else:
-            y = self.selective_scan_seq(x, delta, A, B, C, D)
-
-        return y
+            return y
     
     def selective_scan(self, x, delta, A, B, C, D):
         # x : (B, L, ED)

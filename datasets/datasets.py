@@ -1,4 +1,5 @@
 import torch
+from torch.utils.data import Dataset
 
 
 def delay_l2(lag):
@@ -53,3 +54,43 @@ class DelayedSignalDatasetRegenerated(torch.utils.data.TensorDataset):
 
     def __len__(self):
         return self.samples_num
+    
+
+def logits_to_probability(logits):
+    # Apply softmax to convert logits to probabilities
+    probabilities = F.softmax(logits, dim=-1)
+    # Convert the PyTorch tensor to a NumPy array
+    probabilities_numpy = probabilities.detach().numpy()
+    return probabilities_numpy
+
+class DynamicCategoricalDataset(Dataset):
+    def __init__(self, amount_of_examples, seq_len, cat_num, lag):
+        """
+        Initialize the dataset with the parameters for data generation.
+        Args:
+            amount_of_examples (int): The total number of examples (data points).
+            seq_len (int): The length of each sequence.
+            cat_num (int): The number of categories for each element in the sequence.
+            lag (int): The number of steps to shift the data for label generation.
+        """
+        self.amount_of_examples = amount_of_examples
+        self.seq_len = seq_len
+        self.cat_num = cat_num
+        self.lag = lag
+
+    def __len__(self):
+        """
+        Return the total number of examples you want the loader to simulate.
+        """
+        return self.amount_of_examples
+
+    def __getitem__(self, idx):
+        """
+        Generates a single data point on demand.
+        """
+        data = np.random.randint(0, self.cat_num, size=(self.seq_len,))
+        labels = np.zeros_like(data)
+        if self.lag < self.seq_len:
+            labels[self.lag:] = data[:-self.lag]
+        return torch.tensor(data, dtype=torch.long), torch.tensor(labels, dtype=torch.long)
+    
