@@ -2,6 +2,7 @@ import torch.nn.functional as F
 from tqdm import tqdm
 import wandb
 import torch
+from torch import optim
 from datasets.datasets import DynamicCategoricalDataset
 from simple_mamba.mamba_lm import MambaLM, MambaLMConfig
 import itertools
@@ -11,14 +12,13 @@ from dataclasses import dataclass
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 # Assumptions: 'model', 'dataloader', 'device', 'optim' (optimizer) are already defined
-def train(config, model, data_loader):
+def train(config, model, data_loader, optimizer):
 
     # Setup tqdm for the outer loop
     pbar = tqdm(total=config.epochs, desc="Epoch Progress", position=0)
 
     # Training Loop
     for epoch in range(config.epochs):
-        epoch_loss = []
         for data, labels in data_loader:
             data = data.to(device).long()  # Ensure data is on the correct device and dtype
             labels = labels.to(device).long()  # Ensure labels are on the correct device and converted to long        
@@ -27,7 +27,7 @@ def train(config, model, data_loader):
             logits = model(data)  # [batch_size, seq_len, cat_num]
             
             # Compute loss
-            loss = F.cross_entropy(logits[:, lag:, :].reshape(-1, cat_num), labels[:, lag:].reshape(-1))
+            loss = F.cross_entropy(logits[:, config.lag:, :].reshape(-1, config.n_categories), labels[:, config.lag:].reshape(-1))
 
             # Backpropagation
             optimizer.zero_grad()
@@ -42,6 +42,7 @@ def train(config, model, data_loader):
 
 @dataclass
 class Config:
+    ssm_type: str
     d_model: int
     n_layers: int
     n_categories: int
@@ -78,24 +79,25 @@ def run_experiment(config):
                                               shuffle=True)
     model = MambaLM(mamba_config).to(device)
     optimizer = optim.Adam(model.parameters(), lr=config.lr)    
-    train(config, data_loader)
+    train(config, model, data_loader, optimizer)
 
 def name(config):
     # short name for display on wandb
-    return f"Categorical"
+    return f"{config.ssm_type}-lag{config.lag}-seq{config.seq_len}"
 
 def main():
     for i, config in enumerate(experiments({
+            "ssm_type":              ["S6-Real", "S4D-Complex", "S4D-Real"],
             "d_model":               [16],
             "n_layers":              [2],
             "n_categories":          [16],
             "lag":                   [1],
-            "seq_len"                [256],
+            "seq_len":               [256],
             "batch_size":            [8],
             "epochs":                [1000],
             "epoch_size":            [1024],
             "lr":                    [1e-3],
-            })
+            })):
         exp_name = name(config)
         config.update({"comment": ""})
         wandb.init(
