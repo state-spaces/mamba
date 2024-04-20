@@ -11,44 +11,82 @@
 
 #define CHECK_SHAPE(x, ...) TORCH_CHECK(x.sizes() == torch::IntArrayRef({__VA_ARGS__}), #x " must have shape (" #__VA_ARGS__ ")")
 
+// TODO
+// #define DISPATCH_ITYPE_FLOAT_AND_HALF_AND_BF16(ITYPE, NAME, ...)                    \
+//     if (ITYPE == at::ScalarType::Half) {                                            \
+//         using input_t = at::Half;                                                   \
+//         __VA_ARGS__();                                                              \
+//     } else if (ITYPE == at::ScalarType::BFloat16) {                                 \
+//         using input_t = at::BFloat16;                                               \
+//         __VA_ARGS__();                                                              \
+//     } else if (ITYPE == at::ScalarType::Float)  {                                   \
+//         using input_t = float;                                                      \
+//         __VA_ARGS__();                                                              \
+//     } else {                                                                        \
+//         AT_ERROR(#NAME, " not implemented for input type '", toString(ITYPE), "'"); \
+//     }
+
 #define DISPATCH_ITYPE_FLOAT_AND_HALF_AND_BF16(ITYPE, NAME, ...)                    \
-    if (ITYPE == at::ScalarType::Half) {                                            \
-        using input_t = at::Half;                                                   \
-        __VA_ARGS__();                                                              \
-    } else if (ITYPE == at::ScalarType::BFloat16) {                                 \
-        using input_t = at::BFloat16;                                               \
-        __VA_ARGS__();                                                              \
-    } else if (ITYPE == at::ScalarType::Float)  {                                   \
+    if (ITYPE == at::ScalarType::Float)  {                                   \
         using input_t = float;                                                      \
         __VA_ARGS__();                                                              \
     } else {                                                                        \
         AT_ERROR(#NAME, " not implemented for input type '", toString(ITYPE), "'"); \
     }
 
+// #define DISPATCH_ITYPE_FLOAT_AND_HALF_AND_BF16(ITYPE, NAME, ...)                    \
+//     if (ITYPE == at::ScalarType::Half) {                                            \
+//         using input_t = at::Half;                                                   \
+//         __VA_ARGS__();                                                              \
+//     } else {                                                                        \
+//         AT_ERROR(#NAME, " not implemented for input type '", toString(ITYPE), "'"); \
+//     }
+
+
 #define DISPATCH_WTYPE_FLOAT_AND_HALF_AND_BF16(WTYPE, NAME, ...)                     \
-    if (WTYPE == at::ScalarType::Half) {                                             \
-        using weight_t = at::Half;                                                   \
-        __VA_ARGS__();                                                               \
-    } else if (WTYPE == at::ScalarType::BFloat16) {                                  \
-        using weight_t = at::BFloat16;                                               \
-        __VA_ARGS__();                                                               \
-    } else if (WTYPE == at::ScalarType::Float)  {                                    \
+    if (WTYPE == at::ScalarType::Float)  {                                    \
         using weight_t = float;                                                      \
         __VA_ARGS__();                                                               \
     } else {                                                                         \
         AT_ERROR(#NAME, " not implemented for weight type '", toString(WTYPE), "'"); \
     }
 
+// TODO
+// #define DISPATCH_WTYPE_FLOAT_AND_HALF_AND_BF16(WTYPE, NAME, ...)                     \
+//     if (WTYPE == at::ScalarType::Half) {                                             \
+//         using weight_t = at::Half;                                                   \
+//         __VA_ARGS__();                                                               \
+//     } else if (WTYPE == at::ScalarType::BFloat16) {                                  \
+//         using weight_t = at::BFloat16;                                               \
+//         __VA_ARGS__();                                                               \
+//     } else if (WTYPE == at::ScalarType::Float)  {                                    \
+//         using weight_t = float;                                                      \
+//         __VA_ARGS__();                                                               \
+//     } else {                                                                         \
+//         AT_ERROR(#NAME, " not implemented for weight type '", toString(WTYPE), "'"); \
+//     }
+
+
 #define DISPATCH_WTYPE_FLOAT_AND_COMPLEX(WTYPE, NAME, ...)                           \
     if (WTYPE == at::ScalarType::Float) {                                            \
        using weight_t = float;                                                       \
         __VA_ARGS__();                                                               \
-    } else if (WTYPE == at::ScalarType::ComplexFloat) {                              \
-        using weight_t = c10::complex<float>;                                        \
-        __VA_ARGS__();                                                               \
     } else {                                                                         \
         AT_ERROR(#NAME, " not implemented for weight type '", toString(WTYPE), "'"); \
     }
+
+
+// // TODO
+// #define DISPATCH_WTYPE_FLOAT_AND_COMPLEX(WTYPE, NAME, ...)                           \
+//     if (WTYPE == at::ScalarType::Float) {                                            \
+//        using weight_t = float;                                                       \
+//         __VA_ARGS__();                                                               \
+//     } else if (WTYPE == at::ScalarType::ComplexFloat) {                              \
+//         using weight_t = c10::complex<float>;                                        \
+//         __VA_ARGS__();                                                               \
+//     } else {                                                                         \
+//         AT_ERROR(#NAME, " not implemented for weight type '", toString(WTYPE), "'"); \
+//     }
 
 template<typename input_t, typename weight_t>
 void selective_scan_fwd_cuda(SSMParamsBase &params, cudaStream_t stream);
@@ -335,6 +373,7 @@ selective_scan_fwd(const at::Tensor &u, const at::Tensor &delta,
     return result;
 }
 
+
 std::vector<at::Tensor>
 selective_scan_bwd(const at::Tensor &u, const at::Tensor &delta,
                   const at::Tensor &A, const at::Tensor &B, const at::Tensor &C,
@@ -347,8 +386,6 @@ selective_scan_bwd(const at::Tensor &u, const at::Tensor &delta,
                   c10::optional<at::Tensor> &dz_,
                   bool delta_softplus,
                   bool recompute_out_z) {
-
-    
     auto input_type = u.scalar_type();
     auto weight_type = A.scalar_type();
     TORCH_CHECK(input_type == at::ScalarType::Float || input_type == at::ScalarType::Half || input_type == at::ScalarType::BFloat16);
@@ -467,33 +504,32 @@ selective_scan_bwd(const at::Tensor &u, const at::Tensor &delta,
     at::Tensor ddelta_bias;
     if (delta_bias_.has_value()) { ddelta_bias = torch::zeros_like(delta_bias_.value()); }
 
-    // TODO: fix
-    // SSMParamsBwd params;
-    // set_ssm_params_bwd(params, batch_size, dim, seqlen, dstate, n_groups, n_chunks, is_variable_B, is_variable_C,
-    //                    u, delta, A, B, C, z, out, out_z,
-    //                    D_.has_value() ? D_.value().data_ptr() : nullptr,
-    //                    delta_bias_.has_value() ? delta_bias_.value().data_ptr() : nullptr,
-    //                    x_.has_value() ? x_.value().data_ptr() : nullptr,
-    //                    dout, du, ddelta, dA, dB, dC, dz,
-    //                    D_.has_value() ? dD.data_ptr() : nullptr,
-    //                    delta_bias_.has_value() ? ddelta_bias.data_ptr() : nullptr,
-    //                    has_z, delta_softplus, recompute_out_z);
+    SSMParamsBwd params;
+    set_ssm_params_bwd(params, batch_size, dim, seqlen, dstate, n_groups, n_chunks, is_variable_B, is_variable_C,
+                       u, delta, A, B, C, z, out, out_z,
+                       D_.has_value() ? D_.value().data_ptr() : nullptr,
+                       delta_bias_.has_value() ? delta_bias_.value().data_ptr() : nullptr,
+                       x_.has_value() ? x_.value().data_ptr() : nullptr,
+                       dout, du, ddelta, dA, dB, dC, dz,
+                       D_.has_value() ? dD.data_ptr() : nullptr,
+                       delta_bias_.has_value() ? ddelta_bias.data_ptr() : nullptr,
+                       has_z, delta_softplus, recompute_out_z);
 
-    // // Otherwise the kernel will be launched from cuda:0 device
-    // // Cast to char to avoid compiler warning about narrowing
-    // at::cuda::CUDAGuard device_guard{(char)u.get_device()};
-    // auto stream = at::cuda::getCurrentCUDAStream().stream();
-    // DISPATCH_ITYPE_FLOAT_AND_HALF_AND_BF16(u.scalar_type(), "selective_scan_bwd", [&] {
-    //     DISPATCH_WTYPE_FLOAT_AND_COMPLEX(A.scalar_type(), "selective_scan_bwd", [&] {
-    //         selective_scan_bwd_cuda<input_t, weight_t>(params, stream);
-    //     });
-    // });
-
+    // Otherwise the kernel will be launched from cuda:0 device
+    // Cast to char to avoid compiler warning about narrowing
+    at::cuda::CUDAGuard device_guard{(char)u.get_device()};
+    auto stream = at::cuda::getCurrentCUDAStream().stream();
+    DISPATCH_ITYPE_FLOAT_AND_HALF_AND_BF16(u.scalar_type(), "selective_scan_bwd", [&] {
+        DISPATCH_WTYPE_FLOAT_AND_COMPLEX(A.scalar_type(), "selective_scan_bwd", [&] {
+            selective_scan_bwd_cuda<input_t, weight_t>(params, stream);
+        });
+    });
     std::vector<at::Tensor> result = {du, ddelta, dA, dB.to(B.dtype()), dC.to(C.dtype()), dD, ddelta_bias};
     if (has_z) { result.push_back(dz); }
     if (recompute_out_z) { result.push_back(out_z); }
     return result;
 }
+
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("fwd", &selective_scan_fwd, "Selective scan forward");

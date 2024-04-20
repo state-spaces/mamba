@@ -4,6 +4,7 @@
 
 #pragma once
 
+// TODO: make conditional on ROCM version. Make work for CUDA.
 //#include <cuda_bf16.h>
 #include <hip/hip_bf16.h>
 

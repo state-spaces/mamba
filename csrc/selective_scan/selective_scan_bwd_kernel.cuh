@@ -72,12 +72,12 @@ struct Selective_Scan_bwd_kernel_traits {
     using BlockReduceComplexT = hipcub::BlockReduce<complex_t, kNThreads>;
     using BlockExchangeT = hipcub::BlockExchange<float, kNThreads, !kIsComplex ? kNItems : kNItems * 2>;
 
-    static constexpr int kSmemIOSize = std::my_max_bwd({sizeof(typename BlockLoadT::TempStorage),
-                                                        sizeof(typename BlockLoadVecT::TempStorage),
-                                                        (int(kIsVariableB) + int(kIsVariableC)) * sizeof(typename BlockLoadWeightT::TempStorage),
-                                                        (int(kIsVariableB) + int(kIsVariableC)) * sizeof(typename BlockLoadWeightVecT::TempStorage),
-                                                        sizeof(typename BlockStoreT::TempStorage),
-                                                        sizeof(typename BlockStoreVecT::TempStorage)});
+    static constexpr int kSmemIOSize = my_max_bwd({sizeof(typename BlockLoadT::TempStorage),
+                                                    sizeof(typename BlockLoadVecT::TempStorage),
+                                                    (int(kIsVariableB) + int(kIsVariableC)) * sizeof(typename BlockLoadWeightT::TempStorage),
+                                                    (int(kIsVariableB) + int(kIsVariableC)) * sizeof(typename BlockLoadWeightVecT::TempStorage),
+                                                    sizeof(typename BlockStoreT::TempStorage),
+                                                    sizeof(typename BlockStoreVecT::TempStorage)});
     static constexpr int kSmemExchangeSize = (int(kIsVariableB) + int(kIsVariableC)) * sizeof(typename BlockExchangeT::TempStorage);
     static constexpr int kSmemReduceSize = sizeof(typename BlockReduceT::TempStorage);
     static constexpr int kSmemSize = kSmemIOSize + kSmemExchangeSize + kSmemReduceSize + sizeof(typename BlockScanT::TempStorage) + sizeof(typename BlockReverseScanT::TempStorage);
@@ -538,7 +538,7 @@ void selective_scan_bwd_cuda(SSMParamsBwd &params, cudaStream_t stream) {
     } else if (params.seqlen <= 256) {
         selective_scan_bwd_launch<64, 8, input_t, weight_t>(params, stream);
     } else if (params.seqlen <= 512) {
-        selective_scan_bwd_launch<32, 16, input_t, weight_t>(params, stream);
+        selective_scan_bwd_launch<64, 16, input_t, weight_t>(params, stream);
     } else if (params.seqlen <= 1024) {
         selective_scan_bwd_launch<64, 16, input_t, weight_t>(params, stream);
     } else {
