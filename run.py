@@ -89,22 +89,21 @@ def name(config):
 
 def main():
     for i, config in enumerate(experiments({
-            "ssm_type":              ["S4D-Complex", "S4D-Real"],
-            "d_model":               [16],
+            "ssm_type":              ["S4D-Complex", "S4D-Real", "conv", "S6-Real"],
+            "d_model":               [16, 64],
             "n_layers":              [2],
             "n_categories":          [16],
-            "lag":                   [1, 2, 4, 8, 16, 32],
+            "lag":                   [32, 64, 96, 128, 160,192],
             "extra":                 [1],
             "batch_size":            [8],
-            "epochs":                [500],
+            "epochs":                [int(1600*2)],
             "epoch_size":            [128],
             "lr":                    [1e-3],
             })):
         config.update({"comment": ""})
         exp_name = name(Config(**config))
         wandb.init(
-            project="mamba",
-            entity="complex-team",
+            project="RealVSComplex",
             name=exp_name,
             config=config
         )
