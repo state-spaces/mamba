@@ -180,7 +180,7 @@ class MambaBlock(nn.Module):
             self.ssm_kernel = nn.Conv1d(in_channels=config.d_inner, out_channels=config.d_inner, 
                               kernel_size=config.d_state, bias=False, 
                               groups=config.d_inner,
-                              padding=config.d_conv - 1)
+                              padding=config.d_state - 1)
         else:
             raise NotImplementedError
 
