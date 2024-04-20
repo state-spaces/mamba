@@ -170,7 +170,12 @@ class MambaBlock(nn.Module):
                                       mode='s4d',
                                       is_real=False)
         elif config.ssm_type == "S4D-Real":
-            raise NotImplementedError
+            self.ssm_kernel = FFTConv(d_model=config.d_inner,
+                                      d_state=config.d_state,
+                                      activation='id', 
+                                      transposed=False,
+                                      mode='s4d',
+                                      is_real=True)
         else:
             raise NotImplementedError
 
@@ -222,10 +227,8 @@ class MambaBlock(nn.Module):
                 y = self.selective_scan_seq(x, delta, A, B, C, D)
 
             return y
-        elif self.config.ssm_type == "S4D-Complex":
+        elif self.config.ssm_type == "S4D-Complex" or self.config.ssm_type == "S4D-Real":
             return self.ssm_kernel(x)[0]
-        elif self.config.ssm_type == "S4D-Real":
-            raise NotImplementedError
         else:
             raise NotImplementedError
     
