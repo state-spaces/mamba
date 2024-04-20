@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from simple_mamba.pscan import pscan
-from s4 import SSMKernelDiag
+from s4 import SSMKernelDiag, FFTConv
 
 """
 
@@ -30,6 +30,7 @@ See Figure 3 of the paper (page 8) for a visual representation of a MambaBlock.
 
 @dataclass
 class MambaConfig:
+    ssm_type: str
     d_model: int # D
     n_layers: int
     dt_rank: Union[int, str] = 'auto'
@@ -162,9 +163,16 @@ class MambaBlock(nn.Module):
             self.D = nn.Parameter(torch.ones(config.d_inner))
 
         elif config.ssm_type == "S4D-Complex":
-            self.ssm_kernel = SSMKernelDiag({'d_state':}
+            self.ssm_kernel = FFTConv(d_model=config.d_inner,
+                                      d_state=config.d_state,
+                                      activation='id', 
+                                      transposed=False,
+                                      mode='s4d',
+                                      kernel_args={
+                                         "is_real": False,
+                                      })
         elif config.ssm_type == "S4D-Real":
-            
+            raise NotImplementedError
         else:
             raise NotImplementedError
 
@@ -217,6 +225,12 @@ class MambaBlock(nn.Module):
                 y = self.selective_scan_seq(x, delta, A, B, C, D)
 
             return y
+        elif self.config.ssm_type == "S4D-Complex":
+            return self.ssm_kernel(x)
+        elif self.config.ssm_type == "S4D-Real":
+            raise NotImplementedError
+        else:
+            raise NotImplementedError
     
     def selective_scan(self, x, delta, A, B, C, D):
         # x : (B, L, ED)
