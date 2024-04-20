@@ -6,6 +6,7 @@ from torch import optim
 from datasets.datasets import DynamicCategoricalDataset
 from simple_mamba.mamba_lm import MambaLM, MambaLMConfig
 import itertools
+import numpy as np
 from dataclasses import dataclass
 
 
@@ -19,6 +20,7 @@ def train(config, model, data_loader, optimizer):
 
     # Training Loop
     for epoch in range(config.epochs):
+        avg_loss = 0
         for data, labels in data_loader:
             data = data.to(device).long()  # Ensure data is on the correct device and dtype
             labels = labels.to(device).long()  # Ensure labels are on the correct device and converted to long        
@@ -34,9 +36,14 @@ def train(config, model, data_loader, optimizer):
             loss.backward()
             optimizer.step()
 
-            # Store loss for this batch to average later
+            avg_loss += loss.item()
+        
+        avg_loss /= len(data_loader)
         wandb.log({"epoch": epoch,
-                    "loss": loss.item()})
+                    "loss": avg_loss})
+        
+        if config.stop_on_loss and avg_loss < config.stop_on_loss:
+            break
     pbar.close()
 
 
@@ -52,6 +59,8 @@ class Config:
     epoch_size: int
     epochs: int
     lr: float
+    stop_on_loss: float
+    seed: int
     comment: str
 
 def experiments(kwargs):
@@ -65,6 +74,8 @@ def experiments(kwargs):
         yield dict(zip(arg_names, values))
 
 def run_experiment(config):
+    torch.manual_seed(config.seed)
+    np.random.seed(config.seed)
     mamba_config = MambaLMConfig(
                            ssm_type=config.ssm_type,
                            d_model=config.d_model, 
@@ -99,6 +110,8 @@ def main():
             "epochs":                [500],
             "epoch_size":            [128],
             "lr":                    [1e-3],
+            "stop_on_loss":          [0],
+            "seed":                  [42],   
             })):
         config.update({"comment": ""})
         exp_name = name(Config(**config))
