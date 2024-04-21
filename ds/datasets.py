@@ -94,3 +94,53 @@ class DynamicCategoricalDataset(Dataset):
             labels[self.lag:] = data[:-self.lag]
         return torch.tensor(data, dtype=torch.long), torch.tensor(labels, dtype=torch.long)
     
+
+class InductionHead(Dataset):
+    def __init__(self, amount_of_examples, seq_len, cat_num, num_triggers, induction_length):
+        """
+        Initialize the Induction Head dataset with the parameters for data generation.
+        Args:
+            amount_of_examples (int): The total number of examples (data points).
+            seq_len (int): The length of each sequence.
+            cat_num (int): The number of categories for each element in the sequence.
+            num_triggers (int): The (maximum) number of times the copy token is shown in the sequence.
+            induction_length (int): The length of the induction sequence (after the copy token).
+        """
+        self.amount_of_examples = amount_of_examples
+        self.seq_len = seq_len
+        self.cat_num = cat_num
+        self.num_triggers = num_triggers
+        self.induction_length = induction_length
+        self.copy_token = 0
+
+    def __len__(self):
+        """
+        Return the total number of examples you want the loader to simulate.
+        """
+        return self.amount_of_examples
+
+    def __getitem__(self, idx):
+        """
+        Generates a single data point on demand.
+        """
+        data = np.random.randint(1, self.cat_num, size=(self.seq_len,))
+        data = np.append(data, 0)
+        copy_indices = np.random.choice(np.arange(0, self.seq_len - (1 + self.induction_length)), size=self.num_triggers, replace=False)
+        copy_indices_filtered = []
+        for i, p in enumerate(copy_indices):
+            if i == 0:
+                copy_indices_filtered.append(p)
+            elif p - copy_indices_filtered[-1] > self.induction_length:
+                copy_indices_filtered.append(p)
+        to_copy = [
+            data[copy_indices_filtered[0]+1+i]
+            for i in range(self.induction_length)
+        ]
+        for pos in copy_indices_filtered:
+            data[pos] = self.copy_token
+            for i in range(self.induction_length):
+                data[pos+1+i] = to_copy[i]
+        data = data + to_copy
+        data, labels = data[:-1], data[1:]
+        return torch.tensor(data, dtype=torch.long), torch.tensor(labels, dtype=torch.long)
+    
