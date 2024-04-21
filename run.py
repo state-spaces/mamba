@@ -21,15 +21,19 @@ def train(config, model, data_loader, optimizer):
     # Training Loop
     for epoch in range(config.epochs):
         avg_loss = 0
+        total_correct_tokens = 0
+        total_tokens = 0
+        total_correct_sequences = 0
         for data, labels in data_loader:
             data = data.to(device).long()  # Ensure data is on the correct device and dtype
-            labels = labels.to(device).long()  # Ensure labels are on the correct device and converted to long        
-            
+            labels = labels.to(device).long()  # Ensure labels are on the correct device and converted to long
+
             # Forward pass
             logits = model(data)  # [batch_size, seq_len, cat_num]
-            
+
             # Compute loss
-            loss = F.cross_entropy(logits[:, config.lag:, :].reshape(-1, config.n_categories), labels[:, config.lag:].reshape(-1))
+            loss = F.cross_entropy(logits[:, config.lag:, :].reshape(-1, config.n_categories),
+                                   labels[:, config.lag:].reshape(-1))
 
             # Backpropagation
             optimizer.zero_grad()
@@ -37,11 +41,36 @@ def train(config, model, data_loader, optimizer):
             optimizer.step()
 
             avg_loss += loss.item()
-        
+
+            # Calculate predictions
+            _, predicted = torch.max(logits, dim=2)  # [batch_size, seq_len]
+
+            # Mask to focus only on relevant positions
+            relevant_labels = labels[:, config.lag:]
+            relevant_predicted = predicted[:, config.lag:]
+
+            # Calculate correct predictions per token
+            correct_tokens = (relevant_predicted == relevant_labels).sum()
+            total_correct_tokens += correct_tokens.item()
+            total_tokens += relevant_labels.numel()  # Total number of evaluated tokens
+
+            # Calculate correct predictions per sequence
+            correct_sequences = (relevant_predicted == relevant_labels).all(dim=1).sum()
+            total_correct_sequences += correct_sequences.item()
+
+        total_sequences = sum(len(labels) for _, labels in data_loader)
         avg_loss /= len(data_loader)
-        wandb.log({"epoch": epoch,
-                    "loss": avg_loss})
-        
+        avg_accuracy_per_token = total_correct_tokens / total_tokens
+        avg_accuracy_per_sequence = total_correct_sequences / total_sequences
+
+        # Log metrics
+        wandb.log({
+            "epoch": epoch,
+            "loss": avg_loss,
+            "avg_accuracy_per_token": avg_accuracy_per_token,
+            "avg_accuracy_per_sequence": avg_accuracy_per_sequence
+        })
+
         if config.stop_on_loss and avg_loss < config.stop_on_loss:
             break
     pbar.close()
