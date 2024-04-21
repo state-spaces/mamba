@@ -85,7 +85,7 @@ def run_experiment(config):
 
 def name(config):
     # short name for display on wandb
-    return f"{config.ssm_type}-lag{config.lag}-extra{config.extra}"
+    return f"{config.ssm_type}-lag{config.lag}-extra{config.extra}-dim{config.d_model}"
 
 def main():
     for i, config in enumerate(experiments({
@@ -93,8 +93,8 @@ def main():
             "d_model":               [16, 64],
             "n_layers":              [2],
             "n_categories":          [16],
-            "lag":                   [32, 64, 96, 128, 160,192],
-            "extra":                 [1],
+            "lag":                   [64, 128],
+            "extra":                 [32, 64, 128],
             "batch_size":            [8],
             "epochs":                [int(1600*2)],
             "epoch_size":            [128],
@@ -103,7 +103,8 @@ def main():
         config.update({"comment": ""})
         exp_name = name(Config(**config))
         wandb.init(
-            project="RealVSComplex",
+            project="RealVSComplexDelay",
+            entity="yuv-milo",
             name=exp_name,
             config=config
         )
