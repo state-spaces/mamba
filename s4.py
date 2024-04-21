@@ -46,11 +46,11 @@ try:
     from extensions.kernels.cauchy import cauchy_mult as cauchy_cuda
     from extensions.kernels.vandermonde import log_vandermonde_cuda
     has_cuda_extension = True
-    log.info("CUDA extension for structured kernels (Cauchy and Vandermonde multiplication) found.")
+    # log.info("CUDA extension for structured kernels (Cauchy and Vandermonde multiplication) found.")
 except:
-    log.warning(
-        "CUDA extension for structured kernels (Cauchy and Vandermonde multiplication) not found. Install by going to extensions/kernels/ and running `python setup.py install`, for improved speed and memory efficiency. Note that the kernel changed for state-spaces 4.0 and must be recompiled."
-    )
+    # log.warning(
+    #     "CUDA extension for structured kernels (Cauchy and Vandermonde multiplication) not found. Install by going to extensions/kernels/ and running `python setup.py install`, for improved speed and memory efficiency. Note that the kernel changed for state-spaces 4.0 and must be recompiled."
+    # )
     has_cuda_extension = False
 
 # Try pykeops
@@ -146,9 +146,10 @@ try:
 except ImportError:
     has_pykeops = False
     if not has_cuda_extension:
-        log.warning(
-            "Falling back on slow Cauchy and Vandermonde kernel. Install at least one of pykeops or the CUDA extension for better speed and memory efficiency."
-        )
+        pass
+        # log.warning(
+        #     "Falling back on slow Cauchy and Vandermonde kernel. Install at least one of pykeops or the CUDA extension for better speed and memory efficiency."
+        # )
 
 # Fallback versions
 def cauchy_naive(v, z, w):

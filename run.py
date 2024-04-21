@@ -63,7 +63,7 @@ class Config:
     seed: int
     comment: str
 
-def experiments(kwargs):
+def fexperiments(kwargs):
     # Extract argument names and their corresponding value lists
     arg_names = kwargs.keys()
     value_lists = kwargs.values()
@@ -110,7 +110,7 @@ def main():
             "epochs":                [int(1600*2)],
             "epoch_size":            [128],
             "lr":                    [1e-3],
-            "stop_on_loss":          [0],
+            "stop_on_loss":          [0.01],
             "seed":                  [42],   
             })):
         config.update({"comment": ""})
