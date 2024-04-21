@@ -140,7 +140,7 @@ class InductionHead(Dataset):
             data[pos] = self.copy_token
             for i in range(self.induction_length):
                 data[pos+1+i] = to_copy[i]
-        data = data + to_copy
+        data = np.concatenate((data, to_copy))
         data, labels = data[:-1], data[1:]
         return torch.tensor(data, dtype=torch.long), torch.tensor(labels, dtype=torch.long)
     
