@@ -22,6 +22,11 @@ constexpr size_t my_max_bwd(std::initializer_list<size_t> ilist)
     return *std::max_element(ilist.begin(), ilist.end());
 }
 
+// added adeem
+template<typename T>
+constexpr T constexpr_min(T a, T b) {
+    return a < b ? a : b;
+}
 
 
 #include "selective_scan.h"
@@ -43,7 +48,7 @@ struct Selective_Scan_bwd_kernel_traits {
     static constexpr int kNItems = kNItems_;
     static constexpr int kNBytes = sizeof(input_t);
     static_assert(kNBytes == 2 || kNBytes == 4);
-    static constexpr int kNElts = kNBytes == 4 ? 4 : std::min(8, kNItems);
+    static constexpr int kNElts = kNBytes == 4 ? 4 : constexpr_min(8, kNItems);
     static_assert(kNItems % kNElts == 0);
     static constexpr int kNLoads = kNItems / kNElts;
     static constexpr bool kIsComplex = std::is_same_v<weight_t, complex_t>;
@@ -367,7 +372,7 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
                 // Initialize running total
                 scan_t running_prefix = chunk > 0 && threadIdx.x % 32 == 0 ? x[(chunk - 1) * params.dstate + state_idx] : make_float4(1.f, 0.f, 0.f, 0.f);
                 SSMScanPrefixCallbackOp<weight_t> prefix_op(running_prefix);
-                Ktraits::BlockScanT(smem_scan).InclusiveScan(
+                typename Ktraits::BlockScanT(smem_scan).InclusiveScan(
                     thread_data, thread_data, SSMScanOp<weight_t>(), prefix_op
                 );
                 scan_t running_postfix = chunk < params.n_chunks - 1 && threadIdx.x % 32 == 0 ? smem_running_postfix[state_idx] : make_float4(1.f, 0.f, 0.f, 0.f);
@@ -408,7 +413,7 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
                             dB_vals_f[i * 2] = dB_vals[i].real_;
                             dB_vals_f[i * 2 + 1] = dB_vals[i].imag_;
                         }
-                        Ktraits::BlockExchangeT(smem_exchange).BlockedToStriped(dB_vals_f, dB_vals_f);
+                        typename Ktraits::BlockExchangeT(smem_exchange).BlockedToStriped(dB_vals_f, dB_vals_f);
                     }
                     if constexpr (kIsVariableC) {
                         #pragma unroll
@@ -417,7 +422,7 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
                             dC_vals_f[i * 2 + 1] = dC_vals[i].imag_;
                         }
                         auto &smem_exchange_C = !kIsVariableB ? smem_exchange : smem_exchange1;
-                        Ktraits::BlockExchangeT(smem_exchange_C).BlockedToStriped(dC_vals_f, dC_vals_f);
+                        typename Ktraits::BlockExchangeT(smem_exchange_C).BlockedToStriped(dC_vals_f, dC_vals_f);
                     }
                     const int seqlen_remaining = (params.seqlen - chunk * kChunkSize) * 2 - threadIdx.x;
                     float *dB_cur = reinterpret_cast<float *>(dB) + state_idx * params.dB_dstate_stride + chunk * kChunkSize * 2 + threadIdx.x;
@@ -432,14 +437,14 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
                 }
                 if constexpr (!kIsVariableB || !kIsVariableC) {
                     float4 dA_dBC_val = make_float4(dA_val.real_, dA_val.imag_, dBC_val.real_, dBC_val.imag_);
-                    dA_dBC_val = Ktraits::BlockReduceT(smem_reduce).Sum(dA_dBC_val);
+                    dA_dBC_val = typename Ktraits::BlockReduceT(smem_reduce).Sum(dA_dBC_val);
                     dA_val = complex_t(dA_dBC_val.x, dA_dBC_val.y);
                     dBC_val = complex_t(dA_dBC_val.z, dA_dBC_val.w);
                     if (threadIdx.x == 0) {
                         smem_dbc[state_idx] = chunk == params.n_chunks - 1 ? dBC_val : dBC_val + smem_dbc[state_idx];
                     }
                 } else {
-                    dA_val = Ktraits::BlockReduceComplexT(smem_reduce_complex).Sum(dA_val);
+                    dA_val = typename Ktraits::BlockReduceComplexT(smem_reduce_complex).Sum(dA_val);
                 }
                 if (threadIdx.x == 0) {
                     smem_da[state_idx] = chunk == params.n_chunks - 1 ? dA_val : dA_val + smem_da[state_idx];

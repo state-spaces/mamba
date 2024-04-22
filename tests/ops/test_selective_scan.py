@@ -147,7 +147,7 @@ def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D, has_z
         assert torch.allclose(delta_bias.grad, delta_bias_ref.grad, rtol=rtolw, atol=atolw)
 
 
-@pytest.mark.parametrize('wtype', [torch.float32]) #, torch.complex64])
+@pytest.mark.parametrize('wtype', [torch.float32, torch.complex64])
 # @pytest.mark.parametrize('wtype', [torch.complex64])
 # @pytest.mark.parametrize('itype', [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize('itype', [torch.float32])
