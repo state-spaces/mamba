@@ -203,14 +203,13 @@ def run_experiment(config,progress_bar_actor):
         exp_name = name(config)
 
         wandb.init(
-            project="RealVSComplexDelayLong",
-            entity="yuv-milo",
+            g
             name=exp_name,
             config=config
         )
 
         torch.manual_seed(config.seed)
-        np.random.seed(config.seed)
+        np.random.seed(config.seed)נ
         mamba_config = MambaLMConfig(
             ssm_type=config.ssm_type,
             d_model=config.d_model,

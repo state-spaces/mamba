@@ -243,8 +243,9 @@ def main():
     progress_bar_actor = pb.actor
 
     settings_options = [
-        ["d_model", [64, 16]],
-        ["lag", [128, 32]],
+        ["d_model", [16]],
+        ["d_state", [1]],
+        ["lag", [256]],
         ["extra", [128, 32]],
         ["seed", [42, 23, 9]],
         ["ssm_type", ["S4D-Real", "conv", "S6-Real", "S4D-Complex"]],

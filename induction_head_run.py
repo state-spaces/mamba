@@ -120,8 +120,8 @@ def main():
         config.update({"comment": ""})
         exp_name = name(Config(**config))
         wandb.init(
-            project="mamba",
-            entity="complex-team",
+            project="InductionHeads",
+            entity="yuv-milo",
             name=exp_name,
             config=config
         )
