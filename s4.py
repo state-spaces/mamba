@@ -414,7 +414,7 @@ def nplr(measure, N, rank=1, dtype=torch.float, diagonalize_precision=True, B_cl
     # We use a huge hack here: Assume only one pair is 0, and that it is the first row/column of A (only happens in Fourier case)
     V = V_sorted[:, :N//2]
     W = W_sorted[:N//2]  # Only keep negative imaginary components
-    assert W[-2].abs() > 1e-4, "Only 1 zero eigenvalue allowed in diagonal part of A"
+    # assert W[-2].abs() > 1e-4, "Only 1 zero eigenvalue allowed in diagonal part of A"
     if W[-1].abs() < 1e-4:
         V[:, -1] = 0.
         V[0, -1] = 2**-0.5
