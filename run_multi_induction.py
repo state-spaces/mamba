@@ -118,6 +118,8 @@ def train(config, model, data_loader, optimizer):
         total_correct_tokens = 0
         total_tokens = 0
         total_correct_sequences = 0
+        first_token_correct_count = 0
+        last_token_correct_count = 0
         for data, labels in data_loader:
             data = data.to(device).long()  # Ensure data is on the correct device and dtype
             labels = labels.to(device).long()  # Ensure labels are on the correct device and converted to long
@@ -152,21 +154,30 @@ def train(config, model, data_loader, optimizer):
             correct_sequences = (relevant_predicted == relevant_labels).all(dim=1).sum()
             total_correct_sequences += correct_sequences.item()
 
+            # Accuracy for the first and last tokens in the sequence
+            first_token_correct_count += (relevant_predicted[:, 0] == relevant_labels[:, 0]).sum().item()
+            last_token_correct_count += (relevant_predicted[:, -1] == relevant_labels[:, -1]).sum().item()
+
         total_sequences = sum(len(labels) for _, labels in data_loader)
         avg_loss /= len(data_loader)
         avg_accuracy_per_token = total_correct_tokens / total_tokens
         avg_accuracy_per_sequence = total_correct_sequences / total_sequences
+        first_token_accuracy = first_token_correct_count / total_sequences
+        last_token_accuracy = last_token_correct_count / total_sequences
 
         # Log metrics
         wandb.log({
             "epoch": epoch,
             "loss": avg_loss,
             "avg_accuracy_per_token": avg_accuracy_per_token,
-            "avg_accuracy_per_sequence": avg_accuracy_per_sequence
+            "avg_accuracy_per_sequence": avg_accuracy_per_sequence,
+            "first_token_accuracy": first_token_accuracy,
+            "last_token_accuracy": last_token_accuracy
         })
 
         if config.stop_on_loss and avg_loss < config.stop_on_loss:
             break
+
     # pbar.close()
 
 
@@ -199,13 +210,13 @@ def experiments(kwargs):
         # Yield a dictionary mapping argument names to values
         yield dict(zip(arg_names, values))
 
-@ray.remote(num_gpus=0.25)# if torch.cuda.is_available() else 0)
+@ray.remote(num_gpus=0.5)# if torch.cuda.is_available() else 0)
 def run_experiment(config,progress_bar_actor):
     try:
         exp_name = name(config)
 
         wandb.init(
-            project="LONGInductionHead1D",
+            project="LONGInductionHead1D-2",
             entity="yuv-milo",
             name=exp_name,
             config=config
@@ -248,18 +259,18 @@ def main():
     progress_bar_actor = pb.actor
 
     settings_options = [
-        ["d_state", [16, 8]],
-        ["seed", [42, 23]],
-        ["induction_len", [16, 24, 32, 64]],
-        ["d_model", [64]],
+        ["seed", [42, 23, 9, 4]],
+        ["d_state", [2, 16, 32, 64, 92, 128]],
+        ["induction_len", [64, 92, 128]],
+        ["d_model", [64, 128]],
         ["seq_len", [256]],
         ["num_triggers", [1]],
         ["ssm_type", ["S4D-Real", "S6-Real", "S4D-Complex"]],
         ["n_layers", [2]],
-        ["n_categories", [16, 128]],
+        ["n_categories", [128]],
         ["batch_size", [8]],
-        ["epochs", [1600*5]], # [int(1600 * 6]],
-        ["epoch_size", [256*2]],
+        ["epochs", [1600 * 3]],  # [int(1600 * 6]],
+        ["epoch_size", [256 * 6]],
         ["lr", [1e-3]],
         ["stop_on_loss", [0.07]],
     ]
