@@ -347,7 +347,7 @@ class Block(nn.Module):
             ), "Only LayerNorm and RMSNorm are supported for fused_add_norm"
 
     def forward(
-        self, hidden_states: Tensor, residual: Optional[Tensor] = None, inference_params=None
+        self, hidden_states: Tensor, residual: Optional[Tensor] = None, cu_seqlens=None, inference_params=None
     ):
         r"""Pass the input through the encoder layer.
 
@@ -371,7 +371,7 @@ class Block(nn.Module):
                 residual_in_fp32=self.residual_in_fp32,
                 eps=self.norm.eps,
             )
-        hidden_states = self.mixer(hidden_states, inference_params=inference_params)
+        hidden_states = self.mixer(hidden_states, cu_seqlens=cu_seqlens, inference_params=inference_params)
         return hidden_states, residual
 
     def allocate_inference_cache(self, batch_size, max_seqlen, dtype=None, **kwargs):
