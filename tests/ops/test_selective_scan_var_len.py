@@ -82,19 +82,19 @@ def test_selective_scan_variable_length(is_variable_B, is_variable_C, varBC_grou
     u_ref = u.detach().clone().requires_grad_()
     delta_ref = delta.detach().clone().requires_grad_()
     delta_bias_ref = delta_bias.detach().clone().requires_grad_() if delta_bias is not None else None
-    start_indexes = torch.arange(0, seqlen, seqlen / seq_num, dtype=torch.int64).cuda()
+    cu_seqlens = torch.arange(0, seqlen, seqlen / seq_num, dtype=torch.int64).cuda()
     
     out, *rest = selective_scan_fn(
         u, delta, A, B, C, D, z=z,
         delta_bias=delta_bias, delta_softplus=delta_softplus,
-        return_last_state=return_last_state, cu_seqlens=start_indexes
+        return_last_state=return_last_state, cu_seqlens=cu_seqlens
     )
     if return_last_state:
         state = rest[0]
     out_ref, *rest = selective_scan_ref(
         u_ref, delta_ref, A_ref, B_ref, C_ref, D_ref, z=z_ref,
         delta_bias=delta_bias_ref, delta_softplus=delta_softplus,
-        return_last_state=return_last_state, cu_seqlens=start_indexes
+        return_last_state=return_last_state, cu_seqlens=cu_seqlens
     )
     if return_last_state:
         state_ref = rest[0]
