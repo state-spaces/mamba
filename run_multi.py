@@ -197,7 +197,7 @@ def experiments(kwargs):
         # Yield a dictionary mapping argument names to values
         yield dict(zip(arg_names, values))
 
-@ray.remote(num_gpus=0.25)# if torch.cuda.is_available() else 0)
+@ray.remote(num_gpus=0.5)# if torch.cuda.is_available() else 0)
 def run_experiment(config,progress_bar_actor):
     try:
         exp_name = name(config)

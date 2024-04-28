@@ -13,3 +13,4 @@ env/
 /.idea/deployment.xml
 /4edenthatislasy.py
 /.idea/.gitignore
+/wandb/

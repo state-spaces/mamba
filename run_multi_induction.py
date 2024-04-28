@@ -216,11 +216,13 @@ def run_experiment(config,progress_bar_actor):
         exp_name = name(config)
 
         wandb.init(
-            project="LONGInductionHead1D-2",
-            entity="yuv-milo",
+            project="mamba",
+            entity="complex-team",
             name=exp_name,
             config=config
         )
+        wandb.log({"epoch": 1})
+        wandb.log({"epoch": 2})
 
         torch.manual_seed(config.seed)
         np.random.seed(config.seed)
@@ -259,10 +261,10 @@ def main():
     progress_bar_actor = pb.actor
 
     settings_options = [
-        ["seed", [42, 23, 9, 4]],
+        ["seed", [1]],
         ["d_state", [2, 16, 32, 64, 92, 128]],
-        ["induction_len", [64, 92, 128]],
-        ["d_model", [64, 128]],
+        ["induction_len", [255]],
+        ["d_model", [64]],
         ["seq_len", [256]],
         ["num_triggers", [1]],
         ["ssm_type", ["S4D-Real", "S6-Real", "S4D-Complex"]],
@@ -272,7 +274,7 @@ def main():
         ["epochs", [1600 * 3]],  # [int(1600 * 6]],
         ["epoch_size", [256 * 6]],
         ["lr", [1e-3]],
-        ["stop_on_loss", [0.07]],
+        ["stop_on_loss", [0.01]],
     ]
 
     tasks = []

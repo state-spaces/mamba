@@ -169,6 +169,46 @@ class MambaBlock(nn.Module):
                 torch.log(A))  # why store A in log ? to keep A < 0 (cf -torch.exp(...)) ? for gradient stability ?
             self.D = nn.Parameter(torch.ones(config.d_inner))
 
+        elif config.ssm_type == "S6-Complex":
+            #  projects x to input-dependent Δ, B, C
+            self.x_proj = nn.Linear(config.d_inner, config.dt_rank + 2 * config.d_state, bias=False, dtype=torch.cfloat)
+
+            #  projects Δ from dt_rank to d_inner
+            self.dt_proj = nn.Linear(config.dt_rank, config.d_inner, bias=True, dtype=torch.float)
+
+            #  dt initialization
+            #  dt weights
+            dt_init_std = config.dt_rank ** -0.5 * config.dt_scale
+            if config.dt_init == "constant":
+                nn.init.constant_(self.dt_proj.weight, dt_init_std)
+            elif config.dt_init == "random":
+                nn.init.uniform_(self.dt_proj.weight, -dt_init_std, dt_init_std)
+            else:
+                raise NotImplementedError
+
+            # dt bias
+            dt = torch.exp(
+                torch.rand(config.d_inner) * (math.log(config.dt_max) - math.log(config.dt_min)) + math.log(
+                    config.dt_min)
+            ).clamp(min=config.dt_init_floor)
+            inv_dt = dt + torch.log(
+                -torch.expm1(-dt))  #  inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
+            with torch.no_grad():
+                self.dt_proj.bias.copy_(inv_dt)
+            # self.dt_proj.bias._no_reinit = True # initialization would set all Linear.bias to zero, need to mark this one as _no_reinit
+            #  todo : explain why removed
+
+            # S4D complex initialization
+            log_A_real = torch.log(0.5 * torch.ones(config.d_inner, config.d_state))
+            # why store A in log ? to keep A < 0 (cf -torch.exp(...)) ? for gradient stability ?
+            A_imag = math.pi * torch.arange(config.d_state).repeat(config.d_inner, 1)
+            self.log_A_real = nn.Parameter(log_A_real)
+            self.log_A_real._no_weight_decay = True
+            self.A_imag = nn.Parameter(A_imag)
+            self.A_imag._no_weight_decay = True
+
+            self.D = nn.Parameter(torch.ones(config.d_inner, dtype=torch.cfloat))
+
         elif config.ssm_type == "S4D-Complex":
             self.ssm_kernel = FFTConv(d_model=config.d_inner,
                                       d_state=config.d_state,
@@ -240,6 +280,23 @@ class MambaBlock(nn.Module):
                 y = self.selective_scan_seq(x, delta, A, B, C, D)
 
             return y
+
+        elif self.config.ssm_type == "S6-Complex":
+            A = -torch.exp(self.log_A_real) + 1j * self.A_imag  # (ED, N)
+            D = self.D
+
+            deltaBC = self.x_proj(x.to(torch.cfloat)) #  (B, L, dt_rank+2*N)
+
+            delta, B, C = torch.split(deltaBC, [self.config.dt_rank, self.config.d_state, self.config.d_state],
+                                      dim=-1)  #  (B, L, dt_rank), (B, L, N), (B, L, N)
+            delta = F.softplus(self.dt_proj(delta.real))  #  (B, L, ED)
+
+            if self.config.pscan:
+                y = self.selective_scan(x, delta, A, B, C, D)
+            else:
+                y = self.selective_scan_seq(x, delta, A, B, C, D)
+
+            return y.real
         elif self.config.ssm_type == "S4D-Complex" or self.config.ssm_type == "S4D-Real":
             return self.ssm_kernel(x)[0]
         elif self.config.ssm_type == "conv":
