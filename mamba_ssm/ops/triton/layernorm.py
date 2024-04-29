@@ -47,16 +47,25 @@ def rms_norm_ref(x, weight, bias, residual=None, eps=1e-6, prenorm=False, upcast
     out = out.to(dtype)
     return out if not prenorm else (out, x)
 
+def config_prune(configs):
+    block_sz = 1024
+    # warp size is 64 in amd arch
+    warp_sz = 64 if torch.version.hip else 32
+    max_num_warps = block_sz//warp_sz
+    pruned_configs = [config for config in configs if config.num_warps<=max_num_warps]
+    return pruned_configs
 
-@triton.autotune(
-    configs=[
+configs_autotune = [
         triton.Config({}, num_warps=1),
         triton.Config({}, num_warps=2),
         triton.Config({}, num_warps=4),
         triton.Config({}, num_warps=8),
         triton.Config({}, num_warps=16),
-        # triton.Config({}, num_warps=32),
-    ],
+        triton.Config({}, num_warps=32),
+        ]
+
+@triton.autotune(
+    configs = config_prune(configs_autotune),
     key=["N", "HAS_RESIDUAL", "STORE_RESIDUAL_OUT", "IS_RMS_NORM", "HAS_BIAS"],
 )
 # @triton.heuristics({"HAS_BIAS": lambda args: args["B"] is not None})
@@ -178,15 +187,7 @@ def _layer_norm_fwd(
 
 
 @triton.autotune(
-    configs=[
-        triton.Config({}, num_warps=1),
-        triton.Config({}, num_warps=2),
-        triton.Config({}, num_warps=4),
-        triton.Config({}, num_warps=8),
-        triton.Config({}, num_warps=16),
-        # disable num_warps=32 for amd arch
-        # triton.Config({}, num_warps=32),
-    ],
+    configs=config_prune(configs_autotune),
     key=["N", "HAS_DRESIDUAL", "STORE_DRESIDUAL", "IS_RMS_NORM", "HAS_BIAS"],
 )
 # @triton.heuristics({"HAS_BIAS": lambda args: args["B"] is not None})
