@@ -38,7 +38,8 @@ class MambaConfig:
     d_state: int = 16  #  N in paper/comments
     expand_factor: int = 2  #  E in paper/comments
     d_conv: int = 4
-    discretization: str = "s6"
+    discretizationA: str = "normal"
+    discretizationB: str = "s6"
 
     dt_min: float = 0.001
     dt_max: float = 0.1
@@ -199,13 +200,14 @@ class MambaBlock(nn.Module):
                 -torch.expm1(-dt))  #  inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
             with torch.no_grad():
                 self.dt_proj.bias.copy_(inv_dt)
-            # self.dt_proj.bias._no_reinit = True # initialization would set all Linear.bias to zero, need to mark this one as _no_reinit
-            #  todo : explain why removed
+            self.dt_proj.bias._no_reinit = True  # initialization would set all Linear.bias to zero, need to mark this one as _no_reinit
 
             # S4D complex initialization
             log_A_real = torch.log(0.5 * torch.ones(config.d_inner, config.d_state))
             # why store A in log ? to keep A < 0 (cf -torch.exp(...)) ? for gradient stability ?
             A_imag = math.pi * torch.arange(config.d_state).repeat(config.d_inner, 1)
+            if config.discretizationA == "yuval_disc":
+                A_imag = A_imag / config.d_state
             self.log_A_real = nn.Parameter(log_A_real)
             self.log_A_real._no_weight_decay = True
             self.A_imag = nn.Parameter(A_imag)
@@ -327,19 +329,25 @@ class MambaBlock(nn.Module):
         #  D : (ED)
 
         #  y : (B, L, ED)
+        if self.config.discretizationA == "yuval_disc" and self.config.ssm_type == "S6-Complex":
+            deltaA = torch.exp(delta.unsqueeze(-1) * A.real +1j*A.imag)
+        elif self.config.discretizationA == "normal":
+            deltaA = torch.exp(delta.unsqueeze(-1) * A)  #  (B, L, ED, N)
+        else:
+            raise NotImplementedError
 
-        if self.config.discretization == "s6":
-            deltaA = torch.exp(delta.unsqueeze(-1) * A)  #  (B, L, ED, N)
+        if self.config.discretizationB == "s6":
             deltaB = delta.unsqueeze(-1) * B.unsqueeze(2)  #  (B, L, ED, N)
-        elif self.config.discretization == "zoh":
-            deltaA = torch.exp(delta.unsqueeze(-1) * A)  #  (B, L, ED, N)
+        elif self.config.discretizationB == "zoh":
             deltaB = B.unsqueeze(2) * torch.exp(delta.unsqueeze(-1) * A - 1.) / A  #  (B, L, ED, N)
+        else:
+            raise NotImplementedError
 
         BX = deltaB * (x.unsqueeze(-1))  #  (B, L, ED, N)
 
         hs = pscan(deltaA, BX)
 
-        y = (hs @ C.real.to(torch.cfloat).unsqueeze(-1)).squeeze(3)  #  (B, L, ED, N) @ (B, L, N, 1) -> (B, L, ED, 1)
+        y = (hs @ C.unsqueeze(-1)).squeeze(3)  #  (B, L, ED, N) @ (B, L, N, 1) -> (B, L, ED, 1)
 
         y = y + D * x
 

@@ -173,7 +173,8 @@ def train(config, model, data_loader, optimizer):
 @dataclass
 class Config:
     ssm_type: str
-    discretization: str
+    discretizationA: str
+    discretizationB: str
     d_model: int
     d_state: int
     n_layers: int
@@ -205,7 +206,7 @@ def run_experiment(config, progress_bar_actor):
         exp_name = name(config)
 
         wandb.init(
-            project="complex-mamba-copy",
+            project="complex-mamba-copy-disc",
             entity="complex-team",
             name=exp_name,
             config=config
@@ -215,7 +216,8 @@ def run_experiment(config, progress_bar_actor):
         np.random.seed(config.seed)
         mamba_config = MambaLMConfig(
             ssm_type=config.ssm_type,
-            discretization=config.discretization,
+            discretizationA=config.discretizationA,
+            discretizationB=config.discretizationB,
             d_model=config.d_model,
             d_state=config.d_state,
             n_layers=config.n_layers,
@@ -240,7 +242,7 @@ def run_experiment(config, progress_bar_actor):
 
 def name(config):
     # short name for display on wandb
-    return f"{config.ssm_type}-lag{config.lag}-extra{config.extra}-dim{config.d_model}"
+    return f"{config.ssm_type}-lag{config.lag}-extra{config.extra}-disc{config.discretizationA}-{config.discretizationB}"
 
 def main():
     ray.init(num_cpus=64, ignore_reinit_error=True)
@@ -250,7 +252,26 @@ def main():
     settings_options = [
         ["seed", [1]],
         ["ssm_type", ["S6-Complex", "S6-Real"]],
-        ["discretization", ["zoh", "s6"]],
+        ["discretizationA", ["normal", "yuval_disc"]],
+        ["discretizationB", ["zoh", "s6"]],
+        ["d_model", [16]],
+        ["d_state", [16]],
+        ["lag", [2, 8]],
+        ["extra", [2, 8]],
+        ["n_layers", [2]],
+        ["n_categories", [16]],
+        ["batch_size", [8]],
+        ["epochs", [10000]],  # [int(1600 * 6]],
+        ["epoch_size", [128 * 4]],
+        ["lr", [1e-3]],
+        ["stop_on_loss", [0.01]],
+    ]
+
+    settings_options_s4 = [
+        ["seed", [1]],
+        ["ssm_type", ["S4D-Complex", "S4D-Real"]],
+        ["discretizationA", ["default"]],
+        ["discretizationB", ["default"]],
         ["d_model", [16]],
         ["d_state", [16]],
         ["lag", [2, 8]],
@@ -267,7 +288,11 @@ def main():
     tasks = []
     for i, config in enumerate(experiments(settings_options)):
         print(i)
-        config.update({"comment": ""})
+        config.update({"comment": "comment in no re_init dt bias"})
+        tasks.append(run_experiment.remote(Config(**config), progress_bar_actor))
+    for i, config in enumerate(experiments(settings_options_s4)):
+        print(i)
+        config.update({"comment": "comment in no re_init dt bias"})
         tasks.append(run_experiment.remote(Config(**config), progress_bar_actor))
     pb.set_total(len(tasks))
     pb.print_until_done()
