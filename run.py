@@ -173,6 +173,7 @@ def train(config, model, data_loader, optimizer):
 @dataclass
 class Config:
     ssm_type: str
+    discretization: str
     d_model: int
     d_state: int
     n_layers: int
@@ -214,6 +215,7 @@ def run_experiment(config, progress_bar_actor):
         np.random.seed(config.seed)
         mamba_config = MambaLMConfig(
             ssm_type=config.ssm_type,
+            discretization=config.discretization,
             d_model=config.d_model,
             d_state=config.d_state,
             n_layers=config.n_layers,
@@ -247,15 +249,16 @@ def main():
 
     settings_options = [
         ["seed", [1]],
-        ["ssm_type", ["S6-Complex"]],
+        ["ssm_type", ["S6-Complex", "S6-Real"]],
+        ["discretization", ["zoh", "s6"]],
         ["d_model", [16]],
         ["d_state", [16]],
-        ["lag", [2, 4, 8]],
-        ["extra", [2, 4, 8, 16]],
+        ["lag", [2, 8]],
+        ["extra", [2, 8]],
         ["n_layers", [2]],
         ["n_categories", [16]],
         ["batch_size", [8]],
-        ["epochs", [10000]], # [int(1600 * 6]],
+        ["epochs", [10000]],  # [int(1600 * 6]],
         ["epoch_size", [128 * 4]],
         ["lr", [1e-3]],
         ["stop_on_loss", [0.01]],

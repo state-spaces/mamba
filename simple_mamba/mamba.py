@@ -38,6 +38,7 @@ class MambaConfig:
     d_state: int = 16  #  N in paper/comments
     expand_factor: int = 2  #  E in paper/comments
     d_conv: int = 4
+    discretization: str = "s6"
 
     dt_min: float = 0.001
     dt_max: float = 0.1
@@ -173,6 +174,9 @@ class MambaBlock(nn.Module):
             #  projects x to input-dependent Δ, B, C
             self.x_proj = nn.Linear(config.d_inner, config.dt_rank + 2 * config.d_state, bias=False, dtype=torch.cfloat)
 
+            # # init the imaginary part of x_proj to 0
+            # self.x_proj.weight.imag.data.zero_()
+
             #  projects Δ from dt_rank to d_inner
             self.dt_proj = nn.Linear(config.dt_rank, config.d_inner, bias=True, dtype=torch.float)
 
@@ -207,7 +211,14 @@ class MambaBlock(nn.Module):
             self.A_imag = nn.Parameter(A_imag)
             self.A_imag._no_weight_decay = True
 
-            self.D = nn.Parameter(torch.ones(config.d_inner, dtype=torch.cfloat))
+            # # initialize A to be complex but with imaginary part 0
+            # A = torch.arange(1, config.d_state + 1, dtype=torch.float32).repeat(config.d_inner, 1)
+            # self.log_A_real = nn.Parameter(
+            #     torch.log(A))
+            # self.A_imag = nn.Parameter(torch.zeros_like(A))
+
+            # D does not need to be complex since it is multiplied by x, and we take real part of the output
+            self.D = nn.Parameter(torch.ones(config.d_inner))
 
         elif config.ssm_type == "S4D-Complex":
             self.ssm_kernel = FFTConv(d_model=config.d_inner,
@@ -317,14 +328,18 @@ class MambaBlock(nn.Module):
 
         #  y : (B, L, ED)
 
-        deltaA = torch.exp(delta.unsqueeze(-1) * A)  #  (B, L, ED, N)
-        deltaB = delta.unsqueeze(-1) * B.unsqueeze(2)  #  (B, L, ED, N)
+        if self.config.discretization == "s6":
+            deltaA = torch.exp(delta.unsqueeze(-1) * A)  #  (B, L, ED, N)
+            deltaB = delta.unsqueeze(-1) * B.unsqueeze(2)  #  (B, L, ED, N)
+        elif self.config.discretization == "zoh":
+            deltaA = torch.exp(delta.unsqueeze(-1) * A)  #  (B, L, ED, N)
+            deltaB = B.unsqueeze(2) * torch.exp(delta.unsqueeze(-1) * A - 1.) / A  #  (B, L, ED, N)
 
         BX = deltaB * (x.unsqueeze(-1))  #  (B, L, ED, N)
 
         hs = pscan(deltaA, BX)
 
-        y = (hs @ C.unsqueeze(-1)).squeeze(3)  #  (B, L, ED, N) @ (B, L, N, 1) -> (B, L, ED, 1)
+        y = (hs @ C.real.to(torch.cfloat).unsqueeze(-1)).squeeze(3)  #  (B, L, ED, N) @ (B, L, N, 1) -> (B, L, ED, 1)
 
         y = y + D * x
 
