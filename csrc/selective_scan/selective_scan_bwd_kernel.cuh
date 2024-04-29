@@ -9,25 +9,16 @@
 #include <c10/cuda/CUDAException.h>  // For C10_CUDA_CHECK and C10_CUDA_KERNEL_LAUNCH_CHECK
 #include <ATen/cuda/Atomic.cuh>  // For atomicAdd on complex
 
-//TODO: make conditional on ROCM version & retain for CUDA
-#include <hipcub/hipcub.hpp>
-// #include <cub/block/block_load.cuh>
-// #include <cub/block/block_store.cuh>
-// #include <cub/block/block_scan.cuh>
-// #include <cub/block/block_reduce.cuh>
+#ifndef USE_ROCM
+    #include <cub/block/block_load.cuh>
+    #include <cub/block/block_store.cuh>
+    #include <cub/block/block_scan.cuh>
+    #include <cub/block/block_reduce.cuh>
 
-// TODO: move to a separate header, together with the other max
-constexpr size_t my_max_bwd(std::initializer_list<size_t> ilist) 
-{
-    return *std::max_element(ilist.begin(), ilist.end());
-}
-
-// added adeem
-template<typename T>
-constexpr T constexpr_min(T a, T b) {
-    return a < b ? a : b;
-}
-
+#else
+    #include <hipcub/hipcub.hpp>
+    namespace cub = hipcub;
+#endif
 
 #include "selective_scan.h"
 #include "selective_scan_common.h"
@@ -62,22 +53,22 @@ struct Selective_Scan_bwd_kernel_traits {
     static constexpr int kMinBlocks = kNThreads == 128 && !kIsComplex ? 3 : 2;
     using vec_t = typename BytesToType<kNBytes * kNElts>::Type;
     using scan_t = std::conditional_t<!kIsComplex, float2, float4>;
-    using BlockLoadT = hipcub::BlockLoad<input_t, kNThreads, kNItems, hipcub::BLOCK_LOAD_WARP_TRANSPOSE>;
-    using BlockLoadVecT = hipcub::BlockLoad<vec_t, kNThreads, kNLoads, hipcub::BLOCK_LOAD_WARP_TRANSPOSE>;
-    using BlockLoadWeightT = hipcub::BlockLoad<input_t, kNThreads, !kIsComplex ? kNItems : kNItems * 2, hipcub::BLOCK_LOAD_WARP_TRANSPOSE>;
-    using BlockLoadWeightVecT = hipcub::BlockLoad<vec_t, kNThreads, !kIsComplex ? kNLoads : kNLoads * 2, hipcub::BLOCK_LOAD_WARP_TRANSPOSE>;
-    using BlockStoreT = hipcub::BlockStore<input_t, kNThreads, kNItems, hipcub::BLOCK_STORE_WARP_TRANSPOSE>;
-    using BlockStoreVecT = hipcub::BlockStore<vec_t, kNThreads, kNLoads, hipcub::BLOCK_STORE_WARP_TRANSPOSE>;
-    // using BlockScanT = hipcub::BlockScan<scan_t, kNThreads, hipcub::BLOCK_SCAN_RAKING_MEMOIZE>;
-    using BlockScanT = hipcub::BlockScan<scan_t, kNThreads, hipcub::BLOCK_SCAN_RAKING>;
-    // using BlockScanT = hipcub::BlockScan<scan_t, kNThreads, hipcub::BLOCK_SCAN_WARP_SCANS>;
+    using BlockLoadT = cub::BlockLoad<input_t, kNThreads, kNItems, cub::BLOCK_LOAD_WARP_TRANSPOSE>;
+    using BlockLoadVecT = cub::BlockLoad<vec_t, kNThreads, kNLoads, cub::BLOCK_LOAD_WARP_TRANSPOSE>;
+    using BlockLoadWeightT = cub::BlockLoad<input_t, kNThreads, !kIsComplex ? kNItems : kNItems * 2, cub::BLOCK_LOAD_WARP_TRANSPOSE>;
+    using BlockLoadWeightVecT = cub::BlockLoad<vec_t, kNThreads, !kIsComplex ? kNLoads : kNLoads * 2, cub::BLOCK_LOAD_WARP_TRANSPOSE>;
+    using BlockStoreT = cub::BlockStore<input_t, kNThreads, kNItems, cub::BLOCK_STORE_WARP_TRANSPOSE>;
+    using BlockStoreVecT = cub::BlockStore<vec_t, kNThreads, kNLoads, cub::BLOCK_STORE_WARP_TRANSPOSE>;
+    // using BlockScanT = cub::BlockScan<scan_t, kNThreads, cub::BLOCK_SCAN_RAKING_MEMOIZE>;
+    using BlockScanT = cub::BlockScan<scan_t, kNThreads, cub::BLOCK_SCAN_RAKING>;
+    // using BlockScanT = cub::BlockScan<scan_t, kNThreads, cub::BLOCK_SCAN_WARP_SCANS>;
     using BlockReverseScanT = BlockReverseScan<scan_t, kNThreads>;
-    using BlockReduceT = hipcub::BlockReduce<scan_t, kNThreads>;
-    using BlockReduceFloatT = hipcub::BlockReduce<float, kNThreads>;
-    using BlockReduceComplexT = hipcub::BlockReduce<complex_t, kNThreads>;
-    using BlockExchangeT = hipcub::BlockExchange<float, kNThreads, !kIsComplex ? kNItems : kNItems * 2>;
+    using BlockReduceT = cub::BlockReduce<scan_t, kNThreads>;
+    using BlockReduceFloatT = cub::BlockReduce<float, kNThreads>;
+    using BlockReduceComplexT = cub::BlockReduce<complex_t, kNThreads>;
+    using BlockExchangeT = cub::BlockExchange<float, kNThreads, !kIsComplex ? kNItems : kNItems * 2>;
 
-    static constexpr int kSmemIOSize = my_max_bwd({sizeof(typename BlockLoadT::TempStorage),
+    static constexpr int kSmemIOSize = my_max({sizeof(typename BlockLoadT::TempStorage),
                                                     sizeof(typename BlockLoadVecT::TempStorage),
                                                     (int(kIsVariableB) + int(kIsVariableC)) * sizeof(typename BlockLoadWeightT::TempStorage),
                                                     (int(kIsVariableB) + int(kIsVariableC)) * sizeof(typename BlockLoadWeightVecT::TempStorage),

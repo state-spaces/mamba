@@ -4,12 +4,23 @@
 
 #pragma once
 
-// TODO: make conditional on ROCM version. Make work for CUDA.
-//#include <cuda_bf16.h>
-#include <hip/hip_bf16.h>
-
+#ifndef USE_ROCM
+    #include <cuda_bf16.h>
+#else
+    #include <hip/hip_bf16.h>
+#endif
 #include <cuda_fp16.h>
 #include <c10/util/complex.h>  // For scalar_value_type
+
+constexpr size_t my_max(std::initializer_list<size_t> ilist) 
+{
+    return *std::max_element(ilist.begin(), ilist.end());
+}
+
+template<typename T>
+constexpr T constexpr_min(T a, T b) {
+    return a < b ? a : b;
+}
 
 #define MAX_DSTATE 256
 
@@ -156,15 +167,11 @@ inline __device__ void load_input(typename Ktraits::input_t *u,
     if constexpr (Ktraits::kIsEvenLen) {
         auto& smem_load_vec = reinterpret_cast<typename Ktraits::BlockLoadVecT::TempStorage&>(smem_load);
         using vec_t = typename Ktraits::vec_t;
-
-        // ROCM: Added typename TODO: check
         typename Ktraits::BlockLoadVecT(smem_load_vec).Load(
             reinterpret_cast<vec_t*>(u),
             reinterpret_cast<vec_t(&)[Ktraits::kNLoads]>(u_vals)
        );
     } else {
-
-        // ROCM: Added typename: check
         typename Ktraits::BlockLoadT(smem_load).Load(u, u_vals, seqlen, 0.f);
     }
 }
@@ -180,13 +187,11 @@ inline __device__ void load_weight(typename Ktraits::input_t *Bvar,
         if constexpr (Ktraits::kIsEvenLen) {
             auto& smem_load_weight_vec = reinterpret_cast<typename Ktraits::BlockLoadWeightVecT::TempStorage&>(smem_load_weight);
             using vec_t = typename Ktraits::vec_t;
-            // ROCM: Added typename: check
             typename Ktraits::BlockLoadWeightVecT(smem_load_weight_vec).Load(
                 reinterpret_cast<vec_t*>(Bvar),
                 reinterpret_cast<vec_t(&)[Ktraits::kNLoads]>(B_vals_load)
           );
         } else {
-            // ROCM: Added typename: check
             typename Ktraits::BlockLoadWeightT(smem_load_weight).Load(Bvar, B_vals_load, seqlen, 0.f);
         }
         // #pragma unroll
@@ -197,13 +202,11 @@ inline __device__ void load_weight(typename Ktraits::input_t *Bvar,
         if constexpr (Ktraits::kIsEvenLen) {
             auto& smem_load_weight_vec = reinterpret_cast<typename Ktraits::BlockLoadWeightVecT::TempStorage&>(smem_load_weight);
             using vec_t = typename Ktraits::vec_t;
-            // ROCM: Added typename: check
             typename Ktraits::BlockLoadWeightVecT(smem_load_weight_vec).Load(
                 reinterpret_cast<vec_t*>(Bvar),
                 reinterpret_cast<vec_t(&)[Ktraits::kNLoads * 2]>(B_vals_load)
           );
         } else {
-            // ROCM: Added typename: check
             typename Ktraits::BlockLoadWeightT(smem_load_weight).Load(Bvar, B_vals_load, seqlen, 0.f);
         }
         #pragma unroll
@@ -222,14 +225,11 @@ inline __device__ void store_output(typename Ktraits::input_t *out,
     if constexpr (Ktraits::kIsEvenLen) {
         auto& smem_store_vec = reinterpret_cast<typename Ktraits::BlockStoreVecT::TempStorage&>(smem_store);
         using vec_t = typename Ktraits::vec_t;
-        
-        // ROCM: Added typename: check
         typename Ktraits::BlockStoreVecT(smem_store_vec).Store(
             reinterpret_cast<vec_t*>(out),
             reinterpret_cast<vec_t(&)[Ktraits::kNLoads]>(write_vals)
        );
     } else {
-        // ROCM: Added typename: check
         typename Ktraits::BlockStoreT(smem_store).Store(out, write_vals, seqlen);
     }
 }

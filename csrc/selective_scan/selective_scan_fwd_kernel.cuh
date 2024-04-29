@@ -8,34 +8,18 @@
 #include <c10/util/Half.h>
 #include <c10/cuda/CUDAException.h>  // For C10_CUDA_CHECK and C10_CUDA_KERNEL_LAUNCH_CHECK
 
-
-#include <hipcub/hipcub.hpp>
-// #include <cub/block/block_load.cuh>
-// #include <cub/block/block_store.cuh>
-// #include <cub/block/block_scan.cuh>
+#ifndef USE_ROCM
+    #include <cub/block/block_load.cuh>
+    #include <cub/block/block_store.cuh>
+    #include <cub/block/block_scan.cuh>
+#else
+    #include <hipcub/hipcub.hpp>
+    namespace cub = hipcub;
+#endif
 
 #include "selective_scan.h"
 #include "selective_scan_common.h"
 #include "static_switch.h"
-
-#include <algorithm>
-
-
-// TODO (two lines below): remove, here for debugging only
-#include <stdio.h>
-#include <typeinfo>
-
-
-constexpr size_t my_max(std::initializer_list<size_t> ilist)
-{
-    return *std::max_element(ilist.begin(), ilist.end());
-}
-
-// added adeem
-template<typename T>
-constexpr T constexpr_min(T a, T b) {
-    return a < b ? a : b;
-}
 
 template<int kNThreads_, int kNItems_, int kNRows_, bool kIsEvenLen_,
          bool kIsVariableB_, bool kIsVariableC_,
@@ -64,18 +48,18 @@ struct Selective_Scan_fwd_kernel_traits {
 
     using vec_t = typename BytesToType<kNBytes * kNElts>::Type;
     using scan_t = std::conditional_t<!kIsComplex, float2, float4>;
-    using BlockLoadT = hipcub::BlockLoad<input_t, kNThreads, kNItems, hipcub::BLOCK_LOAD_WARP_TRANSPOSE>;
-    using BlockLoadVecT = hipcub::BlockLoad<vec_t, kNThreads, kNLoads,
-        !kDirectIO ? hipcub::BLOCK_LOAD_WARP_TRANSPOSE : hipcub::BLOCK_LOAD_DIRECT>;
-    using BlockLoadWeightT = hipcub::BlockLoad<input_t, kNThreads, !kIsComplex ? kNItems : kNItems * 2, hipcub::BLOCK_LOAD_WARP_TRANSPOSE>;
-    using BlockLoadWeightVecT = hipcub::BlockLoad<vec_t, kNThreads, !kIsComplex ? kNLoads : kNLoads * 2,
-        !kDirectIO ? hipcub::BLOCK_LOAD_WARP_TRANSPOSE  : hipcub::BLOCK_LOAD_DIRECT>;
-    using BlockStoreT = hipcub::BlockStore<input_t, kNThreads, kNItems, hipcub::BLOCK_STORE_WARP_TRANSPOSE>;
-    using BlockStoreVecT = hipcub::BlockStore<vec_t, kNThreads, kNLoads,
-        !kDirectIO ? hipcub::BLOCK_STORE_WARP_TRANSPOSE : hipcub::BLOCK_STORE_DIRECT>;
-    // using BlockScanT = hipcub::BlockScan<scan_t, kNThreads, hipcub::BLOCK_SCAN_RAKING_MEMOIZE>;
-    // using BlockScanT = hipcub::BlockScan<scan_t, kNThreads, hipcub::BLOCK_SCAN_RAKING>;
-    using BlockScanT = hipcub::BlockScan<scan_t, kNThreads, hipcub::BLOCK_SCAN_WARP_SCANS>;
+    using BlockLoadT = cub::BlockLoad<input_t, kNThreads, kNItems, cub::BLOCK_LOAD_WARP_TRANSPOSE>;
+    using BlockLoadVecT = cub::BlockLoad<vec_t, kNThreads, kNLoads,
+        !kDirectIO ? cub::BLOCK_LOAD_WARP_TRANSPOSE : cub::BLOCK_LOAD_DIRECT>;
+    using BlockLoadWeightT = cub::BlockLoad<input_t, kNThreads, !kIsComplex ? kNItems : kNItems * 2, cub::BLOCK_LOAD_WARP_TRANSPOSE>;
+    using BlockLoadWeightVecT = cub::BlockLoad<vec_t, kNThreads, !kIsComplex ? kNLoads : kNLoads * 2,
+        !kDirectIO ? cub::BLOCK_LOAD_WARP_TRANSPOSE  : cub::BLOCK_LOAD_DIRECT>;
+    using BlockStoreT = cub::BlockStore<input_t, kNThreads, kNItems, cub::BLOCK_STORE_WARP_TRANSPOSE>;
+    using BlockStoreVecT = cub::BlockStore<vec_t, kNThreads, kNLoads,
+        !kDirectIO ? cub::BLOCK_STORE_WARP_TRANSPOSE : cub::BLOCK_STORE_DIRECT>;
+    // using BlockScanT = cub::BlockScan<scan_t, kNThreads, cub::BLOCK_SCAN_RAKING_MEMOIZE>;
+    // using BlockScanT = cub::BlockScan<scan_t, kNThreads, cub::BLOCK_SCAN_RAKING>;
+    using BlockScanT = cub::BlockScan<scan_t, kNThreads, cub::BLOCK_SCAN_WARP_SCANS>;
     static constexpr int kSmemIOSize = my_max({sizeof(typename BlockLoadT::TempStorage),
                                                  sizeof(typename BlockLoadVecT::TempStorage),
                                                  (int(kIsVariableB) + int(kIsVariableC)) * sizeof(typename BlockLoadWeightT::TempStorage),
@@ -102,7 +86,6 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
 
     // Shared memory.
     extern __shared__ char smem_[];
-
     // cast to lvalue reference of expected type
     // char *smem_loadstorescan = smem_ + 2 * MAX_DSTATE * sizeof(weight_t);
     // auto& smem_load = reinterpret_cast<typename BlockLoadT::TempStorage&>(smem_ + 2 * MAX_DSTATE * sizeof(weight_t));
@@ -115,7 +98,6 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     // weight_t *smem_a = reinterpret_cast<weight_t *>(smem_ + smem_loadstorescan_size);
     // weight_t *smem_bc = reinterpret_cast<weight_t *>(smem_a + MAX_DSTATE);
     scan_t *smem_running_prefix = reinterpret_cast<scan_t *>(smem_ + Ktraits::kSmemSize);
-    
 
     const int batch_id = blockIdx.x;
     const int dim_id = blockIdx.y;
@@ -130,7 +112,6 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     weight_t *C = reinterpret_cast<weight_t *>(params.C_ptr) + dim_id * kNRows * params.C_d_stride;
     input_t *Cvar = reinterpret_cast<input_t *>(params.C_ptr) + batch_id * params.C_batch_stride + group_id * params.C_group_stride;
     scan_t *x = reinterpret_cast<scan_t *>(params.x_ptr) + (batch_id * params.dim + dim_id * kNRows) * params.n_chunks * params.dstate;
-
 
     float D_val[kNRows] = {0};
     if (params.D_ptr != nullptr) {
@@ -167,7 +148,6 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
         }
         u += kChunkSize;
         delta += kChunkSize;
-
     
         float delta_vals[kNRows][kNItems], delta_u_vals[kNRows][kNItems], out_vals[kNRows][kNItems];
         #pragma unroll
@@ -183,7 +163,6 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                 out_vals[r][i] = D_val[r] * u_val;
             }
         }
-
 
         __syncthreads();
         for (int state_idx = 0; state_idx < params.dstate; ++state_idx) {
@@ -269,8 +248,6 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                     // running_prefix = chunk > 0 && threadIdx.x == 0 ? smem_running_prefix[state_idx] : make_float4(1.f, 0.f, 0.f, 0.f);
                 }
                 SSMScanPrefixCallbackOp<weight_t> prefix_op(running_prefix);
-                
-                // ROCM
                 typename Ktraits::BlockScanT(smem_scan).InclusiveScan(
                     thread_data, thread_data, SSMScanOp<weight_t>(), prefix_op
                 );
@@ -293,9 +270,6 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                 }
             }
         }
-
-
-
         
         input_t *out = reinterpret_cast<input_t *>(params.out_ptr) + batch_id * params.out_batch_stride
             + dim_id * kNRows * params.out_d_stride + chunk * kChunkSize;
