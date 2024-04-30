@@ -67,7 +67,7 @@ struct Selective_Scan_bwd_kernel_traits {
     using BlockReduceComplexT = cub::BlockReduce<complex_t, kNThreads>;
     using BlockExchangeT = cub::BlockExchange<float, kNThreads, !kIsComplex ? kNItems : kNItems * 2>;
 
-    static constexpr int kSmemIOSize = my_max({sizeof(typename BlockLoadT::TempStorage),
+    static constexpr int kSmemIOSize = custom_max({sizeof(typename BlockLoadT::TempStorage),
                                                     sizeof(typename BlockLoadVecT::TempStorage),
                                                     (int(kIsVariableB) + int(kIsVariableC)) * sizeof(typename BlockLoadWeightT::TempStorage),
                                                     (int(kIsVariableB) + int(kIsVariableC)) * sizeof(typename BlockLoadWeightVecT::TempStorage),

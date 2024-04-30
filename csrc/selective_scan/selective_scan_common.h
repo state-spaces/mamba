@@ -12,15 +12,30 @@
 #include <cuda_fp16.h>
 #include <c10/util/complex.h>  // For scalar_value_type
 
-constexpr size_t my_max(std::initializer_list<size_t> ilist) 
-{
-    return *std::max_element(ilist.begin(), ilist.end());
-}
 
-template<typename T>
-constexpr T constexpr_min(T a, T b) {
-    return a < b ? a : b;
-}
+#ifndef USE_ROCM
+
+    constexpr size_t custom_max(std::initializer_list<size_t> ilist) 
+    {
+        return std::max(ilist);
+    }
+
+    constexpr T constexpr_min(T a, T b) {
+        return std::min(a, b);
+    }
+
+#else
+    constexpr size_t custom_max(std::initializer_list<size_t> ilist) 
+    {
+        return *std::max_element(ilist.begin(), ilist.end());
+    }
+
+    template<typename T>
+    constexpr T constexpr_min(T a, T b) {
+        return a < b ? a : b;
+    }
+#endif
+
 
 #define MAX_DSTATE 256
 
