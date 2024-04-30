@@ -257,7 +257,7 @@ class MambaInnerFn(torch.autograd.Function):
             conv1d_out, delta = None, None
         ctx.save_for_backward(xz, conv1d_weight, conv1d_bias, x_dbl, x_proj_weight,
                               delta_proj_weight, out_proj_weight, conv1d_out, delta,
-                              A, B, C, D, delta_bias, scan_intermediates, out, cu_seqlens, torch.tensor([d_conv]))
+                              A, B, C, D, delta_bias, scan_intermediates, out, cu_seqlens, d_conv)
         return F.linear(rearrange(out_z, "b d l -> b l d"), out_proj_weight, out_proj_bias)
 
     @staticmethod
@@ -267,7 +267,6 @@ class MambaInnerFn(torch.autograd.Function):
         assert causal_conv1d_cuda is not None, "causal_conv1d_cuda is not available. Please install causal-conv1d."
         (xz, conv1d_weight, conv1d_bias, x_dbl, x_proj_weight, delta_proj_weight, out_proj_weight,
          conv1d_out, delta, A, B, C, D, delta_bias, scan_intermediates, out, cu_seqlens, d_conv) = ctx.saved_tensors
-        d_conv = d_conv.item()
         L = xz.shape[-1]
         delta_rank = delta_proj_weight.shape[1]
         d_state = A.shape[-1] * (1 if not A.is_complex() else 2)

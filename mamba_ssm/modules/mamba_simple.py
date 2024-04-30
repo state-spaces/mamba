@@ -159,7 +159,7 @@ class Mamba(nn.Module):
                 delta_bias=self.dt_proj.bias.float(),
                 delta_softplus=True,
                 cu_seqlens=cu_seqlens,
-                d_conv=self.d_conv,
+                d_conv=torch.tensor([self.d_conv], device=cu_seqlens.device),
             )
         else:
             x, z = xz.chunk(2, dim=1)
