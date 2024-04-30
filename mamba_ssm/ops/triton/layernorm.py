@@ -51,8 +51,8 @@ def config_prune(configs):
     block_sz = 1024
     # warp size is 64 in amd arch
     warp_sz = 64 if torch.version.hip else 32
-    max_num_warps = block_sz//warp_sz
-    pruned_configs = [config for config in configs if config.num_warps<=max_num_warps]
+    max_num_warps = block_sz // warp_sz
+    pruned_configs = [config for config in configs if config.num_warps <= max_num_warps]
     return pruned_configs
 
 configs_autotune = [
