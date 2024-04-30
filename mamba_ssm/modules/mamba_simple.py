@@ -119,7 +119,7 @@ class Mamba(nn.Module):
     def forward(self, hidden_states, cu_seqlens=None, inference_params=None):
         """
         hidden_states: (B, L, D)
-        cu_seqlens: one-dimensional tensor like flash-attn varlen API, only used for variable-length sequences and packing variable-length sequences into one, a.k.a., batch_size B=1
+        cu_seqlens: one-dimensional tensor representing cumulative start indexes of packed sequence, a.k.a., B=1
         Returns: same shape as hidden_states
         """
         batch, seqlen, dim = hidden_states.shape
