@@ -507,7 +507,7 @@ void selective_scan_bwd_launch(SSMParamsBwd &params, cudaStream_t stream) {
                         constexpr int kSmemSize = Ktraits::kSmemSize + MAX_DSTATE * sizeof(typename Ktraits::scan_t) + (kNThreads + 4 * MAX_DSTATE) * sizeof(typename Ktraits::weight_t);
 
                         dim3 grid(params.batch, params.dim);
-                        const void * kernel = (void*) &selective_scan_bwd_kernel<Ktraits>; // TODO: change to reinterpret cast.
+                        const void * kernel = (void*) &selective_scan_bwd_kernel<Ktraits>; // TODO: change to reinterpret cast? what's the best practice?
 
                         if (kSmemSize >= 48 * 1024) {
                             C10_CUDA_CHECK(cudaFuncSetAttribute(
@@ -525,7 +525,7 @@ void selective_scan_bwd_launch(SSMParamsBwd &params, cudaStream_t stream) {
     });
 }
 
-// TODO: make conditional
+// TODO: make conditional. What's the best practice?
 template<typename input_t, typename weight_t>
 void selective_scan_bwd_cuda(SSMParamsBwd &params, cudaStream_t stream) {
     if (params.seqlen <= 128) {

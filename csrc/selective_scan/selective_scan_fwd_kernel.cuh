@@ -317,32 +317,23 @@ void selective_scan_fwd_launch(SSMParamsBase &params, cudaStream_t stream) {
             BOOL_SWITCH(params.is_variable_C, kIsVariableC, [&] {
                 BOOL_SWITCH(params.z_ptr != nullptr , kHasZ, [&] {
                     using Ktraits = Selective_Scan_fwd_kernel_traits<kNThreads, kNItems, kNRows, kIsEvenLen, kIsVariableB, kIsVariableC, kHasZ, input_t, weight_t>;
-                    // constexpr int kSmemSize = Ktraits::kSmemSize;
+                    
                     constexpr int kSmemSize = Ktraits::kSmemSize + kNRows * MAX_DSTATE * sizeof(typename Ktraits::scan_t);
-                    // printf("smem_size = %d\n", kSmemSize);
                     dim3 grid(params.batch, params.dim / kNRows);
 
                     // Had to change this substantially since potentially the hip 
                     // interface for setting kernel launch attributes is slightly different from 
                     // cuda's. In particualar, it seems to expect a plain const void * pointer.
 
-
-                    // // TODO: this does not properly allocate shared memory, fix.
-                    const void * kernel = (void*) &selective_scan_fwd_kernel<Ktraits>; // TODO: change to reinterpret cast.
-
-                    //const decltype(&selective_scan_fwd_kernel<Ktraits>) kernel = &selective_scan_fwd_kernel<Ktraits>;
+                    const void * kernel = (void*) &selective_scan_fwd_kernel<Ktraits>; // TODO: change to reinterpret cast. What's the best practice?
 
                     if (kSmemSize >= 48 * 1024) {
                         C10_CUDA_CHECK(cudaFuncSetAttribute(
                             kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
                     } 
 
-                    auto kernel_fn = (void (*const)(SSMParamsBase)) kernel; // Todo - double-check. Had to add this C-style conversion. // TODO: change to reinterpret cast?
+                    auto kernel_fn = (void (*const)(SSMParamsBase)) kernel; // Todo - double-check. Had to add this C-style conversion. // TODO: change to reinterpret cast? What's the best practice?
 
-                    // TODO: remove and replace with the above
-                    // auto kernel_fn = &selective_scan_fwd_kernel<Ktraits>;
-                    
-                    
                     kernel_fn<<<grid, Ktraits::kNThreads, kSmemSize, stream>>>(params);
                     C10_CUDA_KERNEL_LAUNCH_CHECK();
                 });
