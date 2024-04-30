@@ -14,7 +14,6 @@
     #include <cub/block/block_store.cuh>
     #include <cub/block/block_scan.cuh>
     #include <cub/block/block_reduce.cuh>
-
 #else
     #include <hipcub/hipcub.hpp>
     namespace cub = hipcub;

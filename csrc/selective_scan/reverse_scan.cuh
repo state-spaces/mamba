@@ -51,7 +51,8 @@ __device__ __forceinline__ T ThreadReverseScanInclusive(
         inclusive = scan_op(inclusive, input[i]);
         output[i] = inclusive;
     }
-    return inclusive; // TODO: added this statement bc of compiler complaints. Remove?
+    // hip compiler requires return 
+    return inclusive; 
 }
 
 /**
@@ -96,11 +97,13 @@ struct WarpReverseScan {
 
     /// Whether the logical warp size and the PTX warp size coincide
 
-    // TODO: segment below: make CUDA compatible, ROCM/pytorch version dependent
-    // TODO: notify hipcub code owners of the inconsistency (or hipify code owners)?
     // In hipcub, warp_threads is defined as HIPCUB_WARP_THREADS ::rocprim::warp_size()
     // While in cub, it's defined as a macro that takes a redundant unused argument.
-    static constexpr bool IS_ARCH_WARP = (LOGICAL_WARP_THREADS == HIPCUB_WARP_THREADS);
+    #ifndef USE_ROCM
+        static constexpr bool IS_ARCH_WARP = (LOGICAL_WARP_THREADS == CUB_WARP_THREADS(0));
+    #else
+        static constexpr bool IS_ARCH_WARP = (LOGICAL_WARP_THREADS == HIPCUB_WARP_THREADS);
+    #endif
     /// The number of warp scan steps
     static constexpr int STEPS = cub::Log2<LOGICAL_WARP_THREADS>::VALUE;
     static_assert(LOGICAL_WARP_THREADS == 1 << STEPS);
