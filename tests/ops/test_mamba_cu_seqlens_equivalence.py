@@ -82,7 +82,13 @@ def main():
     assert max([hs.shape[0] for hs in hidden_states_list]) == hidden_states.shape[1]
 
     # creat one simple mamba block
-    mamba = Mamba(hidden_dim).to(device)
+    mamba = Mamba(
+        # This module uses roughly 3 * expand * d_model^2 parameters
+        d_model=hidden_dim, # Model dimension d_model
+        d_state=16,  # SSM state expansion factor
+        d_conv=4,    # Local convolution width
+        expand=2,    # Block expansion factor
+    ).to(device)
 
     # reference output for forwardding hidden_states
     out_ref = mamba(hidden_states)
