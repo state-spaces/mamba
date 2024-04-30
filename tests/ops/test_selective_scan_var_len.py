@@ -1,6 +1,7 @@
 # Copyright (C) 2023, Tri Dao.
 
 import math
+import random
 
 import torch
 import torch.nn.functional as F
@@ -10,6 +11,18 @@ from einops import rearrange
 
 from mamba_ssm.ops.selective_scan_interface import selective_scan_fn, selective_scan_ref
 
+'''
+Generate random cu_seqlens for testing
+'''
+def generate_random_cu_seqlens(seq_len):
+    batch_size = random.randint(1,seq_len)
+    if batch_size > 1:
+        ret = sorted(random.sample(range(1, seq_len), batch_size - 1))
+    else:
+        ret = []
+    cu_seqlens = [0] + ret + [seq_len]
+    assert batch_size == len(cu_seqlens) - 1
+    return [0] + ret + [seq_len]
 
 @pytest.mark.parametrize('wtype', [torch.float32])
 @pytest.mark.parametrize('itype', [torch.float32])
@@ -22,10 +35,8 @@ from mamba_ssm.ops.selective_scan_interface import selective_scan_fn, selective_
 @pytest.mark.parametrize("varBC_groups", [1, 2])
 @pytest.mark.parametrize("is_variable_C", [True])
 @pytest.mark.parametrize("is_variable_B", [True])
-@pytest.mark.parametrize("seq_num", [1, 2, 3, 4, 5, 6, 7])
 def test_selective_scan_variable_length(is_variable_B, is_variable_C, varBC_groups, has_D, has_z, has_delta_bias,
-                        delta_softplus, return_last_state, seqlen, itype, wtype, seq_num):
-    is_variable_B = True
+                        delta_softplus, return_last_state, seqlen, itype, wtype):
     if varBC_groups > 1 and (not is_variable_B or not is_variable_C):
         pytest.skip()  # This config is not applicable
     device = 'cuda'
@@ -39,8 +50,8 @@ def test_selective_scan_variable_length(is_variable_B, is_variable_C, varBC_grou
     # set seed
     torch.random.manual_seed(0)
     batch_size = 1
-    dim = 4
-    dstate = 1
+    dim = 768
+    dstate = 8
     is_complex = wtype == torch.complex64
     A = (-0.5 * torch.rand(dim, dstate, device=device, dtype=wtype)).requires_grad_()
     if not is_variable_B:
@@ -73,7 +84,6 @@ def test_selective_scan_variable_length(is_variable_B, is_variable_C, varBC_grou
         delta_bias = None
     u = torch.randn(batch_size, dim, seqlen, device=device, dtype=itype, requires_grad=True)
     delta = (0.5 * torch.rand(batch_size, dim, seqlen, device=device, dtype=itype)).requires_grad_()
-
     A_ref = A.detach().clone().requires_grad_()
     B_ref = B.detach().clone().requires_grad_()
     C_ref = C.detach().clone().requires_grad_()
@@ -82,7 +92,7 @@ def test_selective_scan_variable_length(is_variable_B, is_variable_C, varBC_grou
     u_ref = u.detach().clone().requires_grad_()
     delta_ref = delta.detach().clone().requires_grad_()
     delta_bias_ref = delta_bias.detach().clone().requires_grad_() if delta_bias is not None else None
-    cu_seqlens = torch.arange(0, seqlen, seqlen / seq_num, dtype=torch.int64).cuda()
+    cu_seqlens = torch.tensor(generate_random_cu_seqlens(seqlen)).cuda()
     
     out, *rest = selective_scan_fn(
         u, delta, A, B, C, D, z=z,

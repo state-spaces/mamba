@@ -55,6 +55,15 @@ def main():
     batch_size = 8
     device='cuda'
     
+    itype = torch.float32
+    rtol, atol = (6e-4, 2e-3) if itype == torch.float32 else (3e-3, 5e-3)
+    if itype == torch.bfloat16:
+        rtol, atol = 3e-2, 5e-2
+    rtolw, atolw = (1e-3, 1e-3)
+    # If we have z, the errors on the weights seem higher
+    rtolw = max(rtolw, rtol)
+    atolw = max(atolw, atol)
+
     # Generate random cu_seqlens for testing
     cu_seqlens = generate_random_cu_seqlens(seq_len, batch_size)
     cu_seqlens = torch.tensor(cu_seqlens, device=device)
@@ -85,6 +94,7 @@ def main():
     # Testing the max/mean diff
     print(f'Output max diff: {(out - out_ref).abs().max().item()}')
     print(f'Output mean diff: {(out - out_ref).abs().mean().item()}')
+    assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
 
 
 if __name__ == "__main__":
