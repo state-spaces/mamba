@@ -379,8 +379,8 @@ setup(
         "packaging",
         "ninja",
         "einops",
-        # "triton",
+        "triton",
         "transformers",
-       # "causal_conv1d>=1.1.0", # TODO: condition on rocm conv1d release? Leaving this commented out is also an option.
+       # "causal_conv1d>=1.1.0",
     ],
 )
