@@ -70,7 +70,30 @@ def get_cuda_bare_metal_version(cuda_dir):
     return raw_output, bare_metal_version
 
 
+def get_hip_version(rocm_dir):
+    ## TODO: from xformers, proper attribution. Use the same signature as above?
+    hipcc_bin = "hipcc" if rocm_dir is None else os.path.join(rocm_dir, "bin", "hipcc")
+    try:
+        raw_output = subprocess.check_output(
+            [hipcc_bin, "--version"], universal_newlines=True
+        )
+    except Exception as e:
+        print(
+            f"hip installation not found: {e} ROCM_PATH={os.environ.get('ROCM_PATH')}"
+        )
+        return None, None
+    
+    for line in raw_output.split("\n"):
+        if "HIP version" in line:
+            #print(f"FOUND HIP VERSION line: {line}, version: {line.split()[-1]}")
+            #print(f"FOUND HIP VERSION line: {line}, version: {line.split()[-1]}")
+            rocm_version = parse(line.split()[-1].replace("-", "+")) # local version is not parsed correctly
+            return line, rocm_version
+    return None, None
+
+
 def check_if_cuda_home_none(global_option: str) -> None:
+    
     if CUDA_HOME is not None:
         return
     # warn instead of error because user could be downloading prebuilt wheels, so nvcc won't be necessary
@@ -90,60 +113,41 @@ cmdclass = {}
 ext_modules = []
 
 
-## ADDED
-
-
-def rename_cpp_cu(cpp_files):
-    for entry in cpp_files:
-        shutil.copy(entry, os.path.splitext(entry)[0] + ".cu")
-
-
-def get_hip_version(rocm_dir) -> str:
-
-    ## TODO: from xformers, proper attribution
-    hipcc_bin = "hipcc" if rocm_dir is None else os.path.join(rocm_dir, "bin", "hipcc")
-    try:
-        raw_output = subprocess.check_output(
-            [hipcc_bin, "--version"], universal_newlines=True
-        )
-    except Exception as e:
-        print(
-            f"hip installation not found: {e} ROCM_PATH={os.environ.get('ROCM_PATH')}"
-        )
-        return None
-    for line in raw_output.split("\n"):
-        if "HIP version" in line:
-            return line.split()[-1]
-    return None
-
-
-
 
 if not SKIP_CUDA_BUILD:
-    if not torch.version.hip: ## TODO add to build wheel
-        print("\n\ntorch.__version__  = {}\n\n".format(torch.__version__))
-        TORCH_MAJOR = int(torch.__version__.split(".")[0])
-        TORCH_MINOR = int(torch.__version__.split(".")[1])
+    print("\n\ntorch.__version__  = {}\n\n".format(torch.__version__))
+    TORCH_MAJOR = int(torch.__version__.split(".")[0])
+    TORCH_MINOR = int(torch.__version__.split(".")[1])
 
+    # TODO: move to main?
+    if not torch.cuda.is_available():
+        raise ValueError("CUDA/HIP not available within Pytorch. This package is intended for a CUDA/HIP-enabled Pytorch installation.")
+    
+    HIP_BUILD = bool(torch.version.hip)
 
-    check_if_cuda_home_none(PACKAGE_NAME)
-    # Check, if CUDA11 is installed for compute capability 8.0
     cc_flag = []
-    if CUDA_HOME is not None and not torch.version.hip:
-        _, bare_metal_version = get_cuda_bare_metal_version(CUDA_HOME)
-        if bare_metal_version < Version("11.6"):
-            raise RuntimeError(
-                f"{PACKAGE_NAME} is only supported on CUDA 11.6 and above.  "
-                "Note: make sure nvcc has a supported version by running nvcc -V."
-            )
-    elif torch.cuda.is_available() and torch.version.hip:
 
+    if HIP_BUILD:
         rocm_home = os.getenv("ROCM_PATH")
-        hip_version = get_hip_version(rocm_home)
+        _, hip_version = get_hip_version(rocm_home)
+        # TODO: remove print, add runtime error for unsupported ROCm versions. 6.1 minimum?
         print(f"Building for HIP {hip_version}.")
 
-    if not torch.version.hip:
-
+        cc_flag.append("-DBUILD_PYTHON_PACKAGE")
+        
+    else:
+        check_if_cuda_home_none(PACKAGE_NAME)
+        # Check, if CUDA11 is installed for compute capability 8.0
+        
+        if CUDA_HOME is not None and not torch.version.hip:
+            _, bare_metal_version = get_cuda_bare_metal_version(CUDA_HOME)
+            if bare_metal_version < Version("11.6"):
+                raise RuntimeError(
+                    f"{PACKAGE_NAME} is only supported on CUDA 11.6 and above.  "
+                    "Note: make sure nvcc has a supported version by running nvcc -V."
+                )
+    
+        ## TODO: it now has more options? pull
         cc_flag.append("-gencode")
         cc_flag.append("arch=compute_70,code=sm_70")
         cc_flag.append("-gencode")
@@ -153,31 +157,51 @@ if not SKIP_CUDA_BUILD:
             cc_flag.append("-gencode")
             cc_flag.append("arch=compute_90,code=sm_90")
 
+    
     # HACK: The compiler flag -D_GLIBCXX_USE_CXX11_ABI is set to be the same as
     # torch._C._GLIBCXX_USE_CXX11_ABI
     # https://github.com/pytorch/pytorch/blob/8472c24e3b5b60150096486616d98b7bea01500b/torch/utils/cpp_extension.py#L920
     if FORCE_CXX11_ABI:
         torch._C._GLIBCXX_USE_CXX11_ABI = True
 
-    generator_flag = []
-    cc_flag.append("-DBUILD_PYTHON_PACKAGE")
-    
-    ###FROM XFORMER:
-    extra_compile_args = {
-        "cxx": ["-O3", "-std=c++17"] + generator_flag,
-        "nvcc": [
-            "-O3",
-            "-std=c++17",
-            "-ferror-limit=20",#added
-            f"--offload-arch={os.getenv('HIP_ARCHITECTURES', 'native')}",
-            "-U__CUDA_NO_HALF_OPERATORS__",
-            "-U__CUDA_NO_HALF_CONVERSIONS__",
-            "-DCK_FMHA_FWD_FAST_EXP2=1",
-            "-fgpu-flush-denormals-to-zero",
-        ]
-        + generator_flag
-        + cc_flag,
-    }
+    if HIP_BUILD:
+        ###FROM XFORMER: # TODO: attribution?
+        extra_compile_args = {
+            "cxx": ["-O3", "-std=c++17"],
+            "nvcc": [
+                "-O3",
+                "-std=c++17",
+                "-ferror-limit=20",#added # TODO: remove?
+                f"--offload-arch={os.getenv('HIP_ARCHITECTURES', 'native')}",
+                "-U__CUDA_NO_HALF_OPERATORS__",
+                "-U__CUDA_NO_HALF_CONVERSIONS__",
+                "-DCK_FMHA_FWD_FAST_EXP2=1",
+                "-fgpu-flush-denormals-to-zero",
+            ]
+            + cc_flag,
+        }
+    else:
+        extra_compile_args = {
+            "cxx": ["-O3", "-std=c++17"],
+            "nvcc": append_nvcc_threads(
+                [
+                    "-O3",
+                    "-std=c++17",
+                    "-U__CUDA_NO_HALF_OPERATORS__",
+                    "-U__CUDA_NO_HALF_CONVERSIONS__",
+                    "-U__CUDA_NO_BFLOAT16_OPERATORS__",
+                    "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+                    "-U__CUDA_NO_BFLOAT162_OPERATORS__",
+                    "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
+                    "--expt-relaxed-constexpr",
+                    "--expt-extended-lambda",
+                    "--use_fast_math",
+                    "--ptxas-options=-v",
+                    "-lineinfo",
+                ]
+                + cc_flag
+            ),
+        }
 
     ext_modules.append(
         CUDAExtension(
@@ -187,7 +211,6 @@ if not SKIP_CUDA_BUILD:
                 "csrc/selective_scan/selective_scan_fwd_fp32.cu",
                 "csrc/selective_scan/selective_scan_fwd_fp16.cu",
                 "csrc/selective_scan/selective_scan_fwd_bf16.cu",
-
                 "csrc/selective_scan/selective_scan_bwd_fp32_real.cu",
                 "csrc/selective_scan/selective_scan_bwd_fp32_complex.cu",
                 "csrc/selective_scan/selective_scan_bwd_fp16_real.cu",
@@ -196,27 +219,6 @@ if not SKIP_CUDA_BUILD:
                 "csrc/selective_scan/selective_scan_bwd_bf16_complex.cu",
             ],
             extra_compile_args=extra_compile_args,
-            # {
-            #     "cxx": ["-O3", "-std=c++17"],
-            #     "nvcc": append_nvcc_threads(
-            #         [
-            #             "-O3",
-            #             "-std=c++17",
-            #             "-U__CUDA_NO_HALF_OPERATORS__",
-            #             "-U__CUDA_NO_HALF_CONVERSIONS__",
-            #             "-U__CUDA_NO_BFLOAT16_OPERATORS__",
-            #             "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-            #             "-U__CUDA_NO_BFLOAT162_OPERATORS__",
-            #             "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
-            #             "--expt-relaxed-constexpr",
-            #             "--expt-extended-lambda",
-            #             "--use_fast_math",
-            #             "--ptxas-options=-v",
-            #             "-lineinfo",
-            #         ]
-            #         + cc_flag
-            #     ),
-            # },
             include_dirs=[Path(this_dir) / "csrc" / "selective_scan"],
         )
     )
@@ -235,7 +237,7 @@ def get_package_version():
 
 def get_wheel_url():
 
-    if torch.version.hip: #TODO:hack
+    if torch.version.hip: #TODO:hack, fix
         
         mamba_ver = get_package_version()
         wheel_filename = f"{PACKAGE_NAME}-{mamba_ver}-rocm6_tst"
@@ -246,7 +248,7 @@ def get_wheel_url():
     # Determine the version numbers that will be used to determine the correct wheel
     # We're using the CUDA version used to build torch, not the one currently installed
     # _, cuda_version_raw = get_cuda_bare_metal_version(CUDA_HOME)
-    torch_cuda_version = parse(torch.version.cuda)
+    torch_cuda_version = parse(torch.version.cuda) #TODO: change to hip when appropriate
     torch_version_raw = parse(torch.__version__)
     # For CUDA 11, we only compile for CUDA 11.8, and for CUDA 12 we only compile for CUDA 12.2
     # to save CI time. Minor versions should be compatible.
@@ -260,6 +262,7 @@ def get_wheel_url():
     cxx11_abi = str(torch._C._GLIBCXX_USE_CXX11_ABI).upper()
 
     # Determine wheel URL based on CUDA version, torch version, python version and OS
+                                                          #Todo: choose hip vs cu as appropriate  
     wheel_filename = f"{PACKAGE_NAME}-{mamba_ssm_version}+cu{cuda_version}torch{torch_version}cxx11abi{cxx11_abi}-{python_version}-{python_version}-{platform_name}.whl"
     wheel_url = BASE_WHEEL_URL.format(
         tag_name=f"v{mamba_ssm_version}", wheel_name=wheel_filename
@@ -302,6 +305,8 @@ class CachedWheelsCommand(_bdist_wheel):
             super().run()
 
 
+## TODO: recide on ROCm vs HIP naming
+
 setup(
     name=PACKAGE_NAME,
     version=get_package_version(),
@@ -342,6 +347,6 @@ setup(
         "einops",
         # "triton",
         "transformers",
-       # "causal_conv1d>=1.1.0",
+       # "causal_conv1d>=1.1.0", # TODO: condition on rocm conv1d release? Leaving this commented out is also an option.
     ],
 )
