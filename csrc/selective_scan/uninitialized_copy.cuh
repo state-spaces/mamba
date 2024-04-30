@@ -27,10 +27,17 @@
 
 #pragma once
 
-#include <hipcub/hipcub.hpp>
-// TODO: Make ROCM/Pytorch version dependent, make CUDA compatible.
-// #include <cub/config.cuh>
-// #include <cuda/std/type_traits>
+#ifndef USE_ROCM
+    #include <cub/config.cuh>
+
+    #include <cuda/std/type_traits>
+#else
+    #include <hipcub/hipcub.hpp>
+    // Map ::cuda::std to the standard std namespace
+    namespace cuda {
+        namespace std = ::std;
+    }
+#endif
 
 
 namespace detail
@@ -41,30 +48,29 @@ template <typename T, typename U>
 __host__ __device__ void uninitialized_copy(T *ptr, U &&val)
 {
   // NVBug 3384810
-  //new (ptr) T(::cuda::std::forward<U>(val));
-  new (ptr) T(std::forward<U>(val)); // TODO: make cuda compatible
+  new (ptr) T(::cuda::std::forward<U>(val));
 }
 #else
 template <typename T,
           typename U,
-          typename std::enable_if<
-            std::is_trivially_copyable<T>::value, // TODO: make cuda compatible
+          typename ::cuda::std::enable_if<
+            ::cuda::std::is_trivially_copyable<T>::value,
             int
           >::type = 0>
 __host__ __device__ void uninitialized_copy(T *ptr, U &&val)
 {
-  *ptr = std::forward<U>(val); // TODO: make cuda compatible
+  *ptr = ::cuda::std::forward<U>(val);
 }
 
 template <typename T,
          typename U,
-         typename std::enable_if< // TODO: make cuda compatible
-           !std::is_trivially_copyable<T>::value,
+         typename ::cuda::std::enable_if<
+           !::cuda::std::is_trivially_copyable<T>::value,
            int
          >::type = 0>
 __host__ __device__ void uninitialized_copy(T *ptr, U &&val)
 {
-  new (ptr) T(std::forward<U>(val)); // TODO: make cuda compatible
+  new (ptr) T(::cuda::std::forward<U>(val));
 }
 #endif
 
