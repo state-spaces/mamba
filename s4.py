@@ -846,16 +846,29 @@ class SSMKernel(Kernel):
 
     def init_ssm_dplr(self):
         """Returns DPLR (A, P, B, C) parameters for init options."""
-        A, P, B, V = combination(self.init, self.N, self.rank, self.n_ssm, **self.init_args)
+        if not self.shared:
+            A, P, B, V = combination(self.init, self.N, self.rank, self.n_ssm, **self.init_args)
+        else:
+            _, P, B, V = combination(self.init, self.N, self.rank, 1, **self.init_args)
+            A, _, _, _ = combination(self.init, self.N, self.rank, self.n_ssm, **self.init_args)
 
         # Broadcast C to have H channels
         if self.deterministic:
-            C = torch.zeros(self.channels, self.n_ssm, self.N, dtype=self.cdtype)
-            C[:, :, :1] = 1.
-            C = contract('hmn, chn -> chm', V.conj().transpose(-1, -2), C) # V^* C
-            C = repeat(C, 'c t n -> c (v t) n', v=self.H // C.size(-2)).clone().contiguous()
+            if not self.shared:
+                C = torch.zeros(self.channels, self.n_ssm, self.N, dtype=self.cdtype)
+                C[:, :, :1] = 1.
+                C = contract('hmn, chn -> chm', V.conj().transpose(-1, -2), C)  # V^* C
+                C = repeat(C, 'c t n -> c (v t) n', v=self.H // C.size(-2)).clone().contiguous()
+            else:
+                C = torch.zeros(self.channels, 1, self.N, dtype=self.cdtype)
+                C[:, :, :1] = 1.
+                C = contract('hmn, chn -> chm', V.conj().transpose(-1, -2), C) # V^* C
+                C = repeat(C, 'c t n -> c (v t) n', v=1).clone().contiguous()
         else:
-            C = torch.randn(self.channels, self.H, self.N//2, dtype=self.cdtype)
+            if not self.shared:
+                C = torch.randn(self.channels, self.H, self.N//2, dtype=self.cdtype)
+            else:
+                C = torch.randn(self.channels, 1, self.N//2, dtype=self.cdtype)
 
         # Broadcast other parameters to have n_ssm copies
         assert self.n_ssm % B.size(-2) == 0 \
@@ -864,8 +877,12 @@ class SSMKernel(Kernel):
 
         # Broadcast tensors to n_ssm copies
         # These will be the parameters, so make sure tensors are materialized and contiguous
-        B = repeat(B, 't n -> (v t) n', v=self.n_ssm // B.size(-2)).clone().contiguous()
-        P = repeat(P, 'r t n -> r (v t) n', v=self.n_ssm // P.size(-2)).clone().contiguous()
+        if not self.shared:
+            B = repeat(B, 't n -> (v t) n', v=self.n_ssm // B.size(-2)).clone().contiguous()
+            P = repeat(P, 'r t n -> r (v t) n', v=self.n_ssm // P.size(-2)).clone().contiguous()
+        else:
+            B = repeat(B, 't n -> (v t) n', v=1).clone().contiguous()
+            P = repeat(P, 'r t n -> r (v t) n', v=1).clone().contiguous()
         A = repeat(A, 't n -> (v t) n', v=self.n_ssm // A.size(-2)).clone().contiguous()
 
         # Because these complex parameterizations assume conjugate symmetry,
@@ -917,6 +934,8 @@ class SSMKernel(Kernel):
             init, measure = measure, init
         self.init = init
         self.init_args = init_args
+        self.shared = init_args['shared'] if 'shared' in init_args else False
+        del init_args['shared']
 
     @torch.no_grad()
     def forward_state(self, u, state):
@@ -1035,7 +1054,7 @@ class SSMKernelDiag(SSMKernel):
         # Rank of low-rank correction
         assert self.H == inv_dt.size(0)
         assert self.N == A.size(-1) == B.size(-1) == C.size(-1)
-        assert self.n_ssm == A.size(-2) == B.size(-2) # Number of independent SSMs trained
+        # assert self.n_ssm == A.size(-2) == B.size(-2) # Number of independent SSMs trained
         self.repeat = self.H // A.size(0)
 
         # Check that diagonal part has negative real and imag part
