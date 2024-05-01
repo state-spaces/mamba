@@ -31,6 +31,13 @@ See Figure 3 of the paper (page 8) for a visual representation of a MambaBlock.
 
 @dataclass
 class MambaConfig:
+    discretizationA: str
+    discretizationB: str
+    initA_imag: str
+    initA_real: str
+    param_A_imag: str
+    dt_is_selective: str
+    channel_sharing: str
     ssm_type: str
     d_model: int  #  D
     n_layers: int
@@ -38,8 +45,7 @@ class MambaConfig:
     d_state: int = 16  #  N in paper/comments
     expand_factor: int = 2  #  E in paper/comments
     d_conv: int = 4
-    discretizationA: str = "normal"
-    discretizationB: str = "s6"
+    A_imag_using_weight_decay: str = True
 
     dt_min: float = 0.001
     dt_max: float = 0.1
@@ -173,45 +179,90 @@ class MambaBlock(nn.Module):
 
         elif config.ssm_type == "S6-Complex":
             #  projects x to input-dependent Δ, B, C
-            self.x_proj = nn.Linear(config.d_inner, config.dt_rank + 2 * config.d_state, bias=False, dtype=torch.cfloat)
+            if config.channel_sharing == "False":
+                self.BC_dims = config.d_state * config.d_inner
+            elif config.channel_sharing == "True":
+                self.BC_dims = config.d_state
+            else:
+                raise NotImplementedError
+            self.x_proj_real = nn.Linear(config.d_inner, config.dt_rank + 2 * self.BC_dims, bias=False)
+            self.x_proj_complex = nn.Linear(config.d_inner, 2 * self.BC_dims, bias=False)
+
 
             # # init the imaginary part of x_proj to 0
             # self.x_proj.weight.imag.data.zero_()
 
             #  projects Δ from dt_rank to d_inner
-            self.dt_proj = nn.Linear(config.dt_rank, config.d_inner, bias=True, dtype=torch.float)
+            if config.dt_is_selective == "True":
+                self.dt_proj = nn.Linear(config.dt_rank, config.d_inner, bias=True, dtype=torch.float)
 
-            #  dt initialization
-            #  dt weights
-            dt_init_std = config.dt_rank ** -0.5 * config.dt_scale
-            if config.dt_init == "constant":
-                nn.init.constant_(self.dt_proj.weight, dt_init_std)
-            elif config.dt_init == "random":
-                nn.init.uniform_(self.dt_proj.weight, -dt_init_std, dt_init_std)
+                #  dt initialization
+                #  dt weights
+                dt_init_std = config.dt_rank ** -0.5 * config.dt_scale
+                if config.dt_init == "constant":
+                    nn.init.constant_(self.dt_proj.weight, dt_init_std)
+                elif config.dt_init == "random":
+                    nn.init.uniform_(self.dt_proj.weight, -dt_init_std, dt_init_std)
+                else:
+                    raise NotImplementedError
+
+                # dt bias
+                dt = torch.exp(
+                    torch.rand(config.d_inner) * (math.log(config.dt_max) - math.log(config.dt_min)) + math.log(
+                        config.dt_min)
+                ).clamp(min=config.dt_init_floor)
+                inv_dt = dt + torch.log(
+                    -torch.expm1(-dt))  #  inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
+                with torch.no_grad():
+                    self.dt_proj.bias.copy_(inv_dt)
+                self.dt_proj.bias._no_reinit = True  # initialization would set all Linear.bias to zero, need to mark this one as _no_reinit
+            elif config.dt_is_selective == "False":
+                inv_dt = torch.rand(config.d_inner) * (math.log(config.dt_max) - math.log(config.dt_min)) + math.log(
+                        config.dt_min)
+                self.inv_dt = nn.Parameter(inv_dt)
             else:
                 raise NotImplementedError
 
-            # dt bias
-            dt = torch.exp(
-                torch.rand(config.d_inner) * (math.log(config.dt_max) - math.log(config.dt_min)) + math.log(
-                    config.dt_min)
-            ).clamp(min=config.dt_init_floor)
-            inv_dt = dt + torch.log(
-                -torch.expm1(-dt))  #  inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
-            with torch.no_grad():
-                self.dt_proj.bias.copy_(inv_dt)
-            self.dt_proj.bias._no_reinit = True  # initialization would set all Linear.bias to zero, need to mark this one as _no_reinit
 
-            # S4D complex initialization
-            log_A_real = torch.log(0.5 * torch.ones(config.d_inner, config.d_state))
-            # why store A in log ? to keep A < 0 (cf -torch.exp(...)) ? for gradient stability ?
-            A_imag = math.pi * torch.arange(config.d_state).repeat(config.d_inner, 1)
-            if config.discretizationA == "yuval_disc":
-                A_imag = A_imag / config.d_state
+            if config.initA_real == "S4":
+                log_A_real = torch.log(0.5 * torch.ones(config.d_inner, config.d_state))
+            elif config.initA_real == "S6":
+                A = torch.arange(1, config.d_state + 1, dtype=torch.float32).repeat(config.d_inner, 1)
+                log_A_real = torch.log(A)
+            else:
+                raise NotImplementedError
+
+            if config.initA_imag == "uniform":
+                A_imag = 2*math.pi * torch.linspace(0, 1, config.d_state).repeat(config.d_inner, 1)
+            elif config.initA_imag == "uniform_small":
+                A_imag = 2 * math.pi * torch.linspace(0, 0.01, config.d_state).repeat(config.d_inner, 1)
+            elif config.initA_imag == "zero":
+                A_imag = 0 * torch.linspace(0, 0.01, config.d_state).repeat(config.d_inner, 1)
+            elif config.initA_imag == "rand":
+                A_imag = (torch.rand(log_A_real.shape) * 2 * torch.pi) - torch.pi
+            elif config.initA_imag == "rand_small":
+                A_imag = ((torch.rand(log_A_real.shape) * 2 * torch.pi) - torch.pi)/10
+            elif config.initA_imag == "S4":
+                A_imag = math.pi * torch.arange(config.d_state).repeat(config.d_inner, 1)
+            else:
+                raise NotImplementedError
+
             self.log_A_real = nn.Parameter(log_A_real)
             self.log_A_real._no_weight_decay = True
             self.A_imag = nn.Parameter(A_imag)
-            self.A_imag._no_weight_decay = True
+            if config.param_A_imag == "fixed":
+                self.A_imag.requires_grad = False
+            elif config.param_A_imag == "normal":
+                pass
+            else:
+                raise NotImplementedError
+
+            if config.A_imag_using_weight_decay == "True":
+                pass
+            elif config.A_imag_using_weight_decay == "False":
+                self.A_imag._no_weight_decay = True
+            else:
+                raise NotImplementedError
 
             # # initialize A to be complex but with imaginary part 0
             # A = torch.arange(1, config.d_state + 1, dtype=torch.float32).repeat(config.d_inner, 1)
@@ -298,11 +349,34 @@ class MambaBlock(nn.Module):
             A = -torch.exp(self.log_A_real) + 1j * self.A_imag  # (ED, N)
             D = self.D
 
-            deltaBC = self.x_proj(x.to(torch.cfloat)) #  (B, L, dt_rank+2*N)
+            if self.config.initA_imag == "zero" and self.config.param_A_imag == "fixed":
+                if torch.any(A.imag != 0):
+                    print("zeros did learn something on fixed")
+                    raise
 
-            delta, B, C = torch.split(deltaBC, [self.config.dt_rank, self.config.d_state, self.config.d_state],
+            deltaBC_real = self.x_proj_real(x) #  (B, L, dt_rank+2*N)
+            delta, B_real, C_real = torch.split(deltaBC_real, [self.config.dt_rank, self.BC_dims, self.BC_dims],
                                       dim=-1)  #  (B, L, dt_rank), (B, L, N), (B, L, N)
-            delta = F.softplus(self.dt_proj(delta.real))  #  (B, L, ED)
+            BC_complex = self.x_proj_complex(x)
+            B_imag, C_imag = torch.split(BC_complex,
+                                                [self.BC_dims, self.BC_dims],
+                                                dim=-1)
+
+            B = B_real + 1j * B_imag
+            C = C_real + 1j * C_imag
+            if self.config.channel_sharing == "False":
+                b, l, ed = x.shape
+                B = B.reshape(b, l, ed, self.config.d_state)
+                C = C.reshape(b, l, ed, self.config.d_state)
+
+            if self.config.dt_is_selective == "True":
+                delta = F.softplus(self.dt_proj(delta))  #  (B, L, ED)
+            elif self.config.dt_is_selective == "False":
+                #delta = torch.zeros(delta.shape) + torch.exp(self.inv_dt)
+                delta_new = torch.exp(self.inv_dt)
+                delta = torch.zeros([B.shape[0], B.shape[1], A.shape[0]], device=A.device) + delta_new #  (B, L, ED)
+            else:
+                raise NotImplementedError
 
             if self.config.pscan:
                 y = self.selective_scan(x, delta, A, B, C, D)
@@ -336,10 +410,13 @@ class MambaBlock(nn.Module):
         else:
             raise NotImplementedError
 
+        if self.config.channel_sharing == "True":
+            B = B.unsqueeze(2)
+
         if self.config.discretizationB == "s6":
-            deltaB = delta.unsqueeze(-1) * B.unsqueeze(2)  #  (B, L, ED, N)
+            deltaB = delta.unsqueeze(-1) * B  #  (B, L, ED, N)
         elif self.config.discretizationB == "zoh":
-            deltaB = B.unsqueeze(2) * torch.exp(delta.unsqueeze(-1) * A - 1.) / A  #  (B, L, ED, N)
+            deltaB = B * torch.exp(delta.unsqueeze(-1) * A - 1.) / A  #  (B, L, ED, N)
         else:
             raise NotImplementedError
 
@@ -347,7 +424,9 @@ class MambaBlock(nn.Module):
 
         hs = pscan(deltaA, BX)
 
-        y = (hs @ C.unsqueeze(-1)).squeeze(3)  #  (B, L, ED, N) @ (B, L, N, 1) -> (B, L, ED, 1)
+        if self.config.channel_sharing == "True":
+            C = C.unsqueeze(2)
+        y = (hs * C).sum(dim=3)  #  (B, L, ED, N) @ (B, L, N, 1) -> (B, L, ED, 1)
 
         y = y + D * x
 

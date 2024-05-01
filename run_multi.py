@@ -203,7 +203,7 @@ def run_experiment(config,progress_bar_actor):
         exp_name = name(config)
 
         wandb.init(
-            project="RealVSComplexDelay2",
+            project="ComplexS6",
             entity="yuv-milo",
             name=exp_name,
             config=config
@@ -242,17 +242,32 @@ def main():
     pb = ProgressBar()
     progress_bar_actor = pb.actor
 
+    # settings_options = [
+    #     ["d_model", [16]],
+    #     ["d_state", [1]],
+    #     ["lag", [256]],
+    #     ["extra", [128, 32]],
+    #     ["seed", [42, 23, 9]],
+    #     ["ssm_type", ["S4D-Real", "conv", "S6-Real", "S4D-Complex"]],
+    #     ["n_layers", [2]],
+    #     ["n_categories", [16]],
+    #     ["batch_size", [8]],
+    #     ["epochs", [10000]], # [int(1600 * 6]],
+    #     ["epoch_size", [128 * 4]],
+    #     ["lr", [1e-3]],
+    #     ["stop_on_loss", [0.01]],
+    # ]
+
     settings_options = [
-        ["d_model", [16]],
-        ["d_state", [1]],
-        ["lag", [256]],
-        ["extra", [128, 32]],
-        ["seed", [42, 23, 9]],
-        ["ssm_type", ["S4D-Real", "conv", "S6-Real", "S4D-Complex"]],
+        ["seed", [1]],
+        ["ssm_type", ["S6-Complex"]],
+        ["d_model", [64]],
+        ["lag", [4,  32, 258]],
+        ["extra", [1, 2, 4]],
         ["n_layers", [2]],
         ["n_categories", [16]],
         ["batch_size", [8]],
-        ["epochs", [10000]], # [int(1600 * 6]],
+        ["epochs", [10000]],  # [int(1600 * 6]],
         ["epoch_size", [128 * 4]],
         ["lr", [1e-3]],
         ["stop_on_loss", [0.01]],

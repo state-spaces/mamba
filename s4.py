@@ -674,6 +674,7 @@ class Kernel(nn.Module):
         lr: Union[float, Optional[Mapping]] = None,
         wd: Union[float, Optional[Mapping]] = 0.0,
         verbose: bool = True,
+        shared: bool = False,
         **kwargs,
     ):
         """General interface.
@@ -700,6 +701,7 @@ class Kernel(nn.Module):
         self.lr = lr
         self.wd = wd
         self.verbose = verbose
+        self.shared = shared
 
         # Add a catch-all **kwargs to make it easier to change kernels
         # without manually moving other options passed in the config.
@@ -846,11 +848,18 @@ class SSMKernel(Kernel):
 
     def init_ssm_dplr(self):
         """Returns DPLR (A, P, B, C) parameters for init options."""
-        A, P, B, V = combination(self.init, self.N, self.rank, self.n_ssm, **self.init_args)
+        if not self.shared:
+            A, P, B, V = combination(self.init, self.N, self.rank, self.n_ssm, **self.init_args)
+        else:
+            _, P, B, V = combination(self.init, self.N, self.rank, 1, **self.init_args)
+            A, _, _, _ = combination(self.init, self.N, self.rank, self.n_ssm, **self.init_args)
 
         # Broadcast C to have H channels
         if self.deterministic:
-            C = torch.zeros(self.channels, self.n_ssm, self.N, dtype=self.cdtype)
+            if not self.shared:
+                C = torch.zeros(self.channels, self.n_ssm, self.N, dtype=self.cdtype)
+            else:
+                C = torch.zeros(self.channels, 1, self.N, dtype=self.cdtype)
             C[:, :, :1] = 1.
             C = contract('hmn, chn -> chm', V.conj().transpose(-1, -2), C) # V^* C
             C = repeat(C, 'c t n -> c (v t) n', v=self.H // C.size(-2)).clone().contiguous()
