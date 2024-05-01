@@ -377,8 +377,11 @@ class MambaBlock(nn.Module):
             C_bias = self.C_bias_real + 1j * self.C_bias_imag
             B_bias = B_bias.unsqueeze(0).unsqueeze(0) # (1, 1, L, N)
             C_bias = C_bias.unsqueeze(0).unsqueeze(0) # (1, 1, L, N)
+            if self.config.A_imag_using_weight_decay:
+                B = B*0
+                C = C*0
             B = B + B_bias
-            B = B + C_bias
+            C = C + C_bias
 
             delta_new = torch.exp(self.inv_dt)
             delta = torch.zeros([B.shape[0], B.shape[1], A.shape[0]], device=A.device) + delta_new
