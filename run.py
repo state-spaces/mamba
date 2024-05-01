@@ -270,6 +270,31 @@ def main():
     lag = 128
     extra = 32
 
+    settings_options_complex = [
+        ["seed", [3]],
+        ["ssm_type", ["S6-Real-complex-bias",]],
+        ["d_model", [64]],
+        ["d_state", [16]],
+        ["lag", [lag]],
+        ["extra", [extra]],
+        ["n_layers", [2]],
+        ["n_categories", [n_categories]],
+        ["batch_size", [batch_size]],
+        ["epochs", [500]],  # [int(1600 * 6]],
+        ["epoch_size", [128 * 4]],
+        ["stop_on_loss", [0.01]],
+        ["lr", [1e-3]],
+        ["A_imag_using_weight_decay", ["True"]],
+        ["initA_imag", ["S4", "uniform"]],
+        ["param_A_imag", ["normal"]],
+        ["discretizationB", ["zoh", "s6"]],
+        ["discretizationA", ["yuval_disc", "normal"]],
+        ["initA_real", ["S4"]],
+        ["dt_is_selective", ["False"]],
+        ["channel_sharing", ["False"]],
+        ["bias", [False, True]],
+    ]
+
     # settings_options_complex = [
     #     ["seed", [3]],
     #     ["ssm_type", ["S6-Complex"]],
@@ -340,33 +365,11 @@ def main():
     #     ["param_A_imag", ["fixed", "normal", "log"]],
     # ]
 
-    # settings_options_real = [
-    #     ["seed", [2]],
-    #     ["ssm_type", ["S6-Real"]],
-    #     ["discretizationA", ["normal"]],
-    #     ["discretizationB", ["s6"]],
-    #     ["d_model", [64]],
-    #     ["d_state", [16]],
-    #     ["lag", [lag]],
-    #     ["extra", [extra]],
-    #     ["n_layers", [2]],
-    #     ["n_categories", [n_categories]],
-    #     ["batch_size", [batch_size]],
-    #     ["epochs", [4000]],  # [int(1600 * 6]],
-    #     ["epoch_size", [128 * 4]],
-    #     ["lr", [1e-3]],
-    #     ["stop_on_loss", [0.01]],
-    #     ["initA_imag", [None, ]],
-    #     ["initA_real", [None, ]],
-    #     ["param_A_imag", [None, ]],
-    #     ["A_imag_using_weight_decay", [None, ]],
-    # ]
-
-    settings_options_s4 = [
+    settings_options_real = [
         ["seed", [2]],
-        ["ssm_type", ["S4D-Complex"]],
-        ["discretizationA", ["default"]],
-        ["discretizationB", ["default"]],
+        ["ssm_type", ["S6-Real",]],
+        ["discretizationA", ["normal"]],
+        ["discretizationB", ["s6"]],
         ["d_model", [64]],
         ["d_state", [16]],
         ["lag", [lag]],
@@ -374,32 +377,57 @@ def main():
         ["n_layers", [2]],
         ["n_categories", [n_categories]],
         ["batch_size", [batch_size]],
-        ["epochs", [1000]],  # [int(1600 * 6]],
+        ["epochs", [4000]],  # [int(1600 * 6]],
         ["epoch_size", [128 * 4]],
         ["lr", [1e-3]],
         ["stop_on_loss", [0.01]],
-        ["initA_imag", [None,]],
-        ["initA_real", [None,]],
+        ["initA_imag", [None, ]],
+        ["initA_real", [None, ]],
         ["param_A_imag", [None, ]],
         ["A_imag_using_weight_decay", [None, ]],
-        ["dt_is_selective", [None, ]],
-        ["bias", [False,]],
-        ["channel_sharing", [True, False]],
+        ["dt_is_selective", ["False"]],
+        ["channel_sharing", ["True"]],
+        ["bias", [False, True]],
     ]
 
+    # settings_options_s4 = [
+    #     ["seed", [2]],
+    #     ["ssm_type", ["S4D-Complex"]],
+    #     ["discretizationA", ["default"]],
+    #     ["discretizationB", ["default"]],
+    #     ["d_model", [64]],
+    #     ["d_state", [16]],
+    #     ["lag", [lag]],
+    #     ["extra", [extra]],
+    #     ["n_layers", [2]],
+    #     ["n_categories", [n_categories]],
+    #     ["batch_size", [batch_size]],
+    #     ["epochs", [1000]],  # [int(1600 * 6]],
+    #     ["epoch_size", [128 * 4]],
+    #     ["lr", [1e-3]],
+    #     ["stop_on_loss", [0.01]],
+    #     ["initA_imag", [None,]],
+    #     ["initA_real", [None,]],
+    #     ["param_A_imag", [None, ]],
+    #     ["A_imag_using_weight_decay", [None, ]],
+    #     ["dt_is_selective", [None, ]],
+    #     ["bias", [False,]],
+    #     ["channel_sharing", [True, False]],
+    # ]
+
     tasks = []
-    # for i, config in enumerate(experiments(settings_options_real)):
-    #     print(i)
-    #     config.update({"comment": "comment in no re_init dt bias"})
-    #     tasks.append(run_experiment.remote(Config(**config), progress_bar_actor))
-    for i, config in enumerate(experiments(settings_options_s4)):
+    for i, config in enumerate(experiments(settings_options_real)):
         print(i)
         config.update({"comment": "comment in no re_init dt bias"})
         tasks.append(run_experiment.remote(Config(**config), progress_bar_actor))
-    # for i, config in enumerate(experiments(settings_options_complex)):
+    # for i, config in enumerate(experiments(settings_options_s4)):
     #     print(i)
     #     config.update({"comment": "comment in no re_init dt bias"})
     #     tasks.append(run_experiment.remote(Config(**config), progress_bar_actor))
+    for i, config in enumerate(experiments(settings_options_complex)):
+        print(i)
+        config.update({"comment": "comment in no re_init dt bias"})
+        tasks.append(run_experiment.remote(Config(**config), progress_bar_actor))
     pb.set_total(len(tasks))
     pb.print_until_done()
     print("finished running all")
