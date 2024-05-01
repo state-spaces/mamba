@@ -201,7 +201,7 @@ class MambaBlock(nn.Module):
                 config.dt_min)
             self.inv_dt = nn.Parameter(inv_dt)
 
-            A = torch.arange(1, config.d_state + 1, dtype=torch.float32).repeat(config.d_inner, 1)
+            A = 1/2 + 0*torch.arange(1, config.d_state + 1, dtype=torch.float32).repeat(config.d_inner, 1)
             self.log_A_real = nn.Parameter(
                 torch.log(A))  # why store A in log ? to keep A < 0 (cf -torch.exp(...)) ? for gradient stability ?
             A_imag = math.pi * torch.arange(config.d_state).repeat(config.d_inner, 1)
@@ -384,7 +384,7 @@ class MambaBlock(nn.Module):
             C = C + C_bias
 
             delta_new = torch.exp(self.inv_dt)
-            delta = torch.zeros([B.shape[0], B.shape[1], A.shape[0]], device=A.device) + delta_new
+            delta = delta_new.unsqueeze(0).unsqueeze(0)
 
             if self.config.pscan:
                 y = self.selective_scan(x, delta, A, B, C, D)
@@ -485,6 +485,7 @@ class MambaBlock(nn.Module):
         elif self.config.discretizationB == "zoh":
             #deltaB = B * torch.exp(delta.unsqueeze(-1) * A - 1.) / A  #  (B, L, ED, N)
             deltaB = B * (torch.exp(delta.unsqueeze(-1) * A) - 1.) / A
+            # C = C * (torch.exp(dtA)-1.) / A
         else:
             raise NotImplementedError
 
