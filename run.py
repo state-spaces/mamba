@@ -216,7 +216,7 @@ def run_experiment(config, progress_bar_actor):
         exp_name = name(config)
 
         wandb.init(
-            project="S6CheckingSharing",
+            project="S4VSS6",
             entity="yuv-milo",
             name=exp_name,
             config=config
@@ -274,7 +274,7 @@ def main():
         ["seed", [2]],
         ["ssm_type", ["S6-Real-complex-bias",]],
         ["d_model", [64]],
-        ["d_state", [8]],
+        ["d_state", [16]],
         ["lag", [lag]],
         ["extra", [extra]],
         ["n_layers", [2]],
@@ -291,7 +291,7 @@ def main():
         ["discretizationA", ["normal", "yuval_disc", ]],
         ["initA_real", [None]],
         ["dt_is_selective", [None]],
-        ["channel_sharing", [True]],
+        ["channel_sharing", [False]],
         ["bias", [False, True]],
     ]
 
@@ -415,30 +415,30 @@ def main():
     #     ["bias", [True, False]],
     # ]
 
-    settings_options_s4 = [
-        ["seed", [2]],
-        ["ssm_type", ["S4D-Complex"]],
-        ["discretizationA", ["default"]],
-        ["discretizationB", ["default"]],
-        ["d_model", [64]],
-        ["d_state", [16]],
-        ["lag", [lag]],
-        ["extra", [extra]],
-        ["n_layers", [2]],
-        ["n_categories", [n_categories]],
-        ["batch_size", [batch_size]],
-        ["epochs", [1000]],  # [int(1600 * 6]],
-        ["epoch_size", [128 * 4]],
-        ["lr", [1e-3]],
-        ["stop_on_loss", [0.01]],
-        ["initA_imag", [None,]],
-        ["initA_real", [None,]],
-        ["param_A_imag", [None, ]],
-        ["A_imag_using_weight_decay", [None, ]],
-        ["dt_is_selective", [None, ]],
-        ["bias", [False,]],
-        ["channel_sharing", [True, False]],
-    ]
+    # settings_options_s4 = [
+    #     ["seed", [2]],
+    #     ["ssm_type", ["S4D-Complex"]],
+    #     ["discretizationA", ["default"]],
+    #     ["discretizationB", ["default"]],
+    #     ["d_model", [64]],
+    #     ["d_state", [16]],
+    #     ["lag", [lag]],
+    #     ["extra", [extra]],
+    #     ["n_layers", [2]],
+    #     ["n_categories", [n_categories]],
+    #     ["batch_size", [batch_size]],
+    #     ["epochs", [1000]],  # [int(1600 * 6]],
+    #     ["epoch_size", [128 * 4]],
+    #     ["lr", [1e-3]],
+    #     ["stop_on_loss", [0.01]],
+    #     ["initA_imag", [None,]],
+    #     ["initA_real", [None,]],
+    #     ["param_A_imag", [None, ]],
+    #     ["A_imag_using_weight_decay", [None, ]],
+    #     ["dt_is_selective", [None, ]],
+    #     ["bias", [False,]],
+    #     ["channel_sharing", [True, False]],
+    # ]
 
     tasks = []
     # for i, config in enumerate(experiments(settings_options_real)):

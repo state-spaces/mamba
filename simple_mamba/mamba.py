@@ -8,6 +8,7 @@ import torch.nn.functional as F
 
 from simple_mamba.pscan import pscan
 from s4 import SSMKernelDiag, FFTConv
+from s4 import log_vandermonde_naive
 
 """
 
@@ -178,7 +179,7 @@ class MambaBlock(nn.Module):
             self.D = nn.Parameter(torch.ones(config.d_inner))
 
         elif config.ssm_type == "S6-Real-complex-bias":
-            assert self.config.channel_sharing
+            assert self.config.channel_sharing==False
 
             self.BC_dims = config.d_state * config.d_inner
 
@@ -186,14 +187,13 @@ class MambaBlock(nn.Module):
             self.x_proj = nn.Linear(config.d_inner, config.dt_rank + 2 * self.BC_dims, bias=False)
 
             self.x_proj = nn.Linear(config.d_inner, config.dt_rank + 2 * self.BC_dims, bias=False)
-            self.C_bias_real = torch.randn(config.d_inner, config.d_state, dtype=torch.float)
-            self.C_bias_imag = torch.randn(config.d_inner, config.d_state, dtype=torch.float)
+            C_bias = torch.randn(config.d_inner, config.d_state, dtype=torch.cfloat)
             self.B_bias_real = torch.ones(config.d_inner, config.d_state, dtype=torch.float)
             self.B_bias_imag = torch.zeros(config.d_inner, config.d_state, dtype=torch.float)
-            self.C_bias_real = nn.Parameter(self.B_bias_real)
-            self.C_bias_imag = nn.Parameter(self.B_bias_imag)
-            self.B_bias_real = nn.Parameter(self.C_bias_real)
-            self.B_bias_imag = nn.Parameter(self.C_bias_imag)
+            self.C_bias_real = nn.Parameter(C_bias.real)
+            self.C_bias_imag = nn.Parameter(C_bias.imag)
+            self.B_bias_real = nn.Parameter(self.B_bias_real)
+            self.B_bias_imag = nn.Parameter(self.B_bias_imag)
 
             #  dt initialization
             #  dt weights
@@ -205,16 +205,16 @@ class MambaBlock(nn.Module):
             self.log_A_real = nn.Parameter(
                 torch.log(A))  # why store A in log ? to keep A < 0 (cf -torch.exp(...)) ? for gradient stability ?
             A_imag = math.pi * torch.arange(config.d_state).repeat(config.d_inner, 1)
-            A_imag[0] += 1e-4
+            A_imag[A_imag<1e-4] = 1e-4
             self.A_imag = nn.Parameter(A_imag)
 
             self.D = nn.Parameter(torch.randn(config.d_inner))
 
         elif config.ssm_type == "S6-Complex":
             #  projects x to input-dependent Δ, B, C
-            if config.channel_sharing == "False":
+            if config.channel_sharing:
                 self.BC_dims = config.d_state * config.d_inner
-            elif config.channel_sharing == "True":
+            elif config.channel_sharing:
                 self.BC_dims = config.d_state
             else:
                 raise NotImplementedError
@@ -350,7 +350,8 @@ class MambaBlock(nn.Module):
         x = x.transpose(1, 2)  #  (B, L, ED)
 
         x = F.silu(x)
-        x = x*0+1
+        x = x*0
+        x[:,0,:] = 1
         y = self.ssm(x)
 
         #  z branch
@@ -503,9 +504,11 @@ class MambaBlock(nn.Module):
             C = C.unsqueeze(2)
         y = (hs * C).sum(dim=3)  #  (B, L, ED, N) @ (B, L, N, 1) -> (B, L, ED, 1)
 
-
+        if self.config.ssm_type == "S6-Real-complex-bias":
+            y = y * 2
         # if self.config.ssm_type != "S6-Real-complex-bias":
         #     y = y + D * x
+
         y = y + D.unsqueeze(0).unsqueeze(0)*x
 
         return y

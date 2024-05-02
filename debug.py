@@ -166,8 +166,8 @@ def main():
             ["discretizationB", ["default"]],
             ["d_model", [64]],
             ["d_state", [16]],
-            ["lag", [16]],
-            ["extra", [16]],
+            ["lag", [128]],
+            ["extra", [32]],
             ["n_layers", [2]],
             ["n_categories", [16]],
             ["batch_size", [8]],
@@ -210,7 +210,7 @@ def main():
             ["discretizationA", ["normal","yuval_disc", ]],
             ["initA_real", [None]],
             ["dt_is_selective", [None]],
-            ["channel_sharing", [True]],
+            ["channel_sharing", [False]],
             ["bias", [False, True]],
         ]
 
