@@ -20,6 +20,7 @@
         return std::max(ilist);
     }
 
+    template<typename T>
     constexpr T constexpr_min(T a, T b) {
         return std::min(a, b);
     }
