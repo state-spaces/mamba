@@ -8,7 +8,6 @@ import torch.nn.functional as F
 
 from simple_mamba.pscan import pscan
 from s4 import SSMKernelDiag, FFTConv
-from s4 import log_vandermonde_naive
 
 """
 
@@ -179,7 +178,7 @@ class MambaBlock(nn.Module):
             self.D = nn.Parameter(torch.ones(config.d_inner))
 
         elif config.ssm_type == "S6-Real-complex-bias":
-            assert self.config.channel_sharing==False
+            assert self.config.channel_sharing
 
             self.BC_dims = config.d_state * config.d_inner
 
@@ -328,7 +327,7 @@ class MambaBlock(nn.Module):
                                         groups=config.d_inner,
                                         padding=config.d_state - 1)
         else:
-            print("type",config.ssm_type)
+            print("type", config.ssm_type)
             raise NotImplementedError
 
         #  projects block output from ED back to D
@@ -350,8 +349,6 @@ class MambaBlock(nn.Module):
         x = x.transpose(1, 2)  #  (B, L, ED)
 
         x = F.silu(x)
-        x = x*0
-        x[:,0,:] = 1
         y = self.ssm(x)
 
         #  z branch
@@ -476,14 +473,14 @@ class MambaBlock(nn.Module):
 
         #  y : (B, L, ED)
         if self.config.discretizationA == "yuval_disc" and (self.config.ssm_type == "S6-Complex" or self.config.ssm_type == "S6-Real-complex-bias"):
-            deltaA = torch.exp(delta.unsqueeze(-1) * A.real +1j * A.imag)
+            deltaA = torch.exp(delta.unsqueeze(-1) * A.real + 1j * A.imag)
         elif self.config.discretizationA == "normal":
             deltaA = torch.exp(delta.unsqueeze(-1) * A)  #  (B, L, ED, N)
         else:
             print("disc",self.config.discretizationA)
             raise NotImplementedError
 
-        if self.config.channel_sharing and self.config.ssm_type != "S6-Real-complex-bias":
+        if self.config.channel_sharing:
             B = B.unsqueeze(2)
 
         if self.config.discretizationB == "s6":
@@ -500,7 +497,7 @@ class MambaBlock(nn.Module):
             deltaA = deltaA.expand_as(BX)
         hs = pscan(deltaA, BX)
 
-        if self.config.channel_sharing and self.config.ssm_type != "S6-Real-complex-bias":
+        if self.config.channel_sharing:
             C = C.unsqueeze(2)
         y = (hs * C).sum(dim=3)  #  (B, L, ED, N) @ (B, L, N, 1) -> (B, L, ED, 1)
 

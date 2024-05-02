@@ -1,5 +1,5 @@
 import torch.nn.functional as F
-# import wandb
+import wandb
 import torch
 from torch import optim
 from ds.datasets import DynamicCategoricalDataset
@@ -60,13 +60,13 @@ def train(config, model, data_loader, optimizer):
         avg_accuracy_per_token = total_correct_tokens / total_tokens
         avg_accuracy_per_sequence = total_correct_sequences / total_sequences
 
-        # # Log metrics
-        # wandb.log({
-        #     "epoch": epoch,
-        #     "loss": avg_loss,
-        #     "avg_accuracy_per_token": avg_accuracy_per_token,
-        #     "avg_accuracy_per_sequence": avg_accuracy_per_sequence
-        # })
+        # Log metrics
+        wandb.log({
+            "epoch": epoch,
+            "loss": avg_loss,
+            "avg_accuracy_per_token": avg_accuracy_per_token,
+            "avg_accuracy_per_sequence": avg_accuracy_per_sequence
+        })
 
         if config.stop_on_loss and avg_loss < config.stop_on_loss:
             break
@@ -113,12 +113,12 @@ def experiments(kwargs):
 def run_experiment(config):
     exp_name = name(config)
 
-    # wandb.init(
-    #     project="complex-mamba-copy",
-    #     entity="complex-team",
-    #     name=exp_name,
-    #     config=config
-    # )
+    wandb.init(
+        project="complex-mamba-copy-s4",
+        entity="complex-team",
+        name=exp_name,
+        config=config
+    )
 
     torch.manual_seed(config.seed)
     np.random.seed(config.seed)
@@ -149,7 +149,7 @@ def run_experiment(config):
     model = MambaLM(mamba_config).to(device)
     optimizer = optim.Adam(model.parameters(), lr=config.lr)
     train(config, model, data_loader, optimizer)
-    # wandb.finish()
+    wandb.finish()
 
 def name(config):
     # short name for display on wandb
