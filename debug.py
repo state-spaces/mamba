@@ -114,7 +114,7 @@ def run_experiment(config):
     exp_name = name(config)
 
     wandb.init(
-        project="complex-mamba-copy",
+        project="complex-mamba-copy-s4",
         entity="complex-team",
         name=exp_name,
         config=config
@@ -159,8 +159,8 @@ def main():
 
     settings_options = [
         ["seed", [2]],
-        ["ssm_type", ["S4D-Complex"]],
-        ["discretizationA", ["default"]],
+        ["ssm_type", ["S6-Real-complex-bias"]],
+        ["discretizationA", ["yuval_disc"]],
         ["discretizationB", ["default"]],
         ["d_model", [64]],
         ["d_state", [16]],
@@ -176,16 +176,16 @@ def main():
         ["initA_imag", [None,]],
         ["initA_real", [None,]],
         ["param_A_imag", [None, ]],
-        ["A_imag_using_weight_decay", [None, ]],
+        ["A_imag_using_weight_decay", [True, ]],
         ["dt_is_selective", [None, ]],
-        ["channel_sharing", ["True", "False"]],
+        ["channel_sharing", [False]],
         ["bias", [True, False]],
     ]
 
     tasks = []
     for i, config in enumerate(experiments(settings_options)):
         print(i)
-        config.update({"comment": "Delete this"})
+        config.update({"comment": "base run"})
         tasks.append(run_experiment(Config(**config)))
     print("finished running all")
 
