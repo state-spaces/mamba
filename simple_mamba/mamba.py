@@ -350,7 +350,6 @@ class MambaBlock(nn.Module):
         x = x.transpose(1, 2)  #  (B, L, ED)
 
         x = F.silu(x)
-        x = x*0+1
         y = self.ssm(x)
 
         #  z branch

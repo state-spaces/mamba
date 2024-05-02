@@ -216,8 +216,8 @@ def run_experiment(config, progress_bar_actor):
         exp_name = name(config)
 
         wandb.init(
-            project="S6CheckingSharing",
-            entity="yuv-milo",
+            project="complex-mamba-copy-s4",
+            entity="complex-team",
             name=exp_name,
             config=config
         )
@@ -291,7 +291,7 @@ def main():
         ["discretizationA", ["normal", "yuval_disc", ]],
         ["initA_real", [None]],
         ["dt_is_selective", [None]],
-        ["channel_sharing", [True]],
+        ["channel_sharing", [False]],
         ["bias", [False, True]],
     ]
 
@@ -441,18 +441,18 @@ def main():
     ]
 
     tasks = []
-    # for i, config in enumerate(experiments(settings_options_real)):
+    # for i, config in enumerate(experiments(settings_options_complex)):
     #     print(i)
     #     config.update({"comment": "comment in no re_init dt bias"})
     #     tasks.append(run_experiment.remote(Config(**config), progress_bar_actor))
-    # for i, config in enumerate(experiments(settings_options_s4)):
-    #     print(i)
-    #     config.update({"comment": "comment in no re_init dt bias"})
-    #     tasks.append(run_experiment.remote(Config(**config), progress_bar_actor))
-    for i, config in enumerate(experiments(settings_options_complex)):
+    for i, config in enumerate(experiments(settings_options_s4)):
         print(i)
-        config.update({"comment": "comment in no re_init dt bias"})
+        config.update({"comment": "s4 clean code + default init"})
         tasks.append(run_experiment.remote(Config(**config), progress_bar_actor))
+    # for i, config in enumerate(experiments(settings_options_complex)):
+    #     print(i)
+    #     config.update({"comment": "base run"})
+    #     tasks.append(run_experiment.remote(Config(**config), progress_bar_actor))
     pb.set_total(len(tasks))
     pb.print_until_done()
     print("finished running all")
