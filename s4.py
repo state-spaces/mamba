@@ -1063,7 +1063,10 @@ class SSMKernelDiag(SSMKernel):
         assert torch.all(A.real < 1e-4) and torch.all(A.imag <= 0.0)
 
         # Broadcast everything to correct shapes
-        C = C.expand(torch.broadcast_shapes(C.shape, (1, self.H, self.N))) # (C, H, N)  # TODO originally this was only in DPLR, check safe for Diag
+        if not self.shared:
+            C = C.expand(torch.broadcast_shapes(C.shape, (1, self.H, self.N))) # (C, H, N)  # TODO originally this was only in DPLR, check safe for Diag
+        else:
+            pass
         B = B.unsqueeze(0) # (1, H, N)
         assert self.channels == C.shape[0]
 
@@ -1130,6 +1133,8 @@ class SSMKernelDiag(SSMKernel):
 
 
         # Combine B and C
+        if self.shared:
+            C = C.expand(torch.broadcast_shapes(C.shape, (1, self.H, self.N)))
         C = (B[:, None, :, :] * C).view(-1, self.H, self.N)
 
         # Dispatch which Vandermonde kernel to use
