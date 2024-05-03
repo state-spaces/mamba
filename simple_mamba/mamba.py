@@ -5,6 +5,7 @@ from typing import Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import numpy as np
 
 from simple_mamba.pscan import pscan
 from s4 import SSMKernelDiag, FFTConv
@@ -38,6 +39,7 @@ class MambaConfig:
     param_A_imag: str
     dt_is_selective: str
     channel_sharing: str
+    deterministic: bool
     ssm_type: str
     d_model: int  #  D
     n_layers: int
@@ -134,6 +136,9 @@ class MambaBlock(nn.Module):
 
         self.config = config
 
+        if config.deterministic:
+            torch.manual_seed(0)
+
         #  projects block input from D to 2*ED (two branches)
         self.in_proj = nn.Linear(config.d_model, 2 * config.d_inner, bias=config.bias)
 
@@ -141,6 +146,9 @@ class MambaBlock(nn.Module):
                                 kernel_size=config.d_conv, bias=config.conv_bias,
                                 groups=config.d_inner,
                                 padding=config.d_conv - 1)
+
+        #  projects block output from ED back to D
+        self.out_proj = nn.Linear(config.d_inner, config.d_model, bias=config.bias)
 
         if config.ssm_type == "S6-Real":
             #  projects x to input-dependent Δ, B, C
@@ -178,7 +186,7 @@ class MambaBlock(nn.Module):
             self.D = nn.Parameter(torch.ones(config.d_inner))
 
         elif config.ssm_type == "S6-Real-complex-bias":
-            assert self.config.channel_sharing
+            assert self.config.channel_sharing == False
 
             self.BC_dims = config.d_state * config.d_inner
 
@@ -186,16 +194,21 @@ class MambaBlock(nn.Module):
             self.x_proj = nn.Linear(config.d_inner, config.dt_rank + 2 * self.BC_dims, bias=False)
 
             self.x_proj = nn.Linear(config.d_inner, config.dt_rank + 2 * self.BC_dims, bias=False)
+
+            if config.deterministic:
+                torch.manual_seed(1)
             C_bias = torch.randn(config.d_inner, config.d_state, dtype=torch.cfloat)
             self.B_bias_real = torch.ones(config.d_inner, config.d_state, dtype=torch.float)
             self.B_bias_imag = torch.zeros(config.d_inner, config.d_state, dtype=torch.float)
             self.C_bias_real = nn.Parameter(C_bias.real)
-            self.C_bias_imag = nn.Parameter(C_bias.imag)
+            self.C_bias_imag = nn.Parameter(-C_bias.imag)
             self.B_bias_real = nn.Parameter(self.B_bias_real)
             self.B_bias_imag = nn.Parameter(self.B_bias_imag)
 
             #  dt initialization
             #  dt weights
+            if config.deterministic:
+                torch.manual_seed(2)
             inv_dt = torch.rand(config.d_inner) * (math.log(config.dt_max) - math.log(config.dt_min)) + math.log(
                 config.dt_min)
             self.inv_dt = nn.Parameter(inv_dt)
@@ -207,11 +220,14 @@ class MambaBlock(nn.Module):
             A_imag[A_imag<1e-4] = 1e-4
             self.A_imag = nn.Parameter(A_imag)
 
+            if config.deterministic:
+                torch.manual_seed(3)
             self.D = nn.Parameter(torch.randn(config.d_inner))
+            pass
 
         elif config.ssm_type == "S6-Complex":
             #  projects x to input-dependent Δ, B, C
-            if config.channel_sharing:
+            if not config.channel_sharing:
                 self.BC_dims = config.d_state * config.d_inner
             elif config.channel_sharing:
                 self.BC_dims = config.d_state
@@ -313,7 +329,8 @@ class MambaBlock(nn.Module):
                                       mode='s4d',
                                       is_real=False,
                                       shared=config.channel_sharing,
-                                      init="diag-lin")
+                                      init="diag-lin",
+                                      deterministic = self.config.deterministic)
         elif config.ssm_type == "S4D-Real":
             self.ssm_kernel = FFTConv(d_model=config.d_inner,
                                       d_state=config.d_state,
@@ -329,9 +346,6 @@ class MambaBlock(nn.Module):
         else:
             print("type", config.ssm_type)
             raise NotImplementedError
-
-        #  projects block output from ED back to D
-        self.out_proj = nn.Linear(config.d_inner, config.d_model, bias=config.bias)
 
     def forward(self, x):
         #  x : (B, L, D)
@@ -432,7 +446,7 @@ class MambaBlock(nn.Module):
                                                 dim=-1)
 
             B = B_real + 1j * B_imag
-            C = C_real + 1j * C_imag
+            C = C_real - 1j * C_imag
             if not self.config.channel_sharing:
                 b, l, ed = x.shape
                 B = B.reshape(b, l, ed, self.config.d_state)

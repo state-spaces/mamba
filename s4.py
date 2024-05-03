@@ -812,9 +812,18 @@ class SSMKernel(Kernel):
     def init_dt(self):
         # Generate dt
         if self.deterministic:  # Meant for debugging
-            assert self.dt_tie, "Deterministic dt initialization is tied"
-            assert self.dt_transform == 'exp', "Deterministic dt transform should be 'exp' for simplicity"
-            inv_dt = torch.exp(torch.linspace(math.log(self.dt_min), math.log(self.dt_max), self.H)).unsqueeze(-1) # (H 1)
+            # assert self.dt_tie, "Deterministic dt initialization is tied"
+            # assert self.dt_transform == 'exp', "Deterministic dt transform should be 'exp' for simplicity"
+            # inv_dt = torch.exp(torch.linspace(math.log(self.dt_min), math.log(self.dt_max), self.H)).unsqueeze(-1) # (H 1)
+            torch.manual_seed(2)
+            shape = (self.H, 1) if self.dt_tie else (self.H, self.N//2)
+            # Initialize log dt
+            inv_dt = torch.rand(*shape, dtype=self.dtype) * (
+                math.log(self.dt_max) - math.log(self.dt_min)
+            ) + math.log(self.dt_min)
+            if self.dt_transform != 'exp':
+                inv_dt = inv_transform(torch.exp(inv_dt), self.dt_transform)
+            pass
         else:
             shape = (self.H, 1) if self.dt_tie else (self.H, self.N//2)
             # Initialize log dt
@@ -855,20 +864,18 @@ class SSMKernel(Kernel):
         # Broadcast C to have H channels
         if self.deterministic:
             if not self.shared:
-                C = torch.zeros(self.channels, self.n_ssm, self.N, dtype=self.cdtype)
-                C[:, :, :1] = 1.
-                C = contract('hmn, chn -> chm', V.conj().transpose(-1, -2), C)  # V^* C
-                C = repeat(C, 'c t n -> c (v t) n', v=self.H // C.size(-2)).clone().contiguous()
+                torch.manual_seed(1)
+                C = torch.randn(self.channels, self.H, self.N // 2, dtype=self.cdtype)
             else:
-                C = torch.zeros(self.channels, 1, self.N, dtype=self.cdtype)
-                C[:, :, :1] = 1.
-                C = contract('hmn, chn -> chm', V.conj().transpose(-1, -2), C) # V^* C
-                C = repeat(C, 'c t n -> c (v t) n', v=1).clone().contiguous()
+                raise NotImplementedError
+                torch.manual_seed(1)
+                C = torch.randn(self.channels, 1, self.N // 2, dtype=self.cdtype)
         else:
             if not self.shared:
                 C = torch.randn(self.channels, self.H, self.N//2, dtype=self.cdtype)
             else:
                 C = torch.randn(self.channels, 1, self.N//2, dtype=self.cdtype)
+        pass
 
         # Broadcast other parameters to have n_ssm copies
         assert self.n_ssm % B.size(-2) == 0 \
@@ -1150,6 +1157,7 @@ class SSMKernelDiag(SSMKernel):
             # Power up
             C = C * (torch.exp(dtA)-1.) / A
             K = log_vandermonde(C, dtA, L) # (H L)
+            pass
         elif self.disc == 'bilinear':
             C = C * (1. - dtA/2).reciprocal() * dt # or * dtA / A
             dA = (1. + dtA/2) / (1. - dtA/2)
@@ -1672,6 +1680,7 @@ class FFTConv(nn.Module):
         drop_kernel=0.0,
         mode='dplr',
         kernel=None,
+        deterministic = False,
         **kernel_args,  # Arguments passed into inner convolution kernel
     ):
         super().__init__()
@@ -1687,6 +1696,8 @@ class FFTConv(nn.Module):
             channels *= 2
         self.activation = Activation(activation, dim=1 if self.transposed else -1)
 
+        if deterministic:
+            torch.manual_seed(3)
         self.D = nn.Parameter(torch.randn(channels, self.d_model))
 
         if self.bidirectional:
@@ -1705,6 +1716,7 @@ class FFTConv(nn.Module):
             d_model=self.d_model,
             l_max=self.l_max,
             channels=channels,
+            deterministic=deterministic,
             **kernel_args,
         )
 

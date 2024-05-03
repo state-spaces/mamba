@@ -1,5 +1,5 @@
 import torch.nn.functional as F
-import wandb
+# import wandb
 import torch
 from torch import optim
 from ds.datasets import DynamicCategoricalDataset
@@ -8,7 +8,7 @@ import itertools
 import numpy as np
 from dataclasses import dataclass
 import os
-os.environ["WANDB_SILENT"] = "true"
+# os.environ["WANDB_SILENT"] = "true"
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -16,6 +16,10 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 def train(config, model, data_loader, optimizer):
 
     # Training Loop
+    if config.deterministic:
+        torch.manual_seed(config.seed)
+        np.random.seed(config.seed)
+
     for epoch in range(config.epochs):
         avg_loss = 0
         total_correct_tokens = 0
@@ -61,12 +65,12 @@ def train(config, model, data_loader, optimizer):
         avg_accuracy_per_sequence = total_correct_sequences / total_sequences
 
         # Log metrics
-        wandb.log({
-            "epoch": epoch,
-            "loss": avg_loss,
-            "avg_accuracy_per_token": avg_accuracy_per_token,
-            "avg_accuracy_per_sequence": avg_accuracy_per_sequence
-        })
+        # wandb.log({
+        #     "epoch": epoch,
+        #     "loss": avg_loss,
+        #     "avg_accuracy_per_token": avg_accuracy_per_token,
+        #     "avg_accuracy_per_sequence": avg_accuracy_per_sequence
+        # })
 
         if config.stop_on_loss and avg_loss < config.stop_on_loss:
             break
@@ -84,6 +88,7 @@ class Config:
     A_imag_using_weight_decay: str
     dt_is_selective: str
     channel_sharing: str
+    deterministic: bool
     d_model: int
     d_state: int
     n_layers: int
@@ -113,12 +118,12 @@ def experiments(kwargs):
 def run_experiment(config):
     exp_name = name(config)
 
-    wandb.init(
-        project="complex-mamba-copy-s4",
-        entity="complex-team",
-        name=exp_name,
-        config=config
-    )
+    # wandb.init(
+    #     project="complex-mamba-copy-s4",
+    #     entity="complex-team",
+    #     name=exp_name,
+    #     config=config
+    # )
 
     torch.manual_seed(config.seed)
     np.random.seed(config.seed)
@@ -137,7 +142,8 @@ def run_experiment(config):
         n_layers=config.n_layers,
         vocab_size=config.n_categories,
         pad_vocab_size_multiple=config.n_categories,
-        bias=config.bias)
+        bias=config.bias,
+        deterministic = config.deterministic)
 
     dataset = DynamicCategoricalDataset(config.epoch_size,
                                         config.extra + config.lag,
@@ -146,10 +152,11 @@ def run_experiment(config):
     data_loader = torch.utils.data.DataLoader(dataset,
                                               batch_size=config.batch_size,
                                               shuffle=True)
+
     model = MambaLM(mamba_config).to(device)
     optimizer = optim.Adam(model.parameters(), lr=config.lr)
     train(config, model, data_loader, optimizer)
-    wandb.finish()
+    # wandb.finish()
 
 def name(config):
     # short name for display on wandb
@@ -159,6 +166,11 @@ def main():
     S4 = True
 
     if S4:
+        batch_size = 32
+        n_categories = 16
+        lag = 128
+        extra = 32
+
         settings_options = [
             ["seed", [2]],
             ["ssm_type", ["S4D-Complex"]],
@@ -166,11 +178,11 @@ def main():
             ["discretizationB", ["default"]],
             ["d_model", [64]],
             ["d_state", [16]],
-            ["lag", [128]],
-            ["extra", [32]],
+            ["lag", [lag]],
+            ["extra", [extra]],
             ["n_layers", [2]],
-            ["n_categories", [16]],
-            ["batch_size", [8]],
+            ["n_categories", [n_categories]],
+            ["batch_size", [batch_size]],
             ["epochs", [1000]],  # [int(1600 * 6]],
             ["epoch_size", [128 * 4]],
             ["lr", [1e-3]],
@@ -181,7 +193,8 @@ def main():
             ["A_imag_using_weight_decay", [None, ]],
             ["dt_is_selective", [None, ]],
             ["channel_sharing", [False]],
-            ["bias", [True, False]],
+            ["bias", [False]],
+            ["deterministic", [True,]],
         ]
     else:
         batch_size = 32
@@ -211,7 +224,8 @@ def main():
             ["initA_real", [None]],
             ["dt_is_selective", [None]],
             ["channel_sharing", [False]],
-            ["bias", [False, True]],
+            ["bias", [False]],
+            ["deterministic", [True, ]],
         ]
 
     tasks = []
