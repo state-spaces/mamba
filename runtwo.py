@@ -15,6 +15,7 @@ from typing import Tuple
 import ray
 from ray.actor import ActorHandle
 from tqdm import tqdm
+import traceback
 
 os.environ["WANDB_SILENT"] = "true"
 
@@ -113,6 +114,7 @@ def train(config, model, data_loader, optimizer):
     # pbar = tqdm(total=config.epochs, desc="Epoch Progress", position=0)
 
     # Training Loop
+    losses = []
     for epoch in range(config.epochs):
         avg_loss = 0
         total_correct_tokens = 0
@@ -157,10 +159,12 @@ def train(config, model, data_loader, optimizer):
         avg_accuracy_per_token = total_correct_tokens / total_tokens
         avg_accuracy_per_sequence = total_correct_sequences / total_sequences
 
+        losses.append(avg_loss)
         # Log metrics
         wandb.log({
             "epoch": epoch,
             "loss": avg_loss,
+            "min_loss": np.min(losses),
             "avg_accuracy_per_token": avg_accuracy_per_token,
             "avg_accuracy_per_sequence": avg_accuracy_per_sequence
         })
@@ -173,7 +177,18 @@ def train(config, model, data_loader, optimizer):
 @dataclass
 class Config:
     ssm_type: str
+    initA_real: str
+    initA_imag: str
+    discretizationA: str
+    discretizationB: str
+    param_A_imag: str
+    A_imag_using_weight_decay: str
+    dt_is_selective: str
+    channel_sharing: str
+    deterministic:bool
+    pscan: bool
     d_model: int
+    d_state: int
     n_layers: int
     n_categories: int
     lag: int
@@ -185,7 +200,7 @@ class Config:
     stop_on_loss: float
     seed: int
     comment: str
-
+    bias:bool
 
 def experiments(kwargs):
     # Extract argument names and their corresponding value lists
@@ -197,13 +212,13 @@ def experiments(kwargs):
         # Yield a dictionary mapping argument names to values
         yield dict(zip(arg_names, values))
 
-@ray.remote(num_gpus=0.5)# if torch.cuda.is_available() else 0)
-def run_experiment(config,progress_bar_actor):
+@ray.remote(num_gpus=0.25)# if torch.cuda.is_available() else 0)
+def run_experiment(config, progress_bar_actor):
     try:
         exp_name = name(config)
 
         wandb.init(
-            project="ComplexS6",
+            project="S4VSS6Long",
             entity="yuv-milo",
             name=exp_name,
             config=config
@@ -213,10 +228,22 @@ def run_experiment(config,progress_bar_actor):
         np.random.seed(config.seed)
         mamba_config = MambaLMConfig(
             ssm_type=config.ssm_type,
+            discretizationA=config.discretizationA,
+            discretizationB=config.discretizationB,
+            initA_imag=config.initA_imag,
+            initA_real=config.initA_real,
+            param_A_imag = config.param_A_imag,
+            A_imag_using_weight_decay=config.A_imag_using_weight_decay,
+            dt_is_selective = config.dt_is_selective,
+            channel_sharing = config.channel_sharing,
             d_model=config.d_model,
+            d_state=config.d_state,
             n_layers=config.n_layers,
             vocab_size=config.n_categories,
-            pad_vocab_size_multiple=config.n_categories)
+            pad_vocab_size_multiple=config.n_categories,
+            deterministic = config.deterministic,
+            bias=config.bias,
+            pscan = config.pscan)
 
         dataset = DynamicCategoricalDataset(config.epoch_size,
                                             config.extra + config.lag,
@@ -228,55 +255,122 @@ def run_experiment(config,progress_bar_actor):
         model = MambaLM(mamba_config).to(device)
         optimizer = optim.Adam(model.parameters(), lr=config.lr)
         train(config, model, data_loader, optimizer)
-    except:
-        pass
+    except Exception:
+        print(progress_bar_actor, "fail:", traceback.format_exc())
     progress_bar_actor.update.remote()
     wandb.finish()
 
 def name(config):
     # short name for display on wandb
-    return f"{config.ssm_type}-lag{config.lag}-extra{config.extra}-dim{config.d_model}"
+    return f"{config.ssm_type}-lag{config.lag}-extra{config.extra}-disc{config.discretizationA}-{config.discretizationB}"
 
 def main():
     ray.init(num_cpus=64, ignore_reinit_error=True)
     pb = ProgressBar()
     progress_bar_actor = pb.actor
 
-    # settings_options = [
-    #     ["d_model", [16]],
-    #     ["d_state", [1]],
-    #     ["lag", [256]],
-    #     ["extra", [128, 32]],
-    #     ["seed", [42, 23, 9]],
-    #     ["ssm_type", ["S4D-Real", "conv", "S6-Real", "S4D-Complex"]],
+    batch_size = 32
+    n_categories = 16
+
+    # Check where S4-Complex Fails
+    lags = [256]
+    extras = [128, 256]
+    epochs = 1000
+
+
+    # settings_options_s4 = [
+    #     ["seed", [2, 3]],
+    #     ["ssm_type", ["S4D-Complex", "S4D-Real"]],
+    #     ["discretizationA", ["default"]],
+    #     ["discretizationB", ["default"]],
+    #     ["d_model", [64]],
+    #     ["d_state", [16]],
+    #     ["lag", lags],
+    #     ["extra", extras],
     #     ["n_layers", [2]],
-    #     ["n_categories", [16]],
-    #     ["batch_size", [8]],
-    #     ["epochs", [10000]], # [int(1600 * 6]],
+    #     ["n_categories", [n_categories]],
+    #     ["batch_size", [batch_size]],
+    #     ["epochs", [epochs]],  # [int(1600 * 6]],
     #     ["epoch_size", [128 * 4]],
     #     ["lr", [1e-3]],
     #     ["stop_on_loss", [0.01]],
+    #     ["initA_imag", [None, ]],
+    #     ["initA_real", [None, ]],
+    #     ["param_A_imag", [None, ]],
+    #     ["A_imag_using_weight_decay", [None, ]],
+    #     ["dt_is_selective", [None, ]],
+    #     ["channel_sharing", [True, False]],
+    #     ["bias", [True]],
+    #     ["deterministic", [False]],
+    #     ["pscan", [False]],
     # ]
 
-    settings_options = [
-        ["seed", [1]],
-        ["ssm_type", ["S6-Complex"]],
+    settings_options_s6_real = [
+        ["seed", [2, 3]],
+        ["ssm_type", ["S6-Real"]],
+        ["discretizationA", ["normal"]],
+        ["discretizationB", ["s6"]],
         ["d_model", [64]],
-        ["lag", [4,  32, 258]],
-        ["extra", [1, 2, 4]],
+        ["d_state", [16]],
+        ["lag", lags],
+        ["extra", extras],
         ["n_layers", [2]],
-        ["n_categories", [16]],
-        ["batch_size", [8]],
-        ["epochs", [10000]],  # [int(1600 * 6]],
+        ["n_categories", [n_categories]],
+        ["batch_size", [batch_size]],
+        ["epochs", [epochs]],  # [int(1600 * 6]],
         ["epoch_size", [128 * 4]],
         ["lr", [1e-3]],
         ["stop_on_loss", [0.01]],
+        ["initA_imag", [None, ]],
+        ["initA_real", [None, ]],
+        ["param_A_imag", [None, ]],
+        ["A_imag_using_weight_decay", [None, ]],
+        ["dt_is_selective", ["True", "False"]],
+        ["channel_sharing", [True, False]],
+        ["bias", [True]],
+        ["deterministic", [False]],
+        ["pscan", [False]],
+    ]
+
+    settings_options_s6_complex = [
+        ["seed", [2, 3]],
+        ["ssm_type", ["S6-Complex"]],
+        ["discretizationA", ["normal"]],
+        ["d_model", [64]],
+        ["lag", lags],
+        ["extra", extras],
+        ["n_layers", [2]],
+        ["n_categories", [n_categories]],
+        ["batch_size", [batch_size]],
+        ["epochs", [epochs]],  # [int(1600 * 6]],
+        ["epoch_size", [128 * 4]],
+        ["lr", [1e-3]],
+        ["stop_on_loss", [0.01]],
+        ["param_A_imag", ["normal", ]],
+        ["A_imag_using_weight_decay", ["True", ]],
+        ["deterministic", [False]],
+        ["pscan", [False]],
+        ["bias", [True]],
+        ["initA_imag", ["S4",]],
+        ["initA_real", ["S4",]],
+        ["dt_is_selective", ["True", "False"]],
+        ["discretizationB", ["s6"]],
+        ["d_state", [8]],
+        ["channel_sharing", [True, False]],
     ]
 
     tasks = []
-    for i, config in enumerate(experiments(settings_options)):
+    # for i, config in enumerate(experiments(settings_options_s4)):
+    #     print(i)
+    #     config.update({"comment": "comment in no re_init dt bias"})
+    #     tasks.append(run_experiment.remote(Config(**config), progress_bar_actor))
+    for i, config in enumerate(experiments(settings_options_s6_complex)):
         print(i)
-        config.update({"comment": ""})
+        config.update({"comment": "comment in no re_init dt bias"})
+        tasks.append(run_experiment.remote(Config(**config), progress_bar_actor))
+    for i, config in enumerate(experiments(settings_options_s6_real)):
+        print(i)
+        config.update({"comment": "comment in no re_init dt bias"})
         tasks.append(run_experiment.remote(Config(**config), progress_bar_actor))
     pb.set_total(len(tasks))
     pb.print_until_done()

@@ -186,6 +186,7 @@ class Config:
     dt_is_selective: str
     channel_sharing: str
     deterministic:bool
+    pscan: bool
     d_model: int
     d_state: int
     n_layers: int
@@ -217,7 +218,7 @@ def run_experiment(config, progress_bar_actor):
         exp_name = name(config)
 
         wandb.init(
-            project="S4VSS6",
+            project="WhereS4ComplexFails",
             entity="yuv-milo",
             name=exp_name,
             config=config
@@ -241,7 +242,8 @@ def run_experiment(config, progress_bar_actor):
             vocab_size=config.n_categories,
             pad_vocab_size_multiple=config.n_categories,
             deterministic = config.deterministic,
-            bias=config.bias)
+            bias=config.bias,
+            pscan = config.pscan)
 
         dataset = DynamicCategoricalDataset(config.epoch_size,
                                             config.extra + config.lag,
@@ -269,9 +271,17 @@ def main():
 
     batch_size = 32
     n_categories = 16
-    lag = 128
-    extra = 32
-    epochs = 300
+
+    # Check where S4-Complex Fails
+    lags = [256,]
+    extras = [128,]
+    epochs = 10000
+
+    # # Check equal
+    # lags = [128]
+    # extras = [32]
+    # epoch = 200
+
 
     settings_options_s4_complex = [
         ["seed", [2]],
@@ -280,8 +290,8 @@ def main():
         ["discretizationB", ["default"]],
         ["d_model", [64]],
         ["d_state", [16]],
-        ["lag", [lag]],
-        ["extra", [extra]],
+        ["lag", lags],
+        ["extra", extras],
         ["n_layers", [2]],
         ["n_categories", [n_categories]],
         ["batch_size", [batch_size]],
@@ -295,8 +305,9 @@ def main():
         ["A_imag_using_weight_decay", [None, ]],
         ["dt_is_selective", [None, ]],
         ["channel_sharing", [False]],
-        ["bias", [False, True]],
-        ["deterministic", [True, False]]
+        ["bias", [False]],
+        ["deterministic", [False]],
+        ["pscan", [False]]
     ]
 
     settings_options_s6complex = [
@@ -304,8 +315,8 @@ def main():
         ["ssm_type", ["S6-Real-complex-bias", ]],
         ["d_model", [64]],
         ["d_state", [8]],
-        ["lag", [lag]],
-        ["extra", [extra]],
+        ["lag", lags],
+        ["extra", extras],
         ["n_layers", [2]],
         ["n_categories", [n_categories]],
         ["batch_size", [batch_size]],
@@ -321,8 +332,9 @@ def main():
         ["initA_real", [None]],
         ["dt_is_selective", [None]],
         ["channel_sharing", [False]],
-        ["bias", [False,True]],
-        ["deterministic", [True, False]],
+        ["bias", [False]],
+        ["deterministic", [True]],
+        ["pscan", [False]]
     ]
 
     tasks = []
@@ -330,14 +342,14 @@ def main():
     #     print(i)
     #     config.update({"comment": "comment in no re_init dt bias"})
     #     tasks.append(run_experiment.remote(Config(**config), progress_bar_actor))
-    for i, config in enumerate(experiments(settings_options_s6complex)):
-        print(i)
-        config.update({"comment": "comment in no re_init dt bias"})
-        tasks.append(run_experiment.remote(Config(**config), progress_bar_actor))
-    for i, config in enumerate(experiments(settings_options_s4_complex)):
-        print(i)
-        config.update({"comment": "comment in no re_init dt bias"})
-        tasks.append(run_experiment.remote(Config(**config), progress_bar_actor))
+    # for i, config in enumerate(experiments(settings_options_s6complex)):
+    #     print(i)
+    #     config.update({"comment": "comment in no re_init dt bias"})
+    #     tasks.append(run_experiment.remote(Config(**config), progress_bar_actor))
+    # for i, config in enumerate(experiments(settings_options_s4_complex)):
+    #     print(i)
+    #     config.update({"comment": "comment in no re_init dt bias"})
+    #     tasks.append(run_experiment.remote(Config(**config), progress_bar_actor))
     pb.set_total(len(tasks))
     pb.print_until_done()
     print("finished running all")

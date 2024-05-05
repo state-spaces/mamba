@@ -861,13 +861,16 @@ class SSMKernel(Kernel):
             _, P, B, V = combination(self.init, self.N, self.rank, 1, **self.init_args)
             A, _, _, _ = combination(self.init, self.N, self.rank, self.n_ssm, **self.init_args)
 
+        # if self.deterministic:
+        #     torch.manual_seed(10)
+        #     B = torch.randn(self.n_ssm,self.N//2, dtype=torch.cfloat)
+
         # Broadcast C to have H channels
         if self.deterministic:
             if not self.shared:
                 torch.manual_seed(1)
                 C = torch.randn(self.channels, self.H, self.N // 2, dtype=self.cdtype)
             else:
-                raise NotImplementedError
                 torch.manual_seed(1)
                 C = torch.randn(self.channels, 1, self.N // 2, dtype=self.cdtype)
         else:
@@ -1017,8 +1020,8 @@ class SSMKernelDiag(SSMKernel):
         **kwargs,
     ):
         # Special case: for real-valued, d_state semantics change
-        if is_real and 'd_state' in kwargs:
-            kwargs['d_state'] = kwargs['d_state'] * 2
+        # if is_real and 'd_state' in kwargs:
+        #     kwargs['d_state'] = kwargs['d_state'] * 2
         super().__init__(**kwargs)
         self.disc = disc
         self.dt_fast = dt_fast
@@ -1055,8 +1058,8 @@ class SSMKernelDiag(SSMKernel):
         """
 
         assert self.backend in ['cuda', 'keops', 'naive']
-
-        if self.dt_fast: inv_dt = torch.asinh(inv_dt)
+        #
+        # if self.dt_fast: inv_dt = torch.asinh(inv_dt)
 
         # Rank of low-rank correction
         assert self.H == inv_dt.size(0)
@@ -1071,24 +1074,43 @@ class SSMKernelDiag(SSMKernel):
 
         # Broadcast everything to correct shapes
         if not self.shared:
-            C = C.expand(torch.broadcast_shapes(C.shape, (1, self.H, self.N))) # (C, H, N)  # TODO originally this was only in DPLR, check safe for Diag
+            pass #C = C.expand(torch.broadcast_shapes(C.shape, (1, self.H, self.N))) # (C, H, N)  # TODO originally this was only in DPLR, check safe for Diag
         else:
             pass
         B = B.unsqueeze(0) # (1, H, N)
         assert self.channels == C.shape[0]
 
         # Register dt
-        self.register("inv_dt", inv_dt, self.lr_dict['dt'], self.wd_dict['dt'])
+        self.inv_dt = nn.Parameter(inv_dt)
+        # self.register("inv_dt", inv_dt, self.lr_dict['dt'], self.wd_dict['dt'])
+        #self.inv_dt.requires_grad = False
         # Register ABC
         if self.is_real:
             self.register("C", C.real, self.lr_dict['C'], None)
             self.register("B", B.real, self.lr_dict['B'], self.wd_dict['B'])
             self.register("A_real", inv_transform(-A.real, self.real_transform), self.lr_dict['A'], self.wd_dict['A'])
         else:
-            self.register("C", _c2r(_resolve_conj(C)), self.lr_dict['C'], None)
-            self.register("B", _c2r(B), self.lr_dict['B'], self.wd_dict['B'])
-            self.register("A_real", inv_transform(-A.real, self.real_transform), self.lr_dict['A'], self.wd_dict['A'])
-            self.register("A_imag", inv_transform(-A.imag, self.imag_transform), self.lr_dict['A'], self.wd_dict['A'])
+            # self.register("C", _c2r(_resolve_conj(C)), self.lr_dict['C'], None)
+            # self.register("B", _c2r(B), self.lr_dict['B'], self.wd_dict['B'])
+            # self.register("A_real", inv_transform(-A.real, self.real_transform), self.lr_dict['A'], self.wd_dict['A'])
+            # self.register("A_imag", inv_transform(-A.imag, self.imag_transform), self.lr_dict['A'], self.wd_dict['A'])
+            # self.A_real = nn.Parameter(inv_transform(-A.real, self.real_transform), requires_grad=False)
+            # self.A_imag = nn.Parameter(inv_transform(-A.imag, self.imag_transform), requires_grad=False)
+            # self.B_bias_real = nn.Parameter(B.real, requires_grad=False)
+            # self.B_bias_imag = nn.Parameter(B.imag, requires_grad=False)
+            # self.C_bias_real = nn.Parameter(C.real, requires_grad=False)
+            # self.C_bias_imag = nn.Parameter(-C.imag, requires_grad=False)
+            self.A_real = nn.Parameter(inv_transform(-A.real, self.real_transform))
+            self.A_imag = nn.Parameter(inv_transform(-A.imag, self.imag_transform))
+            self.B_bias_real = nn.Parameter(B.real)
+            self.B_bias_imag = nn.Parameter(B.imag)
+            self.C_bias_real = nn.Parameter(C.real)
+            self.C_bias_imag = nn.Parameter(-C.imag)
+
+            # self.C.requires_grad = False
+            # self.B.requires_grad = False
+            # self.A_real.requires_grad = False
+            # self.A_imag.requires_grad = False
 
     def _get_params(self, rate=1.0):
         """Process the internal parameters."""
@@ -1099,13 +1121,13 @@ class SSMKernelDiag(SSMKernel):
             B = self.B # (1 S N)
             C = self.C # (C H N)
         else:
-            A = -param_transform(self.A_real, self.real_transform) - 1j * param_transform(self.A_imag, self.imag_transform)
-            B = _r2c(self.B) # (1 S N)
-            C = _r2c(self.C) # (C H N)
-
-        if self.dt_fast: inv_dt = torch.sinh(self.inv_dt)
-        else: inv_dt = self.inv_dt
-        dt = param_transform(inv_dt, self.dt_transform) * rate # (H N)
+            # A = -param_transform(self.A_real, self.real_transform) - 1j * param_transform(self.A_imag, self.imag_transform)
+            A = -torch.exp(self.A_real) - 1j * self.A_imag
+            B = self.B_bias_real + 1j * self.B_bias_imag
+            C = self.C_bias_real + 1j * self.C_bias_imag
+        # if self.dt_fast: inv_dt = torch.sinh(self.inv_dt)
+        # else: inv_dt = self.inv_dt
+        dt = torch.exp(self.inv_dt) #param_transform(inv_dt, self.dt_transform) * rate # (H N)
 
         if self.bandlimit is not None:
             freqs = dt / rate * A.imag.abs() / (2*math.pi) # (H N)
@@ -1123,12 +1145,31 @@ class SSMKernelDiag(SSMKernel):
 
         return dt, A, B, C
 
-    def forward(self, L, state=None, rate=1.0):
+    def forward(self, L, state=None, rate=1.0, x = None):
         """See Kernel.forward() for argument documentation."""
 
         dt, A, B, C = self._get_params(rate)
         dtA = dt * A
-
+        #
+        # from simple_mamba.mamba import pscan
+        # deltaA = torch.exp(dtA).unsqueeze(0).unsqueeze(0)
+        # deltaB = B * (torch.exp(dt * A) - 1.) / A
+        # if x is None:
+        #     x = torch.zeros([1, 160, 128, 1], device=deltaB.device)
+        #     x[:, 0, :, :] = 1
+        # else:
+        #     x = x.transpose(1, 2).unsqueeze(-1)
+        # B = B.unsqueeze(1);
+        # BX = deltaB * x
+        # C = C.unsqueeze(0)
+        # C = C.broadcast_to(BX.shape)
+        # deltaA = deltaA.broadcast_to(BX.shape)
+        # hs = pscan(deltaA, BX)
+        # y = (hs * C).sum(dim=3)
+        # y = y.transpose(1, 2)
+        # y = 2 * (y.real)
+        # K = y
+        # K_state = None
         # Augment B with state
         if state is not None:
             s = state / dt
@@ -1692,25 +1733,27 @@ class FFTConv(nn.Module):
         self.swap_channels = swap_channels
 
 
-        if activation is not None and activation.startswith('glu'):
-            channels *= 2
-        self.activation = Activation(activation, dim=1 if self.transposed else -1)
+        # if activation is not None and activation.startswith('glu'):
+        #     channels *= 2
+        # self.activation = Activation(activation, dim=1 if self.transposed else -1)
 
         if deterministic:
             torch.manual_seed(3)
         self.D = nn.Parameter(torch.randn(channels, self.d_model))
+        # self.D.requires_grad = False
 
-        if self.bidirectional:
-            channels *= 2
+        # if self.bidirectional:
+        #     channels *= 2
 
-        # Inner convolution kernel
-        if mode is not None:
-            assert kernel is None, "Pass either mode or kernel but not both"
-            # log.info(
-            #     "Argument 'mode' is deprecated and renamed to 'kernel',"
-            #     "and will be removed in a future version."
-            # )
-            kernel, mode = mode, kernel
+        # # Inner convolution kernel
+        # if mode is not None:
+        #     assert kernel is None, "Pass either mode or kernel but not both"
+        #     # log.info(
+        #     #     "Argument 'mode' is deprecated and renamed to 'kernel',"
+        #     #     "and will be removed in a future version."
+        #     # )
+        #     kernel, mode = mode, kernel
+        kernel = mode
         kernel_cls = kernel_registry[kernel]
         self.kernel = kernel_cls(
             d_model=self.d_model,
@@ -1720,9 +1763,9 @@ class FFTConv(nn.Module):
             **kernel_args,
         )
 
-        dropout_fn = DropoutNd if tie_dropout else nn.Dropout
-        self.drop = dropout_fn(dropout) if dropout > 0.0 else nn.Identity()
-        self.drop_kernel = nn.Dropout(drop_kernel) if drop_kernel > 0.0 else nn.Identity()
+        # dropout_fn = DropoutNd if tie_dropout else nn.Dropout
+        # self.drop = dropout_fn(dropout) if dropout > 0.0 else nn.Identity()
+        # self.drop_kernel = nn.Dropout(drop_kernel) if drop_kernel > 0.0 else nn.Identity()
 
     def forward(self, x, state=None, rate=1.0, **kwargs): # absorbs return_output and transformer src mask
         """
@@ -1736,12 +1779,13 @@ class FFTConv(nn.Module):
         # Compute SS Kernel
         l_kernel = L if self.L is None else min(L, round(self.L / rate))
         k, k_state =  self.kernel(L=l_kernel, rate=rate, state=state) # (C H L) (B C H L)
-
-        # Convolution
-        if self.bidirectional:
-            k0, k1 = rearrange(k, '(s c) h l -> s c h l', s=2)
-            k = F.pad(k0, (0, L)) \
-                    + F.pad(k1.flip(-1), (L, 0))
+        # y, _ = self.kernel(L=l_kernel, rate=rate, state=state, x=x)
+        # y = y.unsqueeze(1)
+        # # Convolution
+        # if self.bidirectional:
+        #     k0, k1 = rearrange(k, '(s c) h l -> s c h l', s=2)
+        #     k = F.pad(k0, (0, L)) \
+        #             + F.pad(k1.flip(-1), (L, 0))
             # The above has an off-by-one in the reverse direction
             # This is a deliberate choice since the off-by-one should not affect any applications
             # This can be amended which may be very slightly slower
@@ -1749,8 +1793,8 @@ class FFTConv(nn.Module):
             #         + F.pad(k1[..., 1:].flip(-1), (L+1, 0)) \
             #         + F.pad(k1[..., :1], (0, l_kernel+L-1))
 
-        # Kernel dropout
-        k = self.drop_kernel(k)
+        # # Kernel dropout
+        # k = self.drop_kernel(k)
 
         # In principle, we could pad to l_kernel+L-1 instead of l_kernel+L, but we choose the latter for
         # equational simplicity. Additionally, we have not experimented to compare the efficiency of the two.
@@ -1763,13 +1807,13 @@ class FFTConv(nn.Module):
         # Compute D term in state space equation - essentially a skip connection
         y = y + contract('bhl,ch->bchl', x, self.D)
 
-        # Compute state update
-        if state is not None:
-            assert not self.bidirectional, "Bidirectional not supported with state forwarding"
-            y = y + k_state #
-            next_state = self.kernel.forward_state(x, state)
-        else:
-            next_state = None
+        # # Compute state update
+        # if state is not None:
+        #     assert not self.bidirectional, "Bidirectional not supported with state forwarding"
+        #     y = y + k_state #
+        #     next_state = self.kernel.forward_state(x, state)
+        # else:
+        #     next_state = None
 
 
         # Reshape to flatten channels
@@ -1778,12 +1822,12 @@ class FFTConv(nn.Module):
         else:
             y = rearrange(y, 'b c h l -> b (c h) l')
 
-        y = self.drop(y)  # DropoutNd better with transposed=True
+        # y = self.drop(y)  # DropoutNd better with transposed=True
 
         if not self.transposed: y = y.transpose(-1, -2)
-        y = self.activation(y)
+        # y = self.activation(y)
 
-        return y, next_state
+        return y, None
 
 
     def setup_step(self, **kwargs):

@@ -90,11 +90,20 @@ class MambaLM(nn.Module):
         self.config = lm_config.to_mamba_config()
 
         self.embedding = nn.Embedding(self.lm_config.vocab_size, self.config.d_model)
+        for param in self.embedding.parameters():
+            param.requires_grad = False
+
         self.mamba = Mamba(self.config)
         self.norm_f = RMSNorm(self.config.d_model)
+        for param in self.norm_f.parameters():
+            param.requires_grad = True
 
         self.lm_head = nn.Linear(self.config.d_model, self.lm_config.vocab_size, bias=False)
+        # self.lm_head.requires_grad = True
+        # for param in self.lm_head.parameters():
+        #     param.requires_grad = True
         self.lm_head.weight = self.embedding.weight
+
 
     def forward(self, tokens):
         # tokens : (B, L)

@@ -36,6 +36,14 @@ def train(config, model, data_loader, optimizer):
             loss = F.cross_entropy(logits[:, config.lag:, :].reshape(-1, config.n_categories),
                                    labels[:, config.lag:].reshape(-1))
 
+            # N = 0
+            # all_parameters = list(model.parameters())
+            # for param in all_parameters[:-N]:
+            #     param.requires_grad = False
+            print("\n".join(f"{name}: {param.size()}, requires_grad={param.requires_grad}" for name, param in model.named_parameters()))
+            # Set requires_grad=False for all except the last N parameters
+            loss2 = loss
+
             # Backpropagation
             optimizer.zero_grad()
             loss.backward()
@@ -89,6 +97,8 @@ class Config:
     dt_is_selective: str
     channel_sharing: str
     deterministic: bool
+    pscan: bool
+    bias: bool
     d_model: int
     d_state: int
     n_layers: int
@@ -143,6 +153,7 @@ def run_experiment(config):
         vocab_size=config.n_categories,
         pad_vocab_size_multiple=config.n_categories,
         bias=config.bias,
+        pscan=config.pscan,
         deterministic = config.deterministic)
 
     dataset = DynamicCategoricalDataset(config.epoch_size,
@@ -163,48 +174,71 @@ def name(config):
     return f"{config.ssm_type}-lag{config.lag}-extra{config.extra}-dim{config.d_model}"
 
 def main():
-    S4 = True
-
+    S4 = False
+    batch_size = 32
+    n_categories = 16
+    lag = 128
+    extra = 32
+    lr = 1
+    epochs = 100
     if S4:
-        batch_size = 32
-        n_categories = 16
-        lag = 128
-        extra = 32
-
         settings_options = [
             ["seed", [2]],
-            ["ssm_type", ["S4D-Complex"]],
-            ["discretizationA", ["default"]],
-            ["discretizationB", ["default"]],
+            ["ssm_type", ["S6-Complex"]],
+            ["discretizationA", ["normal"]],
+            ["discretizationB", ["zoh","s6"]],
             ["d_model", [64]],
-            ["d_state", [16]],
-            ["lag", [lag]],
-            ["extra", [extra]],
+            ["d_state", [16, 8]],
+            ["lag", [lag,]],
+            ["extra", [extra,]],
             ["n_layers", [2]],
             ["n_categories", [n_categories]],
             ["batch_size", [batch_size]],
-            ["epochs", [1000]],  # [int(1600 * 6]],
+            ["epochs", [epochs]],  # [int(1600 * 6]],
             ["epoch_size", [128 * 4]],
             ["lr", [1e-3]],
             ["stop_on_loss", [0.01]],
-            ["initA_imag", [None,]],
-            ["initA_real", [None,]],
-            ["param_A_imag", [None, ]],
-            ["A_imag_using_weight_decay", [None, ]],
-            ["dt_is_selective", [None, ]],
+            ["initA_imag", ["S4", ]],
+            ["initA_real", ["S4", ]],
+            ["param_A_imag", ["normal", ]],
+            ["A_imag_using_weight_decay", ["True", ]],
+            ["dt_is_selective", ["True", ]],
             ["channel_sharing", [False]],
-            ["bias", [False]],
-            ["deterministic", [True,]],
+            ["bias", [True]],
+            ["deterministic", [False]],
+            ["pscan", [True]],
         ]
+        # settings_options = [
+        #     ["seed", [2]],
+        #     ["ssm_type", ["S4D-Real"]],
+        #     ["d_model", [64]],
+        #     ["d_state", [16]],
+        #     ["lag", [lag]],
+        #     ["extra", [extra]],
+        #     ["n_layers", [2]],
+        #     ["n_categories", [n_categories]],
+        #     ["batch_size", [batch_size]],
+        #     ["epochs", [epochs, ]],  # [int(1600 * 6]],
+        #     ["epoch_size", [128 * 4]],
+        #     ["stop_on_loss", [0.01]],
+        #     ["lr", [lr, ]],
+        #     ["A_imag_using_weight_decay", [True]],
+        #     ["initA_imag", [None]],
+        #     ["param_A_imag", [None]],
+        #     ["discretizationB", ["zoh"]],
+        #     ["discretizationA", ["normal", "yuval_disc", ]],
+        #     ["initA_real", [None]],
+        #     ["dt_is_selective", [None, ]],
+        #     ["channel_sharing", [True]],
+        #     ["bias", [False]],
+        #     ["deterministic", [True, ]],
+        #     ["pscan", [False]]
+        # ]
     else:
-        batch_size = 32
-        n_categories = 16
-        lag = 128
-        extra = 32
 
         settings_options = [
             ["seed", [2]],
-            ["ssm_type", ["S6-Real-complex-bias",]],
+            ["ssm_type", ["S6-Real-complex-bias", ]],
             ["d_model", [64]],
             ["d_state", [8]],
             ["lag", [lag]],
@@ -212,20 +246,21 @@ def main():
             ["n_layers", [2]],
             ["n_categories", [n_categories]],
             ["batch_size", [batch_size]],
-            ["epochs", [500]],  # [int(1600 * 6]],
+            ["epochs", [epochs, ]],  # [int(1600 * 6]],
             ["epoch_size", [128 * 4]],
             ["stop_on_loss", [0.01]],
-            ["lr", [1e-3]],
+            ["lr", [lr, ]],
             ["A_imag_using_weight_decay", [True]],
             ["initA_imag", [None]],
             ["param_A_imag", [None]],
             ["discretizationB", ["zoh"]],
-            ["discretizationA", ["normal","yuval_disc", ]],
+            ["discretizationA", ["normal", "yuval_disc", ]],
             ["initA_real", [None]],
             ["dt_is_selective", [None]],
             ["channel_sharing", [False]],
             ["bias", [False]],
             ["deterministic", [True, ]],
+            ["pscan", [True]],
         ]
 
     tasks = []
