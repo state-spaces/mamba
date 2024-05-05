@@ -15,6 +15,7 @@ from typing import Tuple
 import ray
 from ray.actor import ActorHandle
 from tqdm import tqdm
+import traceback
 
 os.environ["WANDB_SILENT"] = "true"
 
@@ -184,13 +185,23 @@ def train(config, model, data_loader, optimizer):
 @dataclass
 class Config:
     ssm_type: str
+    initA_real: str
+    initA_imag: str
+    discretizationA: str
+    discretizationB: str
+    param_A_imag: str
+    A_imag_using_weight_decay: str
+    dt_is_selective: str
+    channel_sharing: str
+    deterministic: bool
+    pscan: bool
     d_model: int
     d_state: int
     n_layers: int
     n_categories: int
-    seq_len: int
     induction_len: int
     num_triggers: int
+    seq_len: int
     batch_size: int
     epoch_size: int
     epochs: int
@@ -198,6 +209,7 @@ class Config:
     stop_on_loss: float
     seed: int
     comment: str
+    bias: bool
 
 
 def experiments(kwargs):
@@ -216,7 +228,7 @@ def run_experiment(config,progress_bar_actor):
         exp_name = name(config)
 
         wandb.init(
-            project="mamba",
+            project="InductionS6complex",
             entity="complex-team",
             name=exp_name,
             config=config
@@ -228,11 +240,22 @@ def run_experiment(config,progress_bar_actor):
         np.random.seed(config.seed)
         mamba_config = MambaLMConfig(
             ssm_type=config.ssm_type,
+            discretizationA=config.discretizationA,
+            discretizationB=config.discretizationB,
+            initA_imag=config.initA_imag,
+            initA_real=config.initA_real,
+            param_A_imag = config.param_A_imag,
+            A_imag_using_weight_decay=config.A_imag_using_weight_decay,
+            dt_is_selective = config.dt_is_selective,
+            channel_sharing = config.channel_sharing,
             d_model=config.d_model,
             d_state=config.d_state,
             n_layers=config.n_layers,
             vocab_size=config.n_categories,
-            pad_vocab_size_multiple=config.n_categories)
+            pad_vocab_size_multiple=config.n_categories,
+            deterministic = config.deterministic,
+            bias=config.bias,
+            pscan = config.pscan)
 
         dataset = InductionHead(config.epoch_size,
                                 config.seq_len,
@@ -247,7 +270,7 @@ def run_experiment(config,progress_bar_actor):
         optimizer = optim.Adam(model.parameters(), lr=config.lr)
         train(config, model, data_loader, optimizer)
     except Exception as e:
-        print(e)
+        print(progress_bar_actor, "fail:", traceback.format_exc())
     progress_bar_actor.update.remote()
     wandb.finish()
 
@@ -261,24 +284,70 @@ def main():
     progress_bar_actor = pb.actor
 
     settings_options = [
-        ["seed", [1]],
-        ["d_state", [2, 16, 32, 64, 92, 128]],
-        ["induction_len", [255]],
+        ["seed", [1, 2]],
+        ["n_categories", [16, 64]],
+        ["d_state", [16]],
+        ["induction_len", [8, 16, 255]],
         ["d_model", [64]],
         ["seq_len", [256]],
         ["num_triggers", [1]],
-        ["ssm_type", ["S4D-Real", "S6-Real", "S4D-Complex"]],
+        ["ssm_type", ["S4D-Real", "S4D-Complex", "S6-Real"]],
         ["n_layers", [2]],
-        ["n_categories", [128]],
         ["batch_size", [8]],
         ["epochs", [1600 * 3]],  # [int(1600 * 6]],
         ["epoch_size", [256 * 6]],
         ["lr", [1e-3]],
         ["stop_on_loss", [0.01]],
+
+        ["A_imag_using_weight_decay", ["True"]],
+        ["initA_imag", ["S4"]],
+        ["param_A_imag", ["normal", ]],
+        ["discretizationB", ["s6"]],
+        ["discretizationA", ["normal"]],
+        ["initA_real", ["S6"]],
+        ["dt_is_selective", ["False"]],
+        ["channel_sharing", [True]],
+        ["bias", [True]],
+        ["deterministic", [False]],
+        ["pscan", [True]]
+    ]
+
+    settings_options_s6_complex = [
+        ["seed", [1, 2]],
+        ["n_categories", [16, 64]],
+        ["d_state", [16]],
+        ["induction_len", [8, 16, 255]],
+        ["d_model", [64]],
+        ["seq_len", [256]],
+        ["num_triggers", [1]],
+        ["ssm_type", ["S6-Complex"]],
+        ["n_layers", [2]],
+        ["batch_size", [8]],
+        ["epochs", [1600 * 3]],  # [int(1600 * 6]],
+        ["epoch_size", [256 * 6]],
+        ["lr", [1e-3]],
+        ["stop_on_loss", [0.01]],
+
+        ["A_imag_using_weight_decay", ["True"]],
+        ["initA_imag", ["S4"]],
+        ["param_A_imag", ["normal", ]],
+        ["discretizationB", ["s6"]],
+        ["discretizationA", ["normal"]],
+        ["initA_real", ["S4"]],
+        ["dt_is_selective", ["False"]],
+        ["channel_sharing", [True]],
+        ["bias", [True]],
+        ["deterministic", [False]],
+        ["pscan", [True]]
     ]
 
     tasks = []
     for i, config in enumerate(experiments(settings_options)):
+        print(i)
+        config.update({"comment": ""})
+        tasks.append(run_experiment.remote(Config(**config), progress_bar_actor))
+
+    for i, config in enumerate(experiments(settings_options_s6_complex)):
         print(i)
         config.update({"comment": ""})
         tasks.append(run_experiment.remote(Config(**config), progress_bar_actor))
