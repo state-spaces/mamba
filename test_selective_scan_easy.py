@@ -1,5 +1,6 @@
 # Modified by Mzero #20240123
 # Copyright (C) 2023, Tri Dao, Albert Gu.
+import asyncio
 import math
 from functools import partial
 import torch
@@ -465,6 +466,9 @@ def selective_scan_easyv2(us, dts, As, Bs, Cs, Ds, delta_bias=None, delta_softpl
 
 
 def selective_scan_easyv3(us, dts, As, Bs, Cs, Ds, delta_bias=None, delta_softplus=False, return_last_state=False, chunksize=64):
+    if As.is_complex():
+        Bs = Bs * 2
+
     if chunksize < 0:
         chunksize = 64
     chunksize = min(chunksize, Bs.shape[-1])
@@ -476,6 +480,7 @@ def selective_scan_easyv3(us, dts, As, Bs, Cs, Ds, delta_bias=None, delta_softpl
     B, GD, L = us.shape
     B, G, N, L = Bs.shape
     D = GD // G
+
 
     # mask triu ==============
     _arange = torch.arange(0, chunksize, dtype=torch.int8, device=Bs.device)
@@ -490,7 +495,11 @@ def selective_scan_easyv3(us, dts, As, Bs, Cs, Ds, delta_bias=None, delta_softpl
         B, H, L, N = Bs.shape
         NT = math.ceil(L / chunksize)
         to_pad = NT * chunksize - L
-        _pad = lambda x: torch.nn.functional.pad(x.view(B * H, L, -1), (0,0,0,to_pad,0,0)).view(B * H, NT, chunksize, x.shape[-1])
+        def _pad(x):
+            ret = torch.nn.functional.pad(x.view(B * H, L, -1), (0,0,0,to_pad,0,0))
+            ret = ret.view(B * H, NT, chunksize, x.shape[-1])
+            return ret
+        #_pad = lambda x: torch.nn.functional.pad(x.view(B * H, L, -1), (0,0,0,to_pad,0,0)).view(B * H, NT, chunksize, x.shape[-1])
         us, dts, Bs, Cs = _pad(us), _pad(dts), _pad(Bs), _pad(Cs)
         return us, dts, Bs, Cs
 
@@ -557,7 +566,7 @@ def selective_scan_easyv3(us, dts, As, Bs, Cs, Ds, delta_bias=None, delta_softpl
         ss_chunk_y = ss_chunk_y_dk1
 
 
-    dtype = torch.float32
+    dtype = As.dtype
     # dtype = torch.float16
     inp_dtype = us.dtype
     has_D = Ds is not None
@@ -582,12 +591,15 @@ def selective_scan_easyv3(us, dts, As, Bs, Cs, Ds, delta_bias=None, delta_softpl
     oys = oys.contiguous().view(B, G, -1, D)[:, :, :L, :].contiguous()
     hprefix = hts[:,-1,:,:].contiguous() # MND
 
+    oys = torch.where(torch.isnan(oys), torch.zeros_like(oys), oys)
+    oys = torch.where(torch.isfinite(oys), oys, torch.zeros_like(oys))
+
     if has_D:
         oys = oys + Ds.view(1, G, 1, D) * us
     oys = oys.permute(0, 1, 3, 2).contiguous().view(B, -1, L)
-    hprefix = hprefix.permute(0, 2, 1).contiguous().view(B, GD, N).float()
+    hprefix = hprefix.permute(0, 2, 1).contiguous().view(B, GD, N).real
 
-    return oys.to(inp_dtype) if not return_last_state else (oys.to(inp_dtype), hprefix)
+    return oys if not return_last_state else (oys, hprefix)
 
 
 class SelectiveScanMatrix(torch.autograd.Function):
@@ -838,7 +850,7 @@ selective_scan_easy = selective_scan_easy
 # selective_scan_easy = selective_scan_easy_fwdbwd
 selective_scan_easy = selective_scan_easyv2
 # selective_scan_easy = selective_scan_easyv2_fwdbwd
-selective_scan_easy = selective_scan_easyv3
+selective_scan_easy = selective_scan_easyv3 #selective_scan_easyv3
 
 # api to fit original mamba_ssm
 def build_api_selective_scan(chunksize=64):
@@ -875,17 +887,17 @@ def selective_scan_ref(u, delta, A, B, C, D=None, z=None, delta_bias=None, delta
     batch, dim, dstate = u.shape[0], A.shape[0], A.shape[1]
     is_variable_B = B.dim() >= 3
     is_variable_C = C.dim() >= 3
-    if A.is_complex():
-        if is_variable_B:
-            B = torch.view_as_complex(rearrange(B.float(), "... (L two) -> ... L two", two=2))
-        if is_variable_C:
-            C = torch.view_as_complex(rearrange(C.float(), "... (L two) -> ... L two", two=2))
-    else:
-        B = B.float()
-        C = C.float()
+    # if A.is_complex():
+    #     if is_variable_B:
+    #         B = torch.view_as_complex(rearrange(B.float(), "... (L two) -> ... L two", two=2))
+    #     if is_variable_C:
+    #         C = torch.view_as_complex(rearrange(C.float(), "... (L two) -> ... L two", two=2))
+    # else:
+    #     B = B.float()
+    #     C = C.float()
     x = A.new_zeros((batch, dim, dstate))
     ys = []
-    fdeltaA = torch.exp(torch.einsum('bdl,dn->bdln', delta, A))
+    deltaA = torch.exp(torch.einsum('bdl,dn->bdln', delta, A))
     if not is_variable_B:
         deltaB_u = torch.einsum('bdl,dn,bdl->bdln', delta, B, u)
     else:
@@ -920,10 +932,10 @@ def selective_scan_ref(u, delta, A, B, C, D=None, z=None, delta_bias=None, delta
 
 
 # @pytest.mark.parametrize('wtype', [torch.float32, torch.complex64])
-@pytest.mark.parametrize('wtype', [torch.float32])
+@pytest.mark.parametrize('wtype', [torch.complex64])
 # @pytest.mark.parametrize('itype', [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize('itype', [torch.float32])
-@pytest.mark.parametrize('seqlen', [64, 128, 256, 512, 1024, 2048, 4096])
+@pytest.mark.parametrize('seqlen', [160, 128, 256, 512, 1024, 2048, 4096])
 @pytest.mark.parametrize("return_last_state", [True])
 @pytest.mark.parametrize('has_delta_bias', [False, True])
 # @pytest.mark.parametrize('has_delta_bias', [True])
@@ -933,18 +945,18 @@ def selective_scan_ref(u, delta, A, B, C, D=None, z=None, delta_bias=None, delta
 @pytest.mark.parametrize('has_D', [False, True])
 # @pytest.mark.parametrize('has_D', [True])
 # @pytest.mark.parametrize("varBC_groups", [1, 2])
-@pytest.mark.parametrize("varBC_groups", [2])
+@pytest.mark.parametrize("varBC_groups", [128])
 @pytest.mark.parametrize("is_variable_C", [True])
 @pytest.mark.parametrize("is_variable_B", [True])
 @pytest.mark.parametrize("chunksize", [64])
 # @pytest.mark.parametrize("chunksize", [32])
-def itest_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D, has_z, has_delta_bias,
+def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D, has_z, has_delta_bias,
                         delta_softplus, return_last_state, seqlen, itype, wtype, chunksize):
     selective_scan_fn = build_api_selective_scan(chunksize=chunksize)
 
     if varBC_groups > 1 and (not is_variable_B or not is_variable_C):
         pytest.skip()  # This config is not applicable
-    device = 'cuda'
+    device = 'cpu'
     rtol, atol = (6e-4, 2e-3) if itype == torch.float32 else (3e-3, 5e-3)
     if itype == torch.bfloat16:
         rtol, atol = 3e-2, 5e-2
@@ -954,10 +966,9 @@ def itest_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D, has_
         atolw = max(atolw, atol)
     # set seed
     torch.random.manual_seed(0)
-    batch_size = 2
-    dim = 18
-    dstate = 8
-    dstate = 1
+    batch_size = 32
+    dim = 128
+    dstate = 16
     is_complex = wtype == torch.complex64
     A = (-0.5 * torch.rand(dim, dstate, device=device, dtype=wtype)).requires_grad_()
     if not is_variable_B:
@@ -988,6 +999,16 @@ def itest_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D, has_
         delta_bias = (0.5 * torch.rand(dim, device=device, dtype=torch.float32)).requires_grad_()
     else:
         delta_bias = None
+
+    if A.is_complex():
+        if is_variable_B:
+            B = torch.view_as_complex(rearrange(B.float(), "... (L two) -> ... L two", two=2))
+        if is_variable_C:
+            C = torch.view_as_complex(rearrange(C.float(), "... (L two) -> ... L two", two=2))
+
+    B = B.detach().clone().requires_grad_()
+    C = C.detach().clone().requires_grad_()
+
     u = torch.randn(batch_size, dim, seqlen, device=device, dtype=itype, requires_grad=True)
     delta = (0.5 * torch.rand(batch_size, dim, seqlen, device=device, dtype=itype)).requires_grad_()
     A_ref = A.detach().clone().requires_grad_()
@@ -998,6 +1019,13 @@ def itest_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D, has_
     u_ref = u.detach().clone().requires_grad_()
     delta_ref = delta.detach().clone().requires_grad_()
     delta_bias_ref = delta_bias.detach().clone().requires_grad_() if delta_bias is not None else None
+
+    out_ref, *rest = selective_scan_ref(
+        u_ref, delta_ref, A_ref, B_ref, C_ref, D_ref, z=z_ref,
+        delta_bias=delta_bias_ref, delta_softplus=delta_softplus,
+        return_last_state=return_last_state
+    )
+
     out, *rest = selective_scan_fn(
         u, delta, A, B, C, D, z=z,
         delta_bias=delta_bias, delta_softplus=delta_softplus,
@@ -1005,11 +1033,7 @@ def itest_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D, has_
     )
     if return_last_state:
         state = rest[0]
-    out_ref, *rest = selective_scan_ref(
-        u_ref, delta_ref, A_ref, B_ref, C_ref, D_ref, z=z_ref,
-        delta_bias=delta_bias_ref, delta_softplus=delta_softplus,
-        return_last_state=return_last_state
-    )
+
     if return_last_state:
         state_ref = rest[0]
     # dA = torch.exp(torch.einsum('bdl,dn->bdln', delta, A))
@@ -1017,14 +1041,15 @@ def itest_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D, has_
 
     print(f'Output max diff: {(out - out_ref).abs().max().item()}')
     print(f'Output mean diff: {(out - out_ref).abs().mean().item()}')
-    assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
-    if return_last_state:
-        print(f'State max diff: {(state - state_ref).abs().max().item()}')
-        assert torch.allclose(state, state_ref, rtol=rtol, atol=atol)
 
     g = torch.randn_like(out)
     out_ref.backward(g)
     out.backward(g)
+
+    assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
+    if return_last_state:
+        print(f'State max diff: {(state - state_ref).abs().max().item()}')
+        assert torch.allclose(state, state_ref, rtol=rtol, atol=atol)
 
     print(f'du max diff: {(u.grad - u_ref.grad).abs().max().item()}')
     print(f'ddelta max diff: {(delta.grad - delta_ref.grad).abs().max().item()}')

@@ -7,9 +7,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
+
 from simple_mamba.pscan import pscan
 from s4 import SSMKernelDiag, FFTConv
-
+from test_selective_scan_easy import selective_scan_easyv3, selective_scan_easyv2
+from test_selective_scan import selective_scan_easy
 """
 
 This file closely follows the mamba_simple.py from the official Mamba implementation, and the mamba-minimal by @johnma2006.
@@ -446,7 +448,7 @@ class MambaBlock(nn.Module):
 
         elif self.config.ssm_type == "S6-Real":
             A = -torch.exp(self.A_log.float())  # (ED, N)
-            D = self.D.float()
+            D = self.D
             #  TODO remove .float()
 
             deltaBC = self.x_proj(x)  #  (B, L, dt_rank+2*N)
@@ -467,6 +469,10 @@ class MambaBlock(nn.Module):
                 # delta = torch.zeros(delta.shape) + torch.exp(self.inv_dt)
                 delta_new = torch.exp(self.inv_dt)
                 delta = torch.zeros([B.shape[0], B.shape[1], A.shape[0]], device=A.device) + delta_new  #  (B, L, ED)
+
+            if self.config.channel_sharing:
+                B = B.unsqueeze(2)
+                C = C.unsqueeze(2)
 
 
             if self.config.pscan:
@@ -503,18 +509,21 @@ class MambaBlock(nn.Module):
             if self.config.dt_is_selective == "True":
                 delta = F.softplus(self.dt_proj(delta))  #  (B, L, ED)
             elif self.config.dt_is_selective == "False":
-                #delta = torch.zeros(delta.shape) + torch.exp(self.inv_dt)
                 delta_new = torch.exp(self.inv_dt)
                 delta = torch.zeros([B.shape[0], B.shape[1], A.shape[0]], device=A.device) + delta_new #  (B, L, ED)
             else:
                 raise NotImplementedError
+
+            if self.config.channel_sharing:
+                B = B.unsqueeze(2)
+                C = C.unsqueeze(2)
 
             if self.config.pscan:
                 y = self.selective_scan(x, delta, A, B, C, D)
             else:
                 y = self.selective_scan_seq(x, delta, A, B, C, D)
 
-            return y.real
+            return y
         elif self.config.ssm_type == "S4D-Complex" or self.config.ssm_type == "S4D-Real":
             return self.ssm_kernel(x)[0]
         elif self.config.ssm_type == "conv":
@@ -534,41 +543,57 @@ class MambaBlock(nn.Module):
         #  D : (ED)
 
         #  y : (B, L, ED)
-        if self.config.discretizationA == "yuval_disc" and (self.config.ssm_type == "S6-Complex" or self.config.ssm_type == "S6-Real-complex-bias"):
-            deltaA = torch.exp(delta.unsqueeze(-1) * A.real + 1j * A.imag)
-        elif self.config.discretizationA == "normal":
-            deltaA = torch.exp(delta.unsqueeze(-1) * A)  #  (B, L, ED, N)
-        else:
-            print("disc",self.config.discretizationA)
-            raise NotImplementedError
+        # if self.config.discretizationA == "yuval_disc" and (self.config.ssm_type == "S6-Complex" or self.config.ssm_type == "S6-Real-complex-bias"):
+        #     deltaA = torch.exp(delta.unsqueeze(-1) * A.real + 1j * A.imag)
+        # elif self.config.discretizationA == "normal":
+        #     deltaA = torch.exp(delta.unsqueeze(-1) * A)  #  (B, L, ED, N)
+        # else:
+        #     print("disc",self.config.discretizationA)
+        #     raise NotImplementedError
+        #
+        # # if self.config.channel_sharing:
+        # #     B = B.unsqueeze(2)
+        #
+        # if self.config.discretizationB == "s6":
+        #     deltaB = delta.unsqueeze(-1) * B  #  (B, L, ED, N)
+        # elif self.config.discretizationB == "zoh":
+        #     #deltaB = B * torch.exp(delta.unsqueeze(-1) * A - 1.) / A  #  (B, L, ED, N)
+        #     deltaB = B * (torch.exp(delta.unsqueeze(-1) * A) - 1.) / A
+        #     # C = C * (torch.exp(dtA)-1.) / A
+        # else:
+        #     raise NotImplementedError
+        #
+        # BX = deltaB * (x.unsqueeze(-1))  #  (B, L, ED, N)
+        # if self.config.ssm_type == "S6-Real-complex-bias":
+        #     deltaA = deltaA.expand_as(BX)
+        # hs = pscan(deltaA, BX)
+        #
+        # # if self.config.channel_sharing:
+        # #     C = C.unsqueeze(2)
+        # y = (hs * C).sum(dim=3)  #  (B, L, ED, N) @ (B, L, N, 1) -> (B, L, ED, 1)
+        #
+        # if self.config.ssm_type == "S6-Real-complex-bias" or "S6-Complex":
+        #     y = y * 2
+        # # if self.config.ssm_type != "S6-Real-complex-bias":
+        # #     y = y + D * x
+        #
+        # y = y + D.unsqueeze(0).unsqueeze(0)*x
+        delta = delta.broadcast_to(x.shape)
 
-        if self.config.channel_sharing:
-            B = B.unsqueeze(2)
-
-        if self.config.discretizationB == "s6":
-            deltaB = delta.unsqueeze(-1) * B  #  (B, L, ED, N)
-        elif self.config.discretizationB == "zoh":
-            #deltaB = B * torch.exp(delta.unsqueeze(-1) * A - 1.) / A  #  (B, L, ED, N)
-            deltaB = B * (torch.exp(delta.unsqueeze(-1) * A) - 1.) / A
-            # C = C * (torch.exp(dtA)-1.) / A
-        else:
-            raise NotImplementedError
-
-        BX = deltaB * (x.unsqueeze(-1))  #  (B, L, ED, N)
-        if self.config.ssm_type == "S6-Real-complex-bias":
-            deltaA = deltaA.expand_as(BX)
-        hs = pscan(deltaA, BX)
-
-        if self.config.channel_sharing:
-            C = C.unsqueeze(2)
-        y = (hs * C).sum(dim=3)  #  (B, L, ED, N) @ (B, L, N, 1) -> (B, L, ED, 1)
-
-        if self.config.ssm_type == "S6-Real-complex-bias":
-            y = y * 2
-        # if self.config.ssm_type != "S6-Real-complex-bias":
-        #     y = y + D * x
-
-        y = y + D.unsqueeze(0).unsqueeze(0)*x
+        x = x.transpose(1, 2).contiguous()
+        delta = delta.transpose(1, 2).contiguous()
+        B = B.permute([0, 2, 3, 1]).contiguous()
+        C = C.permute([0, 2, 3, 1]).contiguous()
+        y = selective_scan_easyv3(
+            dts=delta,
+            us=x,
+            Bs=B,
+            As=A,
+            Cs=C,
+            Ds=D,
+            chunksize=16
+        )
+        y = y.transpose(1, 2).real
 
         return y
 
@@ -595,8 +620,8 @@ class MambaBlock(nn.Module):
         else:
             raise NotImplementedError
 
-        if self.config.channel_sharing:
-            B = B.unsqueeze(2)
+        # if self.config.channel_sharing:
+        #     B = B.unsqueeze(2)
 
         if self.config.discretizationB == "s6":
             deltaB = delta.unsqueeze(-1) * B  #  (B, L, ED, N)
@@ -625,14 +650,14 @@ class MambaBlock(nn.Module):
         if not self.config.channel_sharing :
             y = (hs * C).sum(dim=3)
         else:
-            y = (hs @ C.unsqueeze(-1)).squeeze(3)  #  (B, L, ED, N) @ (B, L, N, 1) -> (B, L, ED, 1)
+            y = (hs * C).sum(dim=3) #(hs @ C.unsqueeze(-1)).squeeze(3)  #  (B, L, ED, N) @ (B, L, N, 1) -> (B, L, ED, 1)
 
-        if self.config.ssm_type == "S6-Real-complex-bias":
+        if (self.config.ssm_type == "S6-Real-complex-bias") or (self.config.ssm_type =="S6-Complex"):
             y = y * 2
 
         y = y + D.unsqueeze(0).unsqueeze(0) * x
 
-        return y
+        return y.real
 
     #  -------------------------- inference -------------------------- #
     """

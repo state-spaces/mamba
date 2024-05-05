@@ -212,7 +212,7 @@ def experiments(kwargs):
         # Yield a dictionary mapping argument names to values
         yield dict(zip(arg_names, values))
 
-@ray.remote(num_gpus=0.25)# if torch.cuda.is_available() else 0)
+@ray.remote(num_gpus=0.5)# if torch.cuda.is_available() else 0)
 def run_experiment(config, progress_bar_actor):
     try:
         exp_name = name(config)
@@ -325,11 +325,11 @@ def main():
         ["initA_real", [None, ]],
         ["param_A_imag", [None, ]],
         ["A_imag_using_weight_decay", [None, ]],
-        ["dt_is_selective", ["True", "False"]],
+        ["dt_is_selective", ["False"]],
         ["channel_sharing", [True, False]],
         ["bias", [True]],
         ["deterministic", [False]],
-        ["pscan", [False]],
+        ["pscan", [True]],
     ]
 
     settings_options_s6_complex = [
@@ -349,11 +349,11 @@ def main():
         ["param_A_imag", ["normal", ]],
         ["A_imag_using_weight_decay", ["True", ]],
         ["deterministic", [False]],
-        ["pscan", [False]],
+        ["pscan", [True]],
         ["bias", [True]],
         ["initA_imag", ["S4",]],
         ["initA_real", ["S4",]],
-        ["dt_is_selective", ["True", "False"]],
+        ["dt_is_selective", ["False"]],
         ["discretizationB", ["s6"]],
         ["d_state", [8]],
         ["channel_sharing", [True, False]],

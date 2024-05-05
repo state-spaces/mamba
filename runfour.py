@@ -218,7 +218,7 @@ def run_experiment(config, progress_bar_actor):
         exp_name = name(config)
 
         wandb.init(
-            project="CheckIfSeqIsGood",
+            project="S4VSS6Long",
             entity="yuv-milo",
             name=exp_name,
             config=config
@@ -273,19 +273,14 @@ def main():
     n_categories = 16
 
     # Check where S4-Complex Fails
-    lags = [20,]
-    extras = [10,]
-    epochs = 100
-
-    # # Check equal
-    # lags = [128]
-    # extras = [32]
-    # epoch = 200
+    lags = [128, 256, 512]
+    extras = [64, 128, 256]
+    epochs = 20000
 
 
-    settings_options_s4_complex = [
-        ["seed", [2]],
-        ["ssm_type", ["S4D-Complex"]],
+    settings_options_s4 = [
+        ["seed", [2,3]],
+        ["ssm_type", ["S4D-Complex", "S4D-Real"]],
         ["discretizationA", ["default"]],
         ["discretizationB", ["default"]],
         ["d_model", [64]],
@@ -301,55 +296,19 @@ def main():
         ["stop_on_loss", [0.01]],
         ["initA_imag", [None, ]],
         ["initA_real", [None, ]],
-        ["param_A_imag", ["normal", ]],
+        ["param_A_imag", [None, ]],
         ["A_imag_using_weight_decay", [None, ]],
         ["dt_is_selective", [None, ]],
-        ["channel_sharing", [False]],
-        ["bias", [False]],
+        ["channel_sharing", [True, False]],
+        ["bias", [True]],
         ["deterministic", [False]],
-        ["pscan", [False]]
+        ["pscan", [False]],
     ]
-
-    settings_options_s6complex = [
-        ["seed", [2]],
-        ["ssm_type", ["S6-Real", "S6-Complex"]],
-        ["d_model", [64]],
-        ["d_state", [8]],
-        ["lag", lags],
-        ["extra", extras],
-        ["n_layers", [2]],
-        ["n_categories", [n_categories]],
-        ["batch_size", [batch_size]],
-        ["epochs", [epochs]],  # [int(1600 * 6]],
-        ["epoch_size", [128 * 4]],
-        ["stop_on_loss", [0.01]],
-        ["lr", [1e-3]],
-        ["A_imag_using_weight_decay", ["True"]],
-        ["initA_imag", ["S4"]],
-        ["param_A_imag", ["normal",]],
-        ["discretizationB", ["zoh"]],
-        ["discretizationA", ["normal"]],
-        ["initA_real", ["S6"]],
-        ["dt_is_selective", ["True","False"]],
-        ["channel_sharing", [False]],
-        ["bias", [False]],
-        ["deterministic", [True]],
-        ["pscan", [False, True]]
-    ]
-
     tasks = []
-    # for i, config in enumerate(experiments(settings_options_real)):
-    #     print(i)
-    #     config.update({"comment": "comment in no re_init dt bias"})
-    #     tasks.append(run_experiment.remote(Config(**config), progress_bar_actor))
-    for i, config in enumerate(experiments(settings_options_s6complex)):
+    for i, config in enumerate(experiments(settings_options_s4)):
         print(i)
         config.update({"comment": "comment in no re_init dt bias"})
         tasks.append(run_experiment.remote(Config(**config), progress_bar_actor))
-    # for i, config in enumerate(experiments(settings_options_s4_complex)):
-    #     print(i)
-    #     config.update({"comment": "comment in no re_init dt bias"})
-    #     tasks.append(run_experiment.remote(Config(**config), progress_bar_actor))
     pb.set_total(len(tasks))
     pb.print_until_done()
     print("finished running all")
