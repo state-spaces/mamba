@@ -39,7 +39,7 @@ class MambaConfig:
     initA_imag: str
     initA_real: str
     param_A_imag: str
-    dt_is_selective: str
+    dt_is_selective: bool
     channel_sharing: str
     deterministic: bool
     pscan: bool
@@ -60,6 +60,7 @@ class MambaConfig:
 
     bias: bool = False
     conv_bias: bool = True#  use parallel scan mode or sequential mode when training
+    use_cuda: bool = False
 
     def __post_init__(self):
         self.d_inner = self.expand_factor * self.d_model  # E*D = ED in comments
@@ -171,7 +172,7 @@ class MambaBlock(nn.Module):
             #  projects Δ from dt_rank to d_inner
             self.dt_proj = nn.Linear(config.dt_rank, config.d_inner, bias=True)
 
-            if config.dt_is_selective == "True":
+            if config.dt_is_selective:
                 self.dt_proj = nn.Linear(config.dt_rank, config.d_inner, bias=True, dtype=torch.float)
 
                 #  dt initialization
@@ -194,12 +195,10 @@ class MambaBlock(nn.Module):
                 with torch.no_grad():
                     self.dt_proj.bias.copy_(inv_dt)
                 self.dt_proj.bias._no_reinit = True  # initialization would set all Linear.bias to zero, need to mark this one as _no_reinit
-            elif config.dt_is_selective == "False":
+            else:
                 inv_dt = torch.rand(config.d_inner) * (math.log(config.dt_max) - math.log(config.dt_min)) + math.log(
                         config.dt_min)
                 self.inv_dt = nn.Parameter(inv_dt)
-            else:
-                raise NotImplementedError
 
             # S4D real initialization
             A = torch.arange(1, config.d_state + 1, dtype=torch.float32).repeat(config.d_inner, 1)
@@ -274,7 +273,7 @@ class MambaBlock(nn.Module):
             # self.x_proj.weight.imag.data.zero_()
 
             #  projects Δ from dt_rank to d_inner
-            if config.dt_is_selective == "True":
+            if config.dt_is_selective:
                 self.dt_proj = nn.Linear(config.dt_rank, config.d_inner, bias=True, dtype=torch.float)
 
                 #  dt initialization
@@ -297,12 +296,10 @@ class MambaBlock(nn.Module):
                 with torch.no_grad():
                     self.dt_proj.bias.copy_(inv_dt)
                 self.dt_proj.bias._no_reinit = True  # initialization would set all Linear.bias to zero, need to mark this one as _no_reinit
-            elif config.dt_is_selective == "False":
+            else:
                 inv_dt = torch.rand(config.d_inner) * (math.log(config.dt_max) - math.log(config.dt_min)) + math.log(
                         config.dt_min)
                 self.inv_dt = nn.Parameter(inv_dt)
-            else:
-                raise NotImplementedError
 
 
             if config.initA_real == "S4":
@@ -383,6 +380,15 @@ class MambaBlock(nn.Module):
             print("type", config.ssm_type)
             raise NotImplementedError
 
+        if self.config.use_cuda:
+            try:
+                from mamba_ssm.ops.selective_scan_interface import selective_scan_fn
+                self.selective_scan_cuda = selective_scan_fn
+            except ImportError:
+                print("Failed to import mamba_ssm. Falling back to mamba.py.")
+                raise NotImplementedError
+                # self.config.use_cuda = False
+
     def forward(self, x):
         #  x : (B, L, D)
 
@@ -399,7 +405,11 @@ class MambaBlock(nn.Module):
         x = x.transpose(1, 2)  #  (B, L, ED)
 
         x = F.silu(x)
-        y = self.ssm(x)
+        y = self.ssm(x, z)
+
+        if self.config.use_cuda:
+            output = self.out_proj(y) # (B, L, D)
+            return output
 
         #  z branch
         z = F.silu(z)
@@ -408,7 +418,7 @@ class MambaBlock(nn.Module):
 
         return output
 
-    def ssm(self, x):
+    def ssm(self, x, z):
         #  x : (B, L, ED)
 
         #  y : (B, L, ED)
@@ -437,7 +447,6 @@ class MambaBlock(nn.Module):
 
             delta_new = torch.exp(self.inv_dt)
             delta = delta_new.unsqueeze(0).unsqueeze(0)
-
             if self.config.pscan:
                 y = self.selective_scan(x, delta, A, B, C, D)
             else:
@@ -463,22 +472,41 @@ class MambaBlock(nn.Module):
             else:
                 pass
 
-            if self.config.dt_is_selective == "True":
-                delta = F.softplus(self.dt_proj(delta))  #  (B, L, ED)
-            elif self.config.dt_is_selective == "False":
-                # delta = torch.zeros(delta.shape) + torch.exp(self.inv_dt)
-                delta_new = torch.exp(self.inv_dt)
-                delta = torch.zeros([B.shape[0], B.shape[1], A.shape[0]], device=A.device) + delta_new  #  (B, L, ED)
-
             if self.config.channel_sharing:
                 B = B.unsqueeze(2)
                 C = C.unsqueeze(2)
 
-
-            if self.config.pscan:
-                y = self.selective_scan(x, delta, A, B, C, D)
+            if self.config.dt_is_selective:
+                delta = self.dt_proj.weight @ delta.transpose(1, 2)  #  (ED, dt_rank) @ (B, L, dt_rank) -> (B, ED, L)
             else:
-                y = self.selective_scan_seq(x, delta, A, B, C, D)
+                # delta = torch.zeros(delta.shape) + torch.exp(self.inv_dt)
+                delta_new = torch.exp(self.inv_dt)
+                delta = torch.zeros([B.shape[0], B.shape[1], A.shape[0]],
+                                    device=A.device) + delta_new  #  (B, L, ED)
+
+            if self.config.use_cuda:
+                # these are unfortunately needed for the selective_scan_cuda function
+                x = x.transpose(1, 2)
+                B = B.transpose(1, 2)
+                C = C.transpose(1, 2)
+                z = z.transpose(1, 2)
+                if self.config.dt_is_selective:
+                    # "softplus" + "bias" + "y * silu(z)" operations are fused
+                    y = self.selective_scan_cuda(x, delta, A, B, C, D, z=z, delta_softplus=True,
+                                                delta_bias=self.dt_proj.bias.float())
+                else:
+                    y = self.selective_scan_cuda(x, delta, A, B, C, D, z=z, delta_softplus=False,
+                                                 delta_bias=None)
+                y = y.transpose(1, 2)  # (B, L, ED)
+
+            else:
+                if self.config.dt_is_selective:
+                    delta = delta.transpose(1, 2)
+                    delta = F.softplus(delta + self.dt_proj.bias)
+                if self.config.pscan:
+                    y = self.selective_scan(x, delta, A, B, C, D)
+                else:
+                    y = self.selective_scan_seq(x, delta, A, B, C, D)
 
             return y
 
@@ -506,24 +534,45 @@ class MambaBlock(nn.Module):
                 B = B.reshape(b, l, ed, self.config.d_state)
                 C = C.reshape(b, l, ed, self.config.d_state)
 
-            if self.config.dt_is_selective == "True":
-                delta = F.softplus(self.dt_proj(delta))  #  (B, L, ED)
-            elif self.config.dt_is_selective == "False":
-                delta_new = torch.exp(self.inv_dt)
-                delta = torch.zeros([B.shape[0], B.shape[1], A.shape[0]], device=A.device) + delta_new #  (B, L, ED)
-            else:
-                raise NotImplementedError
-
             if self.config.channel_sharing:
                 B = B.unsqueeze(2)
                 C = C.unsqueeze(2)
 
-            if self.config.pscan:
-                y = self.selective_scan(x, delta, A, B, C, D)
+            if self.config.dt_is_selective:
+                delta = self.dt_proj.weight @ delta.transpose(1, 2)  #  (ED, dt_rank) @ (B, L, dt_rank) -> (B, ED, L)
             else:
-                y = self.selective_scan_seq(x, delta, A, B, C, D)
+                # delta = torch.zeros(delta.shape) + torch.exp(self.inv_dt)
+                delta_new = torch.exp(self.inv_dt)
+                delta = torch.zeros([B.shape[0], B.shape[1], A.shape[0]],
+                                    device=A.device) + delta_new  #  (B, L, ED)            BC_complex = self.x_proj_complex(x)
+
+            if self.config.use_cuda:
+                # these are unfortunately needed for the selective_scan_cuda function
+                x = x.transpose(1, 2)
+                B = B.transpose(1, 2)
+                C = C.transpose(1, 2)
+                z = z.transpose(1, 2)
+                if self.config.dt_is_selective:
+                    # "softplus" + "bias" + "y * silu(z)" operations are fused
+                    y = self.selective_scan_cuda(x, delta, A, B, C, D, z=z, delta_softplus=True,
+                                                 delta_bias=self.dt_proj.bias.float())
+                else:
+                    y = self.selective_scan_cuda(x, delta, A, B, C, D, z=z, delta_softplus=False,
+                                                 delta_bias=None)
+                y = y.transpose(1, 2)  # (B, L, ED)
+
+
+            else:
+                if self.config.dt_is_selective:
+                    delta = delta.transpose(1, 2)
+                    delta = F.softplus(delta + self.dt_proj.bias)
+                if self.config.pscan:
+                    y = self.selective_scan(x, delta, A, B, C, D)
+                else:
+                    y = self.selective_scan_seq(x, delta, A, B, C, D)
 
             return y
+
         elif self.config.ssm_type == "S4D-Complex" or self.config.ssm_type == "S4D-Real":
             return self.ssm_kernel(x)[0]
         elif self.config.ssm_type == "conv":
