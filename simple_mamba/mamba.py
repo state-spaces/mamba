@@ -502,8 +502,8 @@ class MambaBlock(nn.Module):
                 y = y.transpose(1, 2)  # (B, L, ED)
 
             else:
+                delta = delta.transpose(1, 2)
                 if self.config.dt_is_selective:
-                    delta = delta.transpose(1, 2)
                     delta = F.softplus(delta + self.dt_proj.bias)
                 if self.config.pscan:
                     y = self.selective_scan(x, delta, A, B, C, D)
@@ -568,8 +568,8 @@ class MambaBlock(nn.Module):
 
 
             else:
+                delta = delta.transpose(1, 2)
                 if self.config.dt_is_selective:
-                    delta = delta.transpose(1, 2)
                     delta = F.softplus(delta + self.dt_proj.bias)
                 if self.config.pscan:
                     y = self.selective_scan(x, delta, A, B, C, D)

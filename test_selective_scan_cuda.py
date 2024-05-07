@@ -65,7 +65,7 @@ class TestMambaModels(unittest.TestCase):
             deterministic=config.deterministic,
             bias=config.bias,
             pscan=config.pscan)
-        self.mamba_config_cuda = self.mamba_config = mamba.MambaConfig(
+        self.mamba_config_cuda = mamba.MambaConfig(
             ssm_type=config.ssm_type,
             discretizationA=config.discretizationA,
             discretizationB=config.discretizationB,
