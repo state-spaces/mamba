@@ -31,14 +31,14 @@ settings_options_s6complex = [
     ["A_imag_using_weight_decay", ["True"]],
     ["initA_imag", ["S4"]],
     ["param_A_imag", ["normal",]],
-    ["discretizationB", ["zoh"]],
+    ["discretizationB", ["s6"]],
     ["discretizationA", ["normal"]],
     ["initA_real", ["S6"]],
     ["dt_is_selective", [True, False]],
     ["channel_sharing", [True]],
     ["bias", [False]],
     ["deterministic", [True]],
-    ["pscan", [False, True]],
+    ["pscan", [True, False]],
     ["comment", [""]]
 ]
 
