@@ -472,7 +472,7 @@ class MambaBlock(nn.Module):
             else:
                 pass
 
-            if self.config.channel_sharing:
+            if self.config.channel_sharing and not self.config.use_cuda:
                 B = B.unsqueeze(2)
                 C = C.unsqueeze(2)
 
@@ -483,6 +483,8 @@ class MambaBlock(nn.Module):
                 delta_new = torch.exp(self.inv_dt)
                 delta = torch.zeros([B.shape[0], B.shape[1], A.shape[0]],
                                     device=A.device) + delta_new  #  (B, L, ED)
+                delta = delta.transpose(1, 2)
+
 
             if self.config.use_cuda:
                 # these are unfortunately needed for the selective_scan_cuda function
@@ -511,6 +513,7 @@ class MambaBlock(nn.Module):
             return y
 
         elif self.config.ssm_type == "S6-Complex":
+            b, l, ed = x.shape
             A = -torch.exp(self.log_A_real) + 1j * self.A_imag  # (ED, N)
             D = self.D
 
@@ -530,11 +533,10 @@ class MambaBlock(nn.Module):
             B = B_real + 1j * B_imag
             C = C_real - 1j * C_imag
             if not self.config.channel_sharing:
-                b, l, ed = x.shape
                 B = B.reshape(b, l, ed, self.config.d_state)
                 C = C.reshape(b, l, ed, self.config.d_state)
 
-            if self.config.channel_sharing:
+            if self.config.channel_sharing and not self.config.use_cuda:
                 B = B.unsqueeze(2)
                 C = C.unsqueeze(2)
 
@@ -544,13 +546,16 @@ class MambaBlock(nn.Module):
                 # delta = torch.zeros(delta.shape) + torch.exp(self.inv_dt)
                 delta_new = torch.exp(self.inv_dt)
                 delta = torch.zeros([B.shape[0], B.shape[1], A.shape[0]],
-                                    device=A.device) + delta_new  #  (B, L, ED)            BC_complex = self.x_proj_complex(x)
+                                    device=A.device) + delta_new  #  (B, L, ED)
+                delta = delta.transpose(1, 2)
 
             if self.config.use_cuda:
                 # these are unfortunately needed for the selective_scan_cuda function
                 x = x.transpose(1, 2)
                 B = B.transpose(1, 2)
+                B = torch.view_as_real(B).reshape(b, self.config.d_state, l*2)
                 C = C.transpose(1, 2)
+                C = torch.view_as_real(C).reshape(b, self.config.d_state, l*2)
                 z = z.transpose(1, 2)
                 if self.config.dt_is_selective:
                     # "softplus" + "bias" + "y * silu(z)" operations are fused

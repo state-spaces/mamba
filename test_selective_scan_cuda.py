@@ -14,35 +14,6 @@ lags = [20, ]
 extras = [10, ]
 epochs = 100
 
-# Example configurations
-settings_options_s4_complex = [
-    ["seed", [2]],
-    ["ssm_type", ["S4D-Complex"]],
-    ["discretizationA", ["default"]],
-    ["discretizationB", ["default"]],
-    ["d_model", [64]],
-    ["d_state", [16]],
-    ["lag", lags],
-    ["extra", extras],
-    ["n_layers", [2]],
-    ["n_categories", [n_categories]],
-    ["batch_size", [batch_size]],
-    ["epochs", [epochs]],  # [int(1600 * 6]],
-    ["epoch_size", [128 * 4]],
-    ["lr", [1e-3]],
-    ["stop_on_loss", [0.01]],
-    ["initA_imag", [None, ]],
-    ["initA_real", [None, ]],
-    ["param_A_imag", ["normal", ]],
-    ["A_imag_using_weight_decay", [None, ]],
-    ["dt_is_selective", [None, ]],
-    ["channel_sharing", [False]],
-    ["bias", [False]],
-    ["deterministic", [True]],
-    ["pscan", [False]],
-    ["comment", [""]]
-]
-
 settings_options_s6complex = [
     ["seed", [2]],
     ["ssm_type", ["S6-Real", "S6-Complex"]],
@@ -64,14 +35,14 @@ settings_options_s6complex = [
     ["discretizationA", ["normal"]],
     ["initA_real", ["S6"]],
     ["dt_is_selective", [True, False]],
-    ["channel_sharing", [False]],
+    ["channel_sharing", [True]],
     ["bias", [False]],
     ["deterministic", [True]],
     ["pscan", [False, True]],
     ["comment", [""]]
 ]
 
-configs = list(experiments(settings_options_s6complex)) + list(experiments(settings_options_s4_complex))
+configs = list(experiments(settings_options_s6complex))
 configs = [Config(**config) for config in configs]
 
 
