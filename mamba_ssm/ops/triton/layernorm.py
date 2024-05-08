@@ -48,10 +48,21 @@ def rms_norm_ref(x, weight, bias, residual=None, eps=1e-6, prenorm=False, upcast
     return out if not prenorm else (out, x)
 
 def config_prune(configs):
+
+    if torch.version.hip:
+        gcn_arch_name = torch.cuda.get_device_properties(0).gcnArchName
+        if "gfx10" in gcn_arch_name or "gfx11" in gcn_arch_name:
+            # radeon
+            warp_size = 32
+        else:
+            # instinct
+            warp_size = 64
+    else:
+        # cuda 
+        warp_size = 32    
+
     block_sz = 1024
-    # warp size is 64 in amd arch
-    warp_sz = 64 if torch.version.hip else 32
-    max_num_warps = block_sz // warp_sz
+    max_num_warps = block_sz // warp_size
     pruned_configs = [config for config in configs if config.num_warps <= max_num_warps]
     return pruned_configs
 
@@ -64,8 +75,10 @@ configs_autotune = [
         triton.Config({}, num_warps=32),
         ]
 
+pruned_configs_autotune = config_prune(configs_autotune)
+
 @triton.autotune(
-    configs = config_prune(configs_autotune),
+    configs = pruned_configs_autotune,
     key=["N", "HAS_RESIDUAL", "STORE_RESIDUAL_OUT", "IS_RMS_NORM", "HAS_BIAS"],
 )
 # @triton.heuristics({"HAS_BIAS": lambda args: args["B"] is not None})
@@ -187,7 +200,7 @@ def _layer_norm_fwd(
 
 
 @triton.autotune(
-    configs=config_prune(configs_autotune),
+    configs=pruned_configs_autotune,
     key=["N", "HAS_DRESIDUAL", "STORE_DRESIDUAL", "IS_RMS_NORM", "HAS_BIAS"],
 )
 # @triton.heuristics({"HAS_BIAS": lambda args: args["B"] is not None})
