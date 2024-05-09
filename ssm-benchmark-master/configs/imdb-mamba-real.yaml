@@ -1,0 +1,29 @@
+seed: 1919
+wandb:
+   key: "6cc796c94f54384cae3e0ca45ff07388a3d15b08"
+   entity: "complex-team"
+   project: "LRA"
+dataset:
+  name: "IMDB"
+  _name_: "imdb"
+train:
+  num_epochs: 100
+  batch_size: 16
+  lr: 0.0005
+  wd: 0.01
+model:
+  layer: "mamba"
+  num_blocks: 6
+  input_dim: 1
+  output_dim: 2
+  hidden_dim: 64
+  state_dim: 64
+  conv_dim: 4
+  expansion: 2.5
+  dropout: 0.0
+  glu: True
+  norm: "layer"
+  dual: False
+  prenorm: True
+  pooling: "mean"
+  ssm_type: "S6-Real"

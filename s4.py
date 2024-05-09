@@ -1020,8 +1020,8 @@ class SSMKernelDiag(SSMKernel):
         **kwargs,
     ):
         # Special case: for real-valued, d_state semantics change
-        # if is_real and 'd_state' in kwargs:
-        #     kwargs['d_state'] = kwargs['d_state'] * 2
+        if is_real and 'd_state' in kwargs:
+            kwargs['d_state'] = kwargs['d_state'] * 2
         super().__init__(**kwargs)
         self.disc = disc
         self.dt_fast = dt_fast

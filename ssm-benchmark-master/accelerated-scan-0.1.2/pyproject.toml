@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "accelerated-scan"
+dynamic = ["version"]
+dependencies = [
+  "torch>=2.0.0"
+]
+authors = [
+  { name="Volodymyr Kyrylov", email="vol@wilab.org.ua" },
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+requires-python = ">= 3.8"
+license = {file = "LICENSE"}
+readme = "README.md"
+
+[tool.hatch.version]
+path = "accelerated_scan/__init__.py"

@@ -1,0 +1,27 @@
+seed: 1919
+# wandb:
+#   key: ""
+#   entity: ""
+#   project: ""
+dataset:
+  name: "IMDB"
+  _name_: "imdb"
+  fixed_size: True
+train:
+  num_epochs: 100
+  batch_size: 32
+  lr: 0.0001
+  wd: 0.01
+model:
+  layer: "hawk"
+  num_blocks: 6
+  input_dim: 1
+  output_dim: 2
+  hidden_dim: 64
+  kernel_size: 4
+  expansion: 2
+  gmlp_expansion: 2
+  dropout: 0.0
+  init: "exp"
+  dual: False
+  pooling: "mean"

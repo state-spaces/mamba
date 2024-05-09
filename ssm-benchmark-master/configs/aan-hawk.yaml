@@ -1,0 +1,28 @@
+seed: 1919
+# wandb:
+#   key: ""
+#   entity: ""
+#   project: ""
+dataset:
+  name: "AAN"
+  _name_: "aan"
+  fixed_size: True
+  n_workers: 8
+train:
+  num_epochs: 30
+  batch_size: 16
+  lr: 0.0001
+  wd: 0.01
+model:
+  layer: "hawk"
+  num_blocks: 6
+  input_dim: 1
+  output_dim: 2
+  hidden_dim: 256
+  kernel_size: 4
+  expansion: 1
+  gmlp_expansion: 1
+  dropout: 0.0
+  init: "exp"
+  dual: True
+  pooling: "mean"

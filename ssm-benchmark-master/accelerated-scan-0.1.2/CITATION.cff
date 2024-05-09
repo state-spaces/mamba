@@ -1,0 +1,10 @@
+cff-version: 1.1.0
+message: "If you use Accelerated Scan, please cite it as below."
+authors:
+- family-names: Kyrylov
+  given-names: Volodymyr
+orcid: https://orcid.org/0000-0001-7462-9918
+title: Accelerated Scan
+doi: 10.5281/zenodo.10600962
+version: 0.1.2
+date-released: 2024-01-31

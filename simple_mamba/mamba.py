@@ -34,22 +34,23 @@ See Figure 3 of the paper (page 8) for a visual representation of a MambaBlock.
 
 @dataclass
 class MambaConfig:
-    discretizationA: str
-    discretizationB: str
-    initA_imag: str
-    initA_real: str
-    param_A_imag: str
-    dt_is_selective: bool
-    channel_sharing: str
-    deterministic: bool
-    pscan: bool
     ssm_type: str
-    d_model: int  #  D
     n_layers: int
-    dt_rank: Union[int, str] = 'auto'
-    d_state: int = 16  #  N in paper/comments
-    expand_factor: int = 2  #  E in paper/comments
+    d_model: int  #  D
+    d_state: int = 16  # N in paper/comments
     d_conv: int = 4
+    expand_factor: int = 2  # E in paper/comments
+
+    dt_is_selective: bool = True
+    param_A_imag: str = "normal"
+    deterministic: bool = False
+    pscan: bool = False
+    initA_imag: str = "S4"
+    initA_real: str = "S6"
+    discretizationA: str = "normal"
+    discretizationB: str = "s6"
+    channel_sharing: bool = True
+    dt_rank: Union[int, str] = 'auto'
     A_imag_using_weight_decay: str = True
 
     dt_min: float = 0.001
@@ -59,14 +60,20 @@ class MambaConfig:
     dt_init_floor = 1e-4
 
     bias: bool = False
-    conv_bias: bool = True#  use parallel scan mode or sequential mode when training
-    use_cuda: bool = False
+    conv_bias: bool = True  #  use parallel scan mode or sequential mode when training
+    use_cuda: bool = True
 
     def __post_init__(self):
-        self.d_inner = self.expand_factor * self.d_model  # E*D = ED in comments
+        self.d_inner = int(self.expand_factor * self.d_model)  # E*D = ED in comments
 
         if self.dt_rank == 'auto':
             self.dt_rank = math.ceil(self.d_model / 16)
+
+        if self.ssm_type == "S6-Complex":
+            self.d_state = self.d_state // 2  # apples to apples comparison with S6-Real w.r.t number of parameters
+
+        if "S4" in self.ssm_type:
+            self.channel_sharing = False
 
 
 class Mamba(nn.Module):
@@ -336,12 +343,10 @@ class MambaBlock(nn.Module):
             else:
                 raise NotImplementedError
 
-            if config.A_imag_using_weight_decay == "True":
+            if config.A_imag_using_weight_decay:
                 pass
-            elif config.A_imag_using_weight_decay == "False":
-                self.A_imag._no_weight_decay = True
             else:
-                raise NotImplementedError
+                self.A_imag._no_weight_decay = True
 
             # # initialize A to be complex but with imaginary part 0
             # A = torch.arange(1, config.d_state + 1, dtype=torch.float32).repeat(config.d_inner, 1)
