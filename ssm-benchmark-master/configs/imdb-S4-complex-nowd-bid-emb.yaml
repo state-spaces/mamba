@@ -8,7 +8,7 @@ dataset:
   _name_: "imdb"
 train:
   num_epochs: 100
-  batch_size: 16
+  batch_size: 32
   lr: 0.0005
   wd: 0.0
 model:

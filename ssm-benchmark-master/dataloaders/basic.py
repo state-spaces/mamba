@@ -24,6 +24,8 @@ class MNIST(SequenceDataset):
         }
 
     def setup(self):
+        print(self.val_split)
+        raise hello
         self.data_dir = self.data_dir or default_data_path / self._name_
 
         transform_list = [
