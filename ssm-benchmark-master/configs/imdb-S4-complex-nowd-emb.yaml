@@ -26,6 +26,6 @@ model:
   dual: False
   prenorm: True
   bidirectional: False
-  embd: False
+  embd: True
   pooling: "mean"
   ssm_type: "S4D-Complex"

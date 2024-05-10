@@ -17,13 +17,16 @@ def train_mamba(seed, trainloader, testloader, wandb_config, train_config, model
         wandb.log({"params": nr_params})
     optimizer = torch.optim.AdamW(model.parameters(), lr=train_config["lr"], weight_decay=train_config["wd"])
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=train_config["num_epochs"], eta_min=5e-6)
-    running_loss = 0.0
     for epoch in range(train_config["num_epochs"]):
+        running_loss = 0.0
+        running_accuracy = 0.0
         for X, y, _ in tqdm(trainloader):
             optimizer.zero_grad()
             X = X.to(device)
             y = y.to(device)
             y_hat = model(X)
+            accuracy = (y_hat.argmax(dim=1) == y).float().sum() / len(y)
+            running_accuracy += accuracy
             loss = torch.nn.functional.cross_entropy(y_hat, y)
             running_loss += loss.item()
             loss.backward()
@@ -31,18 +34,10 @@ def train_mamba(seed, trainloader, testloader, wandb_config, train_config, model
         train_loss = running_loss / len(trainloader)
         print("Loss: {0:.3f}".format(train_loss))
         scheduler.step()
-
-        model.eval()
-        running_accuracy = 0.0
-        with torch.no_grad():
-            for X, y, _ in tqdm(trainloader):
-                X = X.to(device)
-                y = y.to(device)
-                y_hat = model(X)
-                accuracy = (y_hat.argmax(dim=1) == y).float().sum() / len(y)
-                running_accuracy += accuracy
         train_acc = running_accuracy / len(trainloader)
         print("Train accuracy: {0:.4f}".format(train_acc))
+
+        model.eval()
 
         running_accuracy = 0.0
         running_loss = 0.0
@@ -124,7 +119,7 @@ if __name__ == "__main__":
             project=wandb_config["project"],
             config=args,
             job_type="train",
-            name=args["model"]["ssm_type"]
+            name=f"{args['model']['ssm_type']}-wd{str(args['train']['wd'])}-bid{str(args['model']['bidirectional'])}"
         )
 
     # prepare dataset

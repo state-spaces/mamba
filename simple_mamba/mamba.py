@@ -37,6 +37,7 @@ class MambaConfig:
     ssm_type: str
     n_layers: int
     d_model: int  #  D
+    bidirectional: bool
     d_state: int = 16  # N in paper/comments
     d_conv: int = 4
     expand_factor: int = 2  # E in paper/comments
@@ -366,7 +367,8 @@ class MambaBlock(nn.Module):
                                       is_real=False,
                                       shared=config.channel_sharing,
                                       init="diag-lin",
-                                      deterministic = self.config.deterministic)
+                                      deterministic = self.config.deterministic,
+                                      bidirectional=self.config.bidirectional)
         elif config.ssm_type == "S4D-Real":
             self.ssm_kernel = FFTConv(d_model=config.d_inner,
                                       d_state=config.d_state,
@@ -375,7 +377,9 @@ class MambaBlock(nn.Module):
                                       mode='s4d',
                                       is_real=True,
                                       shared=config.channel_sharing,
-                                      deterministic = self.config.deterministic)
+                                      deterministic = self.config.deterministic,
+                                      bidirectional=self.config.bidirectional
+                                      )
         elif config.ssm_type == "conv":
             self.ssm_kernel = nn.Conv1d(in_channels=config.d_inner, out_channels=config.d_inner,
                                         kernel_size=config.d_state, bias=False,

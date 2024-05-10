@@ -17,14 +17,15 @@ class GLU(torch.nn.Module):
 
 
 class MambaBlock(torch.nn.Module):
-    def __init__(self, hidden_dim, state_dim, conv_dim, expansion, dropout, glu, norm, prenorm, ssm_type):
+    def __init__(self, hidden_dim, state_dim, conv_dim, expansion, dropout, glu, norm, prenorm, ssm_type, bidirectional):
         super().__init__()
         mamba_config = MambaConfig(ssm_type=ssm_type,
                                    n_layers=1,  # doesn't effect the model because we only use MambaBlock, but is required #TODO: refactor
                                    d_model=hidden_dim,
                                    d_state=state_dim,
                                    d_conv=conv_dim,
-                                   expand_factor=expansion
+                                   expand_factor=expansion,
+                                   bidirectional=bidirectional
         )
         print(mamba_config)
         self.mamba = MambaLayer(mamba_config)
@@ -59,11 +60,14 @@ class MambaBlock(torch.nn.Module):
 
 class Mamba(torch.nn.Module):
     def __init__(self, num_blocks, input_dim, output_dim, hidden_dim, state_dim, conv_dim, expansion, dropout, glu,
-                 norm, prenorm, dual, pooling="mean", ssm_type="S6-Real"):
+                 norm, prenorm, dual, bidirectional, embd, pooling="mean", ssm_type="S6-Real"):
         super().__init__()
-        self.linear_encoder = nn.Linear(input_dim, hidden_dim)
+        if embd:
+            self.linear_encoder = nn.Embedding(256, hidden_dim)
+        else:
+            self.linear_encoder = nn.Linear(input_dim, hidden_dim)
         self.blocks = nn.Sequential(
-            *[MambaBlock(hidden_dim, state_dim, conv_dim, expansion, dropout, glu, norm, prenorm, ssm_type) for _ in
+            *[MambaBlock(hidden_dim, state_dim, conv_dim, expansion, dropout, glu, norm, prenorm, ssm_type, bidirectional) for _ in
               range(num_blocks)])
         self.linear_decoder = nn.Linear(hidden_dim, output_dim)
         self.pooling = pooling

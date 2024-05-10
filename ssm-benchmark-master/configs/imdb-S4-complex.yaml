@@ -25,5 +25,7 @@ model:
   norm: "layer"
   dual: False
   prenorm: True
+  bidirectional: False
+  embd: False
   pooling: "mean"
   ssm_type: "S4D-Complex"

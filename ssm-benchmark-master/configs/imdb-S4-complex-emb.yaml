@@ -10,7 +10,7 @@ train:
   num_epochs: 100
   batch_size: 16
   lr: 0.0005
-  wd: 0.0
+  wd: 0.01
 model:
   layer: "mamba"
   num_blocks: 6
@@ -26,6 +26,6 @@ model:
   dual: False
   prenorm: True
   bidirectional: False
-  embd: False
+  embd: True
   pooling: "mean"
   ssm_type: "S4D-Complex"
