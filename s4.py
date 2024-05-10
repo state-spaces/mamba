@@ -1742,8 +1742,8 @@ class FFTConv(nn.Module):
         self.D = nn.Parameter(torch.randn(channels, self.d_model))
         # self.D.requires_grad = False
 
-        # if self.bidirectional:
-        #     channels *= 2
+        if self.bidirectional:
+            channels *= 2
 
         # # Inner convolution kernel
         # if mode is not None:
@@ -1782,16 +1782,16 @@ class FFTConv(nn.Module):
         # y, _ = self.kernel(L=l_kernel, rate=rate, state=state, x=x)
         # y = y.unsqueeze(1)
         # # Convolution
-        # if self.bidirectional:
-        #     k0, k1 = rearrange(k, '(s c) h l -> s c h l', s=2)
-        #     k = F.pad(k0, (0, L)) \
-        #             + F.pad(k1.flip(-1), (L, 0))
+        if self.bidirectional:
+            k0, k1 = rearrange(k, '(s c) h l -> s c h l', s=2)
+            k = F.pad(k0, (0, L)) \
+                    + F.pad(k1.flip(-1), (L, 0))
             # The above has an off-by-one in the reverse direction
             # This is a deliberate choice since the off-by-one should not affect any applications
             # This can be amended which may be very slightly slower
-            # k = F.pad(k0, (0, L)) \
-            #         + F.pad(k1[..., 1:].flip(-1), (L+1, 0)) \
-            #         + F.pad(k1[..., :1], (0, l_kernel+L-1))
+            k = F.pad(k0, (0, L)) \
+                    + F.pad(k1[..., 1:].flip(-1), (L+1, 0)) \
+                    + F.pad(k1[..., :1], (0, l_kernel+L-1))
 
         # # Kernel dropout
         # k = self.drop_kernel(k)

@@ -10,7 +10,7 @@ train:
   num_epochs: 100
   batch_size: 16
   lr: 0.0005
-  wd: 0.01
+  wd: 0.0
 model:
   layer: "mamba"
   num_blocks: 6

@@ -1,7 +1,7 @@
 seed: 1919
 wandb:
-   key: "6cc796c94f54384cae3e0ca45ff07388a3d15b08"
-   entity: "complex-team"
+   key: "e659129c172f7c118708f97f607155ec4d4cdc5d"
+   entity: "yuv-milo"
    project: "LRA"
 dataset:
   name: "IMDB"
