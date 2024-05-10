@@ -81,6 +81,8 @@ class Mamba(torch.nn.Module):
         if self.embd:
             x = x.long()
         x = self.linear_encoder(x)
+        if self.embd:
+            x = x.squeeze(2)
         x = self.blocks(x)
         if self.pooling in ["mean"]:
             x = torch.mean(x, dim=1)
