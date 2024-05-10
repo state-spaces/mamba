@@ -62,6 +62,7 @@ class Mamba(torch.nn.Module):
     def __init__(self, num_blocks, input_dim, output_dim, hidden_dim, state_dim, conv_dim, expansion, dropout, glu,
                  norm, prenorm, dual, bidirectional, embd, pooling="mean", ssm_type="S6-Real"):
         super().__init__()
+        self.embd = embd
         if embd:
             self.linear_encoder = nn.Embedding(256, hidden_dim)
         else:
@@ -77,6 +78,8 @@ class Mamba(torch.nn.Module):
             self.match = MATCH(output_dim * 2, output_dim)
 
     def forward(self, x):
+        if self.embd:
+            x = x.long()
         x = self.linear_encoder(x)
         x = self.blocks(x)
         if self.pooling in ["mean"]:
