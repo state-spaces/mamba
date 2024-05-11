@@ -13,7 +13,7 @@ class Config:
     A_imag_using_weight_decay: str
     dt_is_selective: str
     channel_sharing: str
-    deterministic:bool
+    deterministic: bool
     pscan: bool
     d_model: int
     d_state: int
@@ -28,7 +28,8 @@ class Config:
     stop_on_loss: float
     seed: int
     comment: str
-    bias:bool
+    bias: bool
+
 
 def experiments(kwargs):
     # Extract argument names and their corresponding value lists
@@ -39,3 +40,30 @@ def experiments(kwargs):
     for values in itertools.product(*value_lists):
         # Yield a dictionary mapping argument names to values
         yield dict(zip(arg_names, values))
+
+
+def override_config(config, args):
+    for arg in args:
+        key, value = arg.split('=', 1)
+        value = convert_type(value)
+        keys = key.split('.')
+        sub_config = config
+        for k in keys[:-1]:
+            sub_config = sub_config.setdefault(k, {})
+        sub_config[keys[-1]] = value
+    return config
+
+
+def convert_type(value):
+    # Convert to integer
+    try:
+        return int(value)
+    except ValueError:
+        pass
+
+    # Convert to boolean
+    if value.lower() in ['true', 'false']:
+        return value.lower() == 'true'
+
+    # Return string if no conversion possible
+    return value

@@ -4,6 +4,7 @@ import wandb
 from tqdm import tqdm
 import yaml
 from .dataloaders import SequenceDataset
+from ..utils import override_config
 
 from .models import Mamba
 
@@ -64,22 +65,25 @@ def train_mamba(seed, trainloader, testloader, wandb_config, train_config, model
             )
         model.train()
 
-def split_train_val(train, val_split):
-    train_len = int(len(train) * (1.0 - val_split))
-    train, val = torch.utils.data.random_split(
-        train,
-        (train_len, len(train) - train_len),
-        generator=torch.Generator().manual_seed(42),
-    )
-    return train, val
+# def split_train_val(train, val_split):
+#     train_len = int(len(train) * (1.0 - val_split))
+#     train, val = torch.utils.data.random_split(
+#         train,
+#         (train_len, len(train) - train_len),
+#         generator=torch.Generator().manual_seed(42),
+#     )
+#     return train, val
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-
     parser.add_argument("--config", type=str, default="cifar-10.yaml", help="experiment config file")
+    parser.add_argument('--overrides', nargs='*', default=[],
+                        help='Provide overrides as key=value pairs (e.g., model.ssm_type="S4D-Complex").')
     config = parser.parse_args().config
-    print("\nUsing config {0}".format(config))
+    overrides = parser.parse_args().overrides
+    print(f"\nUsing config {config}")
+    print(f"\nOverrides: {overrides}")
 
     # get GPU info
     if not torch.cuda.is_available():
@@ -95,6 +99,8 @@ if __name__ == "__main__":
         except yaml.YAMLError as exc:
             raise RuntimeError(exc)
 
+    # override config
+    args = override_config(args, overrides)
     args["GPU"] = gpu_type
 
     # get wandb config
@@ -105,6 +111,7 @@ if __name__ == "__main__":
 
     print("\nCONFIG:")
     print(yaml.dump(args))
+    raise RuntimeError("STOP")
 
     # split configs
     data_config = args["dataset"]
