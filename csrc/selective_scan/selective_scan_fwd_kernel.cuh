@@ -325,16 +325,21 @@ void selective_scan_fwd_launch(SSMParamsBase &params, cudaStream_t stream) {
                     // interface for setting kernel launch attributes is slightly different from 
                     // cuda's. In particualar, it seems to expect a plain const void * pointer.
 
-                    const void * kernel = (void*) &selective_scan_fwd_kernel<Ktraits>; // TODO: change to reinterpret cast. What's the best practice?
+                    auto kernel = &selective_scan_fwd_kernel<Ktraits>; // TODO: change to reinterpret cast. What's the best practice?
 
+                    
                     if (kSmemSize >= 48 * 1024) {
+                        #ifndef USE_ROCM
                         C10_CUDA_CHECK(cudaFuncSetAttribute(
                             kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
-                    } 
+                        #else
+                        C10_CUDA_CHECK(cudaFuncSetAttribute(
+                            (void *) kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
+                            std::cerr << "Warning (selective_scan_fwd_kernel): attempting to set maxDynamicSharedMemorySize on an AMD GPU which is currently a non-op (in ROCm versions <= 6.1). This might lead to undefined behavior. \n" << std::endl;
+                        #endif
+                    }
 
-                    auto kernel_fn = (void (*const)(SSMParamsBase)) kernel; // Todo - double-check. Had to add this C-style conversion. // TODO: change to reinterpret cast? What's the best practice?
-
-                    kernel_fn<<<grid, Ktraits::kNThreads, kSmemSize, stream>>>(params);
+                    kernel<<<grid, Ktraits::kNThreads, kSmemSize, stream>>>(params);
                     C10_CUDA_KERNEL_LAUNCH_CHECK();
                 });
             });

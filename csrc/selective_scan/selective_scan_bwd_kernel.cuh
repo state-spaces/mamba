@@ -507,16 +507,23 @@ void selective_scan_bwd_launch(SSMParamsBwd &params, cudaStream_t stream) {
                         constexpr int kSmemSize = Ktraits::kSmemSize + MAX_DSTATE * sizeof(typename Ktraits::scan_t) + (kNThreads + 4 * MAX_DSTATE) * sizeof(typename Ktraits::weight_t);
 
                         dim3 grid(params.batch, params.dim);
-                        const void * kernel = (void*) &selective_scan_bwd_kernel<Ktraits>; // TODO: change to reinterpret cast? what's the best practice?
+                        
+                        auto kernel = &selective_scan_bwd_kernel<Ktraits>; // TODO: change to reinterpret cast? what's the best practice?
 
                         if (kSmemSize >= 48 * 1024) {
+
+                            #ifndef USE_ROCM
                             C10_CUDA_CHECK(cudaFuncSetAttribute(
                                 kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
-                        }  
+                            #else
+                            C10_CUDA_CHECK(cudaFuncSetAttribute(
+                                (void *) kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
+                            std::cerr << "Warning (selective_scan_fwd_kernel): attempting to set maxDynamicSharedMemorySize on an AMD GPU which is currently a non-op (in ROCm versions <= 6.1). This might lead to undefined behavior. \n" << std::endl;
+                            #endif
 
-                        auto kernel_fn = (void (*const)(SSMParamsBwd)) kernel; // Todo - double-check. Had to add this C-style conversion. // TODO: change to reinterpret cast?
+                        }
 
-                        kernel_fn<<<grid, Ktraits::kNThreads, kSmemSize, stream>>>(params);
+                        kernel<<<grid, Ktraits::kNThreads, kSmemSize, stream>>>(params);
                         C10_CUDA_KERNEL_LAUNCH_CHECK();
                     });
                 });
