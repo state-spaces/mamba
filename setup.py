@@ -111,7 +111,6 @@ def check_if_hip_home_none(global_option: str) -> None:
 
 
 def check_if_cuda_home_none(global_option: str) -> None:
-    
     if CUDA_HOME is not None:
         return
     # warn instead of error because user could be downloading prebuilt wheels, so nvcc won't be necessary
@@ -142,7 +141,6 @@ if not SKIP_CUDA_BUILD:
     TORCH_MAJOR = int(torch.__version__.split(".")[0])
     TORCH_MINOR = int(torch.__version__.split(".")[1])
 
-    
     cc_flag = []
 
     if HIP_BUILD:
@@ -268,7 +266,6 @@ def get_package_version():
 
 
 def get_wheel_url():
-
     # Determine the version numbers that will be used to determine the correct wheel
     torch_version_raw = parse(torch.__version__)
 
@@ -291,7 +288,6 @@ def get_wheel_url():
     python_version = f"cp{sys.version_info.major}{sys.version_info.minor}"
     platform_name = get_platform()
     mamba_ssm_version = get_package_version()
-
     torch_version = f"{torch_version_raw.major}.{torch_version_raw.minor}"
     cxx11_abi = str(torch._C._GLIBCXX_USE_CXX11_ABI).upper()
 
@@ -300,7 +296,6 @@ def get_wheel_url():
     wheel_url = BASE_WHEEL_URL.format(
         tag_name=f"v{mamba_ssm_version}", wheel_name=wheel_filename
     )
-
     return wheel_url, wheel_filename
 
 
@@ -381,6 +376,6 @@ setup(
         "einops",
         "triton",
         "transformers",
-       # "causal_conv1d>=1.1.0",
+        # "causal_conv1d>=1.2.0",
     ],
 )
