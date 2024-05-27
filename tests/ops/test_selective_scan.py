@@ -157,7 +157,8 @@ def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D, has_z
 # @pytest.mark.parametrize("is_variable_C", [False])
 @pytest.mark.parametrize("is_variable_B", [False, True])
 # @pytest.mark.parametrize("is_variable_B", [True])
-def test_mamba_inner_fn(is_variable_B, is_variable_C, seqlen, itype, wtype):
+@pytest.mark.parametrize('delta_softplus', [True, False])
+def test_mamba_inner_fn(is_variable_B, is_variable_C, seqlen, itype, wtype, delta_softplus):
     device = 'cuda'
     rtol, atol = (6e-4, 2e-3) if itype == torch.float32 else (3e-3, 5e-3)
     if itype == torch.bfloat16:
@@ -206,11 +207,13 @@ def test_mamba_inner_fn(is_variable_B, is_variable_C, seqlen, itype, wtype):
     delta_bias_ref = delta_bias.detach().clone().requires_grad_() if delta_bias is not None else None
     out = mamba_inner_fn(xz, conv1d_weight, conv1d_bias, x_proj_weight, delta_proj_weight,
                          out_proj_weight, out_proj_bias,
-                         A, B, C, D, delta_bias=delta_bias, delta_squareplus=True)
+                         A, B, C, D, delta_bias=delta_bias, 
+                         delta_softplus=delta_softplus, delta_squareplus=not delta_softplus)
     out_ref = mamba_inner_ref(xz_ref, conv1d_weight_ref, conv1d_bias_ref, x_proj_weight_ref,
                               delta_proj_weight_ref, out_proj_weight_ref, out_proj_bias_ref,
                               A_ref, B_ref, C_ref, D_ref,
-                              delta_bias=delta_bias_ref, delta_squareplus=True)
+                              delta_bias=delta_bias_ref, delta_softplus=delta_softplus, 
+                              delta_squareplus=not delta_softplus)
     # dA = torch.exp(torch.einsum('bdl,dn->bdln', delta, A))
     # dt_u = delta * u
 
