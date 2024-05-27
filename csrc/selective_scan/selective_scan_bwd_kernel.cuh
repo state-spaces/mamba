@@ -168,7 +168,7 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
             if constexpr (kDeltaSoftplus) {
                 delta_vals[i] = delta_vals[i] <= 20.f ? log1pf(expf(delta_vals[i])) : delta_vals[i];
             } else if constexper (kDeltaSquareplus) {
-                delta_vals[i] = (delta_vals[r][i] + sqrtf(delta_vals[r][i] * delta_vals[r][i] + 4.0)) / 2.0;
+                delta_vals[i] = (delta_vals[i] + sqrtf(delta_vals[i] * delta_vals[i] + 4.0)) / 2.0;
             }
         }
 
