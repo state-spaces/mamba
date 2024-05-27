@@ -94,6 +94,7 @@ class SelectiveScanFn(torch.autograd.Function):
                 dz,
                 ddelta_bias if delta_bias is not None else None,
                 None,
+                None,
                 None)
 
 
@@ -326,7 +327,7 @@ class MambaInnerFn(torch.autograd.Function):
                 dout_proj_weight, dout_proj_bias,
                 dA, dB, dC, dD,
                 ddelta_bias if delta_bias is not None else None,
-                dB_proj_bias, dC_proj_bias, None)
+                dB_proj_bias, dC_proj_bias, None, None)
 
 
 def mamba_inner_fn(
