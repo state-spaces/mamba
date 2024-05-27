@@ -3,7 +3,6 @@
 """We want triton==2.1.0 or triton==2.2.0 or triton==2.3.0 for this
 """
 
-import math
 import torch
 import torch.nn.functional as F
 
@@ -36,6 +35,7 @@ def _selective_scan_update_kernel(
     stride_out_batch, stride_out_head, stride_out_dim,
     # Meta-parameters
     DT_SOFTPLUS: tl.constexpr,
+    DT_SQUAREPLUS: tl.constexpr,
     TIE_HDIM: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
     HAS_DT_BIAS: tl.constexpr,
@@ -84,6 +84,8 @@ def _selective_scan_update_kernel(
             dt += tl.load(dt_bias_ptrs, mask=offs_m < dim, other=0.0).to(tl.float32)
         if DT_SOFTPLUS:
             dt = tl.where(dt <= 20.0, tl.math.log1p(tl.exp(dt)), dt)
+        if DT_SQUAREPLUS:
+            dt = (dt + tl.math.sqrt(tl.math.pow(dt, 2) + 4)) / 2
         A = tl.load(A_ptrs, mask=(offs_m[:, None] < dim) & (offs_n[None, :] < dstate), other=0.0).to(tl.float32)
         dA = tl.exp(A * dt[:, None])
     else:
@@ -92,6 +94,8 @@ def _selective_scan_update_kernel(
             dt += tl.load(dt_bias_ptr).to(tl.float32)
         if DT_SOFTPLUS:
             dt = tl.where(dt <= 20.0, tl.math.log1p(tl.exp(dt)), dt)
+        if DT_SQUAREPLUS:
+            dt = (dt + tl.math.sqrt(tl.math.pow(dt, 2) + 4)) / 2
         A = tl.load(A_ptr).to(tl.float32)
         dA = tl.exp(A * dt)  # scalar, not a matrix
 
@@ -116,7 +120,7 @@ def _selective_scan_update_kernel(
     tl.store(out_ptrs, out, mask=offs_m < dim)
 
 
-def selective_state_update(state, x, dt, A, B, C, D=None, z=None, dt_bias=None, dt_softplus=False):
+def selective_state_update(state, x, dt, A, B, C, D=None, z=None, dt_bias=None, dt_softplus=False, dt_squareplus=False):
     """
     Argument:
         state: (batch, dim, dstate) or (batch, nheads, dim, dstate)
@@ -190,6 +194,7 @@ def selective_state_update(state, x, dt, A, B, C, D=None, z=None, dt_bias=None, 
             z_strides[0], z_strides[1], z_strides[2],
             out.stride(0), out.stride(1), out.stride(2),
             dt_softplus,
+            dt_squareplus,
             tie_hdim,
             BLOCK_SIZE_M,
             num_warps=num_warps,
@@ -199,7 +204,7 @@ def selective_state_update(state, x, dt, A, B, C, D=None, z=None, dt_bias=None, 
     return out
 
 
-def selective_state_update_ref(state, x, dt, A, B, C, D=None, z=None, dt_bias=None, dt_softplus=False):
+def selective_state_update_ref(state, x, dt, A, B, C, D=None, z=None, dt_bias=None, dt_softplus=False, dt_squareplus=False):
     """
     Argument:
         state: (batch, dim, dstate) or (batch, nheads, dim, dstate)
@@ -249,6 +254,7 @@ def selective_state_update_ref(state, x, dt, A, B, C, D=None, z=None, dt_bias=No
         assert dt_bias.shape == (nheads, dim)
         dt = dt + dt_bias
     dt = F.softplus(dt) if dt_softplus else dt
+    dt = (x + torch.sqrt(x ** 2 + 4)) / 2 if dt_squareplus else dt
     dA = torch.exp(rearrange(dt, "b h d -> b h d 1") * A)  # (batch, nheads, dim, dstate)
     B = repeat(B, "b g n -> b (g h) n", h=nheads // ngroups)  # (batch, nheads, dstate)
     C = repeat(C, "b g n -> b (g h) n", h=nheads // ngroups)  # (batch, nheads, dstate)
