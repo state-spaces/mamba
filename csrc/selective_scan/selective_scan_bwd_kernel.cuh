@@ -167,7 +167,7 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
             delta_vals[i] = float(delta_vals_load[i]) + delta_bias;
             if constexpr (kDeltaSoftplus) {
                 delta_vals[i] = delta_vals[i] <= 20.f ? log1pf(expf(delta_vals[i])) : delta_vals[i];
-            } else if constexper (kDeltaSquareplus) {
+            } else if constexpr (kDeltaSquareplus) {
                 delta_vals[i] = (delta_vals[i] + sqrtf(delta_vals[i] * delta_vals[i] + 4.0)) / 2.0;
             }
         }
@@ -509,20 +509,22 @@ void selective_scan_bwd_launch(SSMParamsBwd &params, cudaStream_t stream) {
         BOOL_SWITCH(params.is_variable_B, kIsVariableB, [&] {
             BOOL_SWITCH(params.is_variable_C, kIsVariableC, [&] {
                 BOOL_SWITCH(params.delta_softplus, kDeltaSoftplus, [&] {
-                    BOOL_SWITCH(params.z_ptr != nullptr , kHasZ, [&] {
-                        using Ktraits = Selective_Scan_bwd_kernel_traits<kNThreads, kNItems, kIsEvenLen, kIsVariableB, kIsVariableC, kDeltaSoftplus, kDeltaSquareplus, kHasZ, input_t, weight_t>;
-                        // using Ktraits = Selective_Scan_bwd_kernel_traits<kNThreads, kNItems, true, kIsVariableB, kIsVariableC, kDeltaSoftplus, kDeltaSquareplus, kHasZ, input_t, weight_t>;
-                        // TODO: check this
-                        constexpr int kSmemSize = Ktraits::kSmemSize + MAX_DSTATE * sizeof(typename Ktraits::scan_t) + (kNThreads + 4 * MAX_DSTATE) * sizeof(typename Ktraits::weight_t);
-                        // printf("smem_size = %d\n", kSmemSize);
-                        dim3 grid(params.batch, params.dim);
-                        auto kernel = &selective_scan_bwd_kernel<Ktraits>;
-                        if (kSmemSize >= 48 * 1024) {
-                            C10_CUDA_CHECK(cudaFuncSetAttribute(
-                                kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
-                        }
-                        kernel<<<grid, Ktraits::kNThreads, kSmemSize, stream>>>(params);
-                        C10_CUDA_KERNEL_LAUNCH_CHECK();
+                    BOOL_SWITCH(params.delta_squareplus, kDeltaSquareplus, [&] {
+                        BOOL_SWITCH(params.z_ptr != nullptr , kHasZ, [&] {
+                            using Ktraits = Selective_Scan_bwd_kernel_traits<kNThreads, kNItems, kIsEvenLen, kIsVariableB, kIsVariableC, kDeltaSoftplus, kDeltaSquareplus, kHasZ, input_t, weight_t>;
+                            // using Ktraits = Selective_Scan_bwd_kernel_traits<kNThreads, kNItems, true, kIsVariableB, kIsVariableC, kDeltaSoftplus, kDeltaSquareplus, kHasZ, input_t, weight_t>;
+                            // TODO: check this
+                            constexpr int kSmemSize = Ktraits::kSmemSize + MAX_DSTATE * sizeof(typename Ktraits::scan_t) + (kNThreads + 4 * MAX_DSTATE) * sizeof(typename Ktraits::weight_t);
+                            // printf("smem_size = %d\n", kSmemSize);
+                            dim3 grid(params.batch, params.dim);
+                            auto kernel = &selective_scan_bwd_kernel<Ktraits>;
+                            if (kSmemSize >= 48 * 1024) {
+                                C10_CUDA_CHECK(cudaFuncSetAttribute(
+                                    kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
+                            }
+                            kernel<<<grid, Ktraits::kNThreads, kSmemSize, stream>>>(params);
+                            C10_CUDA_KERNEL_LAUNCH_CHECK();
+                        });
                     });
                 });
             });

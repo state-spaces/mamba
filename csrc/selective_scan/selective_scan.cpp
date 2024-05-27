@@ -79,7 +79,7 @@ void set_ssm_params_fwd(SSMParamsBase &params,
                         void* delta_bias_ptr,
                         void* x_ptr,
                         bool has_z,
-                        bool delta_softplus
+                        bool delta_softplus,
                         bool delta_squareplus) {
 
     // Reset the parameters
@@ -232,7 +232,7 @@ selective_scan_fwd(const at::Tensor &u, const at::Tensor &delta,
                   const c10::optional<at::Tensor> &D_,
                   const c10::optional<at::Tensor> &z_,
                   const c10::optional<at::Tensor> &delta_bias_,
-                  bool delta_softplus
+                  bool delta_softplus,
                   bool delta_squareplus) {
     auto input_type = u.scalar_type();
     auto weight_type = A.scalar_type();
