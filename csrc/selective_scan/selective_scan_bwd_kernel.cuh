@@ -24,7 +24,7 @@ template<> __device__ __forceinline__ float conj<float>(float x) { return x; }
 template<> __device__ __forceinline__ complex_t conj<complex_t>(complex_t x) { return std::conj(x); }
 
 template<int kNThreads_, int kNItems_, bool kIsEvenLen_, bool kIsVariableB_, bool kIsVariableC_,
-         bool kDeltaSoftplus_, bool kHasZ_, typename input_t_, typename weight_t_>
+         bool kDeltaSoftplus_, bool kDeltaSquareplus_, bool kHasZ_, typename input_t_, typename weight_t_>
 struct Selective_Scan_bwd_kernel_traits {
     static_assert(kNItems_ % 4 == 0);
     using input_t = input_t_;
@@ -41,6 +41,7 @@ struct Selective_Scan_bwd_kernel_traits {
     static constexpr bool kIsVariableB = kIsVariableB_;
     static constexpr bool kIsVariableC = kIsVariableC_;
     static constexpr bool kDeltaSoftplus = kDeltaSoftplus_;
+    static constexpr bool kDeltaSquareplus = kDeltaSquareplus_;
     static constexpr bool kHasZ = kHasZ_;
     // Setting MinBlocksPerMP to be 3 (instead of 2) for 128 threads with float improves occupancy.
     // For complex this would lead to massive register spilling, so we keep it at 2.
@@ -79,6 +80,7 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
     constexpr bool kIsVariableB = Ktraits::kIsVariableB;
     constexpr bool kIsVariableC = Ktraits::kIsVariableC;
     constexpr bool kDeltaSoftplus = Ktraits::kDeltaSoftplus;
+    constexpr bool kDeltaSquareplus = Ktraits::kDeltaSquareplus;
     constexpr bool kHasZ = Ktraits::kHasZ;
     constexpr int kNThreads = Ktraits::kNThreads;
     constexpr int kNItems = Ktraits::kNItems;
@@ -152,8 +154,8 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
         u -= kChunkSize;
         __syncthreads();
         load_input<Ktraits>(delta, delta_vals_load, smem_load, params.seqlen - chunk * kChunkSize);
-        // Will reload delta at the same location if kDeltaSoftplus
-        if constexpr (!kDeltaSoftplus) { delta -= kChunkSize; }
+        // Will reload delta at the same location if kDeltaSoftplus or kDeltaSquarePlus is true
+        if constexpr (!kDeltaSoftplus || !kDeltaSquareplus) { delta -= kChunkSize; }
         __syncthreads();
         load_input<Ktraits>(dout, dout_vals_load, smem_load, params.seqlen - chunk * kChunkSize);
         dout -= kChunkSize;
@@ -165,6 +167,8 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
             delta_vals[i] = float(delta_vals_load[i]) + delta_bias;
             if constexpr (kDeltaSoftplus) {
                 delta_vals[i] = delta_vals[i] <= 20.f ? log1pf(expf(delta_vals[i])) : delta_vals[i];
+            } else if constexper (kDeltaSquareplus) {
+                delta_vals[i] = (delta_vals[r][i] + sqrtf(delta_vals[r][i] * delta_vals[r][i] + 4.0)) / 2.0;
             }
         }
 
@@ -449,6 +453,17 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
                     ? ddelta_vals[i] / (1.f + delta_val_neg_exp)
                     : ddelta_vals[i];
             }
+        } else if constexpr (kDeltaSquareplus) {
+            __syncthreads();
+            input_t delta_vals_load[kNItems];
+            load_input<Ktraits>(delta, delta_vals_load, smem_load, params.seqlen - chunk * kChunkSize);
+            delta -= kChunkSize;
+            #pragma unroll
+            for (int i = 0; i < kNItems; ++i) {
+                float delta_val = float(delta_vals_load[i]) + delta_bias;
+                float delta_val_sqrt = sqrtf(delta_val * delta_val + 4.0);
+                ddelta_vals[i] = ddelta_vals[i] * (1 + delta_val / delta_val_sqrt) / 2;
+            }
         }
         for (int i = 0; i < kNItems; ++i) { ddelta_bias_val += ddelta_vals[i]; }
 
@@ -495,8 +510,8 @@ void selective_scan_bwd_launch(SSMParamsBwd &params, cudaStream_t stream) {
             BOOL_SWITCH(params.is_variable_C, kIsVariableC, [&] {
                 BOOL_SWITCH(params.delta_softplus, kDeltaSoftplus, [&] {
                     BOOL_SWITCH(params.z_ptr != nullptr , kHasZ, [&] {
-                        using Ktraits = Selective_Scan_bwd_kernel_traits<kNThreads, kNItems, kIsEvenLen, kIsVariableB, kIsVariableC, kDeltaSoftplus, kHasZ, input_t, weight_t>;
-                        // using Ktraits = Selective_Scan_bwd_kernel_traits<kNThreads, kNItems, true, kIsVariableB, kIsVariableC, kDeltaSoftplus, kHasZ, input_t, weight_t>;
+                        using Ktraits = Selective_Scan_bwd_kernel_traits<kNThreads, kNItems, kIsEvenLen, kIsVariableB, kIsVariableC, kDeltaSoftplus, kDeltaSquareplus, kHasZ, input_t, weight_t>;
+                        // using Ktraits = Selective_Scan_bwd_kernel_traits<kNThreads, kNItems, true, kIsVariableB, kIsVariableC, kDeltaSoftplus, kDeltaSquareplus, kHasZ, input_t, weight_t>;
                         // TODO: check this
                         constexpr int kSmemSize = Ktraits::kSmemSize + MAX_DSTATE * sizeof(typename Ktraits::scan_t) + (kNThreads + 4 * MAX_DSTATE) * sizeof(typename Ktraits::weight_t);
                         // printf("smem_size = %d\n", kSmemSize);

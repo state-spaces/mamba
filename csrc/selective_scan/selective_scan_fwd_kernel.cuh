@@ -153,7 +153,11 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                 delta_vals[r][i] = float(delta_vals_load[r][i]) + delta_bias[r];
                 if (params.delta_softplus) {
                     delta_vals[r][i] = delta_vals[r][i] <= 20.f ? log1pf(expf(delta_vals[r][i])) : delta_vals[r][i];
+                } else if (params.delta_squareplus]) {
+                    // (x + torch.sqrt(torch.square(x) + b))/2
+                    delta_vals[r][i] = (delta_vals[r][i] + sqrtf(delta_vals[r][i] * delta_vals[r][i] + 4.0)) / 2.0;
                 }
+                
                 delta_u_vals[r][i] = delta_vals[r][i] * u_val;
                 out_vals[r][i] = D_val[r] * u_val;
             }

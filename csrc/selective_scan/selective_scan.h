@@ -32,6 +32,7 @@ struct SSMParamsBase {
     bool is_variable_C;
 
     bool delta_softplus;
+    bool delta_squareplus;
 
     index_t A_d_stride;
     index_t A_dstate_stride;
