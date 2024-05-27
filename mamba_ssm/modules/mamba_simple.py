@@ -244,7 +244,7 @@ class Mamba(nn.Module):
             if self.softplus:
                 dt = F.softplus(dt + self.dt_proj.bias.to(dtype=dt.dtype))
             else:
-                dt = (dt + torch.sqrt(dt**2 + 4)) / 2
+                dt = (dt + torch.sqrt(torch.square(dt) + 4)) / 2
             dA = torch.exp(torch.einsum("bd,dn->bdn", dt, A))
             dB = torch.einsum("bd,bn->bdn", dt, B)
             ssm_state.copy_(ssm_state * dA + rearrange(x, "b d -> b d 1") * dB)
