@@ -254,7 +254,7 @@ def selective_state_update_ref(state, x, dt, A, B, C, D=None, z=None, dt_bias=No
         assert dt_bias.shape == (nheads, dim)
         dt = dt + dt_bias
     dt = F.softplus(dt) if dt_softplus else dt
-    dt = (x + torch.sqrt(x ** 2 + 4)) / 2 if dt_squareplus else dt
+    dt = (dt + torch.sqrt(dt ** 2 + 4)) / 2 if dt_squareplus else dt
     dA = torch.exp(rearrange(dt, "b h d -> b h d 1") * A)  # (batch, nheads, dim, dstate)
     B = repeat(B, "b g n -> b (g h) n", h=nheads // ngroups)  # (batch, nheads, dstate)
     C = repeat(C, "b g n -> b (g h) n", h=nheads // ngroups)  # (batch, nheads, dstate)

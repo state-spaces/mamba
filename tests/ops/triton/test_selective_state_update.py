@@ -19,7 +19,8 @@ from mamba_ssm.ops.triton.selective_state_update import selective_state_update, 
 # @pytest.mark.parametrize("dstate", [16])
 @pytest.mark.parametrize("dim", [2048, 2048 + 16, 4096])
 # @pytest.mark.parametrize("dim", [2048])
-def test_selective_state_update(dim, dstate, has_z, itype):
+@pytest.mark.parametrize('dt_softplus', [True, False])
+def test_selective_state_update(dim, dstate, has_z, itype, dt_softplus):
     device = "cuda"
     rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (5e-3, 1e-2)
     if itype == torch.bfloat16:
@@ -40,8 +41,8 @@ def test_selective_state_update(dim, dstate, has_z, itype):
     else:
         z = None
     state_ref = state.detach().clone()
-    out = selective_state_update(state, x, dt, A, B, C, D=D, z=z, dt_bias=dt_bias, dt_softplus=True)
-    out_ref = selective_state_update_ref(state_ref, x, dt, A, B, C, D=D, z=z, dt_bias=dt_bias, dt_softplus=True)
+    out = selective_state_update(state, x, dt, A, B, C, D=D, z=z, dt_bias=dt_bias, dt_softplus=dt_softplus, dt_squareplus= not dt_softplus)
+    out_ref = selective_state_update_ref(state_ref, x, dt, A, B, C, D=D, z=z, dt_bias=dt_bias, dt_softplus=dt_softplus, dt_squareplus= not dt_softplus)
 
     print(f"Output max diff: {(out - out_ref).abs().max().item()}")
     print(f"Output mean diff: {(out - out_ref).abs().mean().item()}")
