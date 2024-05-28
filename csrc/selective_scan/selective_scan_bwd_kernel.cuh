@@ -155,7 +155,7 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
         __syncthreads();
         load_input<Ktraits>(delta, delta_vals_load, smem_load, params.seqlen - chunk * kChunkSize);
         // Will reload delta at the same location if kDeltaSoftplus or kDeltaSquarePlus is true
-        if constexpr (!kDeltaSoftplus || !kDeltaSquareplus) { delta -= kChunkSize; }
+        if constexpr (!kDeltaSoftplus) { delta -= kChunkSize; } else if constexpr (!kDeltaSquareplus) { delta -= kChunkSize; }
         __syncthreads();
         load_input<Ktraits>(dout, dout_vals_load, smem_load, params.seqlen - chunk * kChunkSize);
         dout -= kChunkSize;

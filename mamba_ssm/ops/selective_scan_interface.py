@@ -129,7 +129,7 @@ def selective_scan_ref(u, delta, A, B, C, D=None, z=None, delta_bias=None, delta
         delta = delta + delta_bias[..., None].float()
     if delta_softplus:
         delta = F.softplus(delta)
-    if delta_squareplus:
+    elif delta_squareplus:
         delta = squareplus(delta)
     batch, dim, dstate = u.shape[0], A.shape[0], A.shape[1]
     is_variable_B = B.dim() >= 3
