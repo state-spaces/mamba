@@ -7,6 +7,7 @@
 # The models we train have hidden dim up to 8k anyway (e.g. Llama 70B), so this is fine.
 
 import math
+import warnings
 
 import torch
 import torch.nn.functional as F
@@ -50,19 +51,30 @@ def rms_norm_ref(x, weight, bias, residual=None, eps=1e-6, prenorm=False, upcast
 def config_prune(configs):
 
     if torch.version.hip:
-        gcn_arch_name = torch.cuda.get_device_properties(0).gcnArchName
-        if "gfx10" in gcn_arch_name or "gfx11" in gcn_arch_name:
-            # radeon
-            warp_size = 32
-        else:
-            # instinct
-            warp_size = 64
+        try:
+            # set warp size based on gcn architecure 
+            gcn_arch_name = torch.cuda.get_device_properties(0).gcnArchName
+            if "gfx10" in gcn_arch_name or "gfx11" in gcn_arch_name:
+                # radeon
+                warp_size = 32
+            else:
+                # instinct
+                warp_size = 64
+        except AttributeError as e:
+            # fall back to crude method to set warp size
+            device_name = torch.cuda.get_device_properties(0).name
+            if 'instinct' in device_name.lower():
+                warp_size = 64
+            else:
+                warp_size = 32
+            warnings.warn(f"{e}, warp size set to {warp_size} based on device name: {device_name}", UserWarning)
+
     else:
         # cuda 
         warp_size = 32    
 
-    block_sz = 1024
-    max_num_warps = block_sz // warp_size
+    max_block_sz = 1024
+    max_num_warps = max_block_sz // warp_size
     pruned_configs = [config for config in configs if config.num_warps <= max_num_warps]
     return pruned_configs
 
