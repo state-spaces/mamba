@@ -66,13 +66,13 @@ def get_cuda_bare_metal_version(cuda_dir):
     )
     output = raw_output.split()
     release_idx = output.index("release") + 1
-    bare_metal_version = parse(output[release_idx].split(",")[0])
+    bare_metal_ver = parse(output[release_idx].split(",")[0])
 
-    return raw_output, bare_metal_version
+    return raw_output, bare_metal_ver
 
 
 def get_hip_version(rocm_dir):
-    ## TODO: largely from xformers, proper attribution.
+
     hipcc_bin = "hipcc" if rocm_dir is None else os.path.join(rocm_dir, "bin", "hipcc")
     try:
         raw_output = subprocess.check_output(
@@ -83,7 +83,7 @@ def get_hip_version(rocm_dir):
             f"hip installation not found: {e} ROCM_PATH={os.environ.get('ROCM_PATH')}"
         )
         return None, None
-    
+
     for line in raw_output.split("\n"):
         if "HIP version" in line:
             rocm_version = parse(line.split()[-1].replace("-", "+")) # local version is not parsed correctly
@@ -93,6 +93,7 @@ def get_hip_version(rocm_dir):
 
 
 def get_torch_hip_version():
+
     if torch.version.hip:
         return parse(torch.version.hip.split()[-1].replace("-", "+"))
     else:
@@ -100,7 +101,7 @@ def get_torch_hip_version():
 
 
 def check_if_hip_home_none(global_option: str) -> None:
-    
+
     if HIP_HOME is not None:
         return
     # warn instead of error because user could be downloading prebuilt wheels, so hipcc won't be necessary
@@ -150,18 +151,24 @@ if not SKIP_CUDA_BUILD:
         _, hip_version = get_hip_version(rocm_home)
 
         if HIP_HOME is not None:
-            if hip_version < Version("6.0"): #TODO: rocm file patch warning/reminder if under 6.1?
+            if hip_version < Version("6.0"):
                 raise RuntimeError(
                     f"{PACKAGE_NAME} is only supported on ROCm 6.0 and above.  "
                     "Note: make sure HIP has a supported version by running hipcc --version."
                 )
+            if hip_version == Version("6.0"):
+                warnings.warn(
+                    f"{PACKAGE_NAME} requires a patch to be applied when running on ROCm 6.0. "
+                    "Refer to the README.md for detailed instructions.",
+                    UserWarning
+                )
 
         cc_flag.append("-DBUILD_PYTHON_PACKAGE")
-        
+
     else:
         check_if_cuda_home_none(PACKAGE_NAME)
         # Check, if CUDA11 is installed for compute capability 8.0
-        
+
         if CUDA_HOME is not None:
             _, bare_metal_version = get_cuda_bare_metal_version(CUDA_HOME)
             if bare_metal_version < Version("11.6"):
@@ -169,8 +176,7 @@ if not SKIP_CUDA_BUILD:
                     f"{PACKAGE_NAME} is only supported on CUDA 11.6 and above.  "
                     "Note: make sure nvcc has a supported version by running nvcc -V."
                 )
-    
-                
+
         cc_flag.append("-gencode")
         cc_flag.append("arch=compute_53,code=sm_53")
         cc_flag.append("-gencode")
@@ -188,7 +194,7 @@ if not SKIP_CUDA_BUILD:
             cc_flag.append("-gencode")
             cc_flag.append("arch=compute_90,code=sm_90")
 
-    
+
     # HACK: The compiler flag -D_GLIBCXX_USE_CXX11_ABI is set to be the same as
     # torch._C._GLIBCXX_USE_CXX11_ABI
     # https://github.com/pytorch/pytorch/blob/8472c24e3b5b60150096486616d98b7bea01500b/torch/utils/cpp_extension.py#L920
@@ -196,7 +202,7 @@ if not SKIP_CUDA_BUILD:
         torch._C._GLIBCXX_USE_CXX11_ABI = True
 
     if HIP_BUILD:
-        ###FROM XFORMER: # TODO: attribution?
+
         extra_compile_args = {
             "cxx": ["-O3", "-std=c++17"],
             "nvcc": [
@@ -272,7 +278,7 @@ def get_wheel_url():
     if HIP_BUILD:
         # We're using the HIP version used to build torch, not the one currently installed
         torch_hip_version = get_torch_hip_version()
-        hip_version = f"{torch_hip_version.major}{torch_hip_version.minor}"
+        hip_ver = f"{torch_hip_version.major}{torch_hip_version.minor}"
     else:
         # We're using the CUDA version used to build torch, not the one currently installed
         # _, cuda_version_raw = get_cuda_bare_metal_version(CUDA_HOME)
@@ -281,8 +287,8 @@ def get_wheel_url():
         # to save CI time. Minor versions should be compatible.
         torch_cuda_version = parse("11.8") if torch_cuda_version.major == 11 else parse("12.2")
         cuda_version = f"{torch_cuda_version.major}{torch_cuda_version.minor}"
-    
-    gpu_compute_version = hip_version if HIP_BUILD else cuda_version
+
+    gpu_compute_version = hip_ver if HIP_BUILD else cuda_version
     cuda_or_hip = "hip" if HIP_BUILD else "cu"
 
     python_version = f"cp{sys.version_info.major}{sys.version_info.minor}"
@@ -332,9 +338,6 @@ class CachedWheelsCommand(_bdist_wheel):
             print("Precompiled wheel not found. Building from source...")
             # If the wheel could not be downloaded, build from source
             super().run()
-
-
-## TODO: recide on ROCm vs HIP naming
 
 setup(
     name=PACKAGE_NAME,
