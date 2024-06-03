@@ -3,8 +3,11 @@
 ![Mamba](assets/selection.png "Selective State Space")
 > **Mamba: Linear-Time Sequence Modeling with Selective State Spaces**\
 > Albert Gu*, Tri Dao*\
-> Paper: https://arxiv.org/abs/2312.00752\ 
-> **Transformers are SSMs: Generalized Models and Efficient Algorithms Through Structured State Space Duality**\ 
+> Paper: https://arxiv.org/abs/2312.00752\
+
+![Mamba-2](assets/ssd_algorithm.png "State Space Dual Model")
+> **Transformers are SSMs: Generalized Models and Efficient Algorithms**\
+>     **Through Structured State Space Duality**\
 > Tri Dao*, Albert Gu*\
 > Paper: https://arxiv.org/abs/2405.21060
 
@@ -63,6 +66,8 @@ y = model(x)
 assert y.shape == x.shape
 ```
 
+### Mamba-2
+
 The Mamba-2 block is implemented at [modules/mamba2.py](mamba_ssm/modules/mamba2.py).
 
 A simpler version is at [modules/mamba2_simple.py](mamba_ssm/modules/mamba2_simple.py)
@@ -80,6 +85,11 @@ model = Mamba(
 y = model(x)
 assert y.shape == x.shape
 ```
+
+#### SSD
+
+A minimal version of the inner SSD module (Listing 1 from the Mamba-2 paper) with conversion between "discrete" and "continuous" SSM versions
+is at [modules/ssd_minimal.py](mamba_ssm/modules/ssd_minimal.py).
 
 ### Mamba Language Model
 
@@ -205,6 +215,7 @@ If you use this codebase, or otherwise find our work valuable, please cite Mamba
   journal={arXiv preprint arXiv:2312.00752},
   year={2023}
 }
+
 @inproceedings{mamba2,
   title={Transformers are {SSM}s: Generalized Models and Efficient Algorithms Through Structured State Space Duality},
   author={Dao, Tri and Gu, Albert},
