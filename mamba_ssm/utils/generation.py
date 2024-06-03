@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from einops import rearrange, repeat
 from torch import Tensor
 from torch.profiler import ProfilerActivity, profile, record_function
-from transformers.generation import GreedySearchDecoderOnlyOutput, SampleDecoderOnlyOutput, TextStreamer
+from transformers.generation import GreedySearchDecoderOnlyOutput, SampleDecoderOnlyOutput, TextStreamer, GenerationMixin
 
 
 @dataclass
@@ -241,13 +241,13 @@ def decode(
     return output_cls(sequences=torch.cat(sequences, dim=1), scores=tuple(scores))
 
 
-class GenerationMixin:
+class MambaGenerationMixin(GenerationMixin):
     def allocate_inference_cache(self, batch_size, max_seqlen, dtype=None, **kwargs):
         raise NotImplementedError
 
     def generate(
         self,
-        input_ids,
+        inputs,
         max_length,
         top_k=1,
         top_p=0.0,
@@ -258,7 +258,7 @@ class GenerationMixin:
         **kwargs,
     ):
         output = decode(
-            input_ids, self, max_length, top_k=top_k, top_p=top_p, min_p = min_p, temperature=temperature, **kwargs
+            inputs, self, max_length, top_k=top_k, top_p=top_p, min_p = min_p, temperature=temperature, **kwargs
         )
         if not output_scores:
             output.scores = None
