@@ -14,7 +14,7 @@ import triton.language as tl
 
 from einops import rearrange, repeat
 
-from src.ops.triton.ssd_bmm import _bmm_chunk_fwd, _bmm_chunk_bwd
+from mamba_ssm.ops.triton.ssd_bmm import _bmm_chunk_fwd, _bmm_chunk_bwd
 
 TRITON_22 = version.parse(triton.__version__) >= version.parse('2.2.0')
 
