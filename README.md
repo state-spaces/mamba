@@ -3,7 +3,13 @@
 ![Mamba](assets/selection.png "Selective State Space")
 > **Mamba: Linear-Time Sequence Modeling with Selective State Spaces**\
 > Albert Gu*, Tri Dao*\
-> Paper: https://arxiv.org/abs/2312.00752
+> Paper: https://arxiv.org/abs/2312.00752\
+
+![Mamba-2](assets/ssd_algorithm.png "State Space Dual Model")
+> **Transformers are SSMs: Generalized Models and Efficient Algorithms**\
+>     **Through Structured State Space Duality**\
+> Tri Dao*, Albert Gu*\
+> Paper: https://arxiv.org/abs/2405.21060
 
 ## About
 
@@ -56,7 +62,7 @@ The main module of this repository is the Mamba architecture block wrapping the 
 Source: [modules/mamba_simple.py](mamba_ssm/modules/mamba_simple.py).
 
 Usage:
-```
+``` python
 import torch
 from mamba_ssm import Mamba
 
@@ -73,6 +79,31 @@ y = model(x)
 assert y.shape == x.shape
 ```
 
+### Mamba-2
+
+The Mamba-2 block is implemented at [modules/mamba2.py](mamba_ssm/modules/mamba2.py).
+
+A simpler version is at [modules/mamba2_simple.py](mamba_ssm/modules/mamba2_simple.py)
+
+The usage is similar to Mamba(-1):
+``` python
+from mamba_ssm import Mamba2
+model = Mamba(
+    # This module uses roughly 3 * expand * d_model^2 parameters
+    d_model=dim, # Model dimension d_model
+    d_state=64,  # SSM state expansion factor, typically 64 or 128
+    d_conv=4,    # Local convolution width
+    expand=2,    # Block expansion factor
+).to("cuda")
+y = model(x)
+assert y.shape == x.shape
+```
+
+#### SSD
+
+A minimal version of the inner SSD module (Listing 1 from the Mamba-2 paper) with conversion between "discrete" and "continuous" SSM versions
+is at [modules/ssd_minimal.py](mamba_ssm/modules/ssd_minimal.py).
+
 ### Mamba Language Model
 
 Finally, we provide an example of a complete language model: a deep sequence model backbone (with repeating Mamba blocks) + language model head.
@@ -83,12 +114,12 @@ This is an example of how to integrate Mamba into an end-to-end neural network.
 This example is used in the generation scripts below.
 
 
-
 ## Pretrained Models
 
 Pretrained models are uploaded to
 [Hugging Face](https://huggingface.co/state-spaces): `mamba-130m`, `mamba-370m`,
-`mamba-790m`, `mamba-1.4b`, `mamba-2.8b`, trained on 300B tokens on the Pile, as well as `mamba-2.8b-slimpj`
+`mamba-790m`, `mamba-1.4b`, `mamba-2.8b`, `mamba2-130m`, `mamba2-370m`,
+`mamba2-780m`, `mamba2-1.3b`, `mamba2-2.7b`, `transformerpp-2.7b`, `mamba2attn-2.7b`, trained on 300B tokens on the Pile, as well as `mamba-2.8b-slimpj`
 (trained on 600B tokens on the SlimPajama dataset).
 
 
@@ -114,23 +145,27 @@ Performance is expected to be comparable or better than other architectures trai
 
 To run zero-shot evaluations of models (corresponding to Table 3 of the paper),
 we use the
-[lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness/tree/big-refactor)
+[lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness)
 library.
 
-1. Pull the `lm-evaluation-harness` repo by `git submodule update --init
-   --recursive`. We use the `big-refactor` branch.
-2. Install `lm-evaluation-harness`: `pip install -e 3rdparty/lm-evaluation-harness`.
-On Python 3.10 you might need to manually install the latest version of `promptsource`: `pip install git+https://github.com/bigscience-workshop/promptsource.git`.
-3. Run evaluation with (more documentation at the [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness/tree/big-refactor) repo):
-```
-python evals/lm_harness_eval.py --model mamba --model_args pretrained=state-spaces/mamba-130m --tasks lambada_openai,hellaswag,piqa,arc_easy,arc_challenge,winogrande --device cuda --batch_size 64
+1. Install `lm-evaluation-harness` by `pip install lm-eval==0.4.2`.
+2. Run evaluation with (more documentation at the [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness/tree/big-refactor) repo):
+``` sh
+lm_eval --model mamba_ssm --model_args pretrained=state-spaces/mamba-130m --tasks lambada_openai,hellaswag,piqa,arc_easy,arc_challenge,winogrande,openbookqa --device cuda --batch_size 256
 python evals/lm_harness_eval.py --model hf --model_args pretrained=EleutherAI/pythia-160m --tasks lambada_openai,hellaswag,piqa,arc_easy,arc_challenge,winogrande --device cuda --batch_size 64
 ```
 
 To reproduce the results on the `mamba-2.8b-slimpj` model reported in the blogposts:
+``` sh
+lm_eval --model mamba_ssm --model_args pretrained=state-spaces/mamba-2.8b-slimpj --tasks boolq,piqa,hellaswag,winogrande,arc_easy,arc_challenge,openbookqa,race,truthfulqa_mc2 --device cuda --batch_size 256
+lm_eval --model mamba_ssm --model_args pretrained=state-spaces/mamba-2.8b-slimpj --tasks mmlu --num_fewshot 5 --device cuda --batch_size 256
 ```
-python evals/lm_harness_eval.py --model mamba --model_args pretrained=state-spaces/mamba-2.8b-slimpj --tasks boolq,piqa,hellaswag,winogrande,arc_easy,arc_challenge,openbookqa,race,truthfulqa_mc2 --device cuda --batch_size 64
-python evals/lm_harness_eval.py --model mamba --model_args pretrained=state-spaces/mamba-2.8b-slimpj --tasks mmlu --num_fewshot 5 --device cuda --batch_size 64
+
+To run evaluations on Mamba-2 models, simply replace the model names:
+``` sh
+lm_eval --model mamba_ssm --model_args pretrained=state-spaces/mamba2-2.7b --tasks lambada_openai,hellaswag,piqa,arc_easy,arc_challenge,winogrande,openbookqa --device cuda --batch_size 256
+lm_eval --model mamba_ssm --model_args pretrained=state-spaces/transformerpp-2.7b --tasks lambada_openai,hellaswag,piqa,arc_easy,arc_challenge,winogrande,openbookqa --device cuda --batch_size 256
+lm_eval --model mamba_ssm --model_args pretrained=state-spaces/mamba2attn-2.7b --tasks lambada_openai,hellaswag,piqa,arc_easy,arc_challenge,winogrande,openbookqa --device cuda --batch_size 256
 ```
 
 Note that the result of each task might differ from reported values by 0.1-0.3 due to noise in the evaluation process.
@@ -148,16 +183,21 @@ Other configurable options include the top-p (nucleus sampling) probability, and
 
 To test generation latency (e.g. batch size = 1) with different sampling strategies:
 
-```
+``` sh
 python benchmarks/benchmark_generation_mamba_simple.py --model-name "state-spaces/mamba-2.8b" --prompt "My cat wrote all this CUDA code for a new language model and" --topp 0.9 --temperature 0.7 --repetition-penalty 1.2
 python benchmarks/benchmark_generation_mamba_simple.py --model-name "EleutherAI/pythia-2.8b" --prompt "My cat wrote all this CUDA code for a new language model and" --topp 0.9 --temperature 0.7 --repetition-penalty 1.2
 python benchmarks/benchmark_generation_mamba_simple.py --model-name "state-spaces/mamba-2.8b" --prompt "My cat wrote all this CUDA code for a new language model and" --minp 0.05 --topk 0 --temperature 0.7 --repetition-penalty 1.2
 ```
 
 To test generation throughput with random prompts (e.g. large batch size):
+``` sh
+python benchmarks/benchmark_generation_mamba_simple.py --model-name "state-spaces/mamba-2.8b" --batch 64
+python benchmarks/benchmark_generation_mamba_simple.py --model-name "EleutherAI/pythia-2.8b" --batch 64
 ```
-python benchmarks/benchmark_generation_mamba_simple.py --model-name "state-spaces/mamba-2.8b" --batch 128
-python benchmarks/benchmark_generation_mamba_simple.py --model-name "EleutherAI/pythia-2.8b" --batch 128
+
+With Mamba-2, you just need to change the model name:
+``` sh
+python benchmarks/benchmark_generation_mamba_simple.py --model-name "state-spaces/mamba2-2.7b" --prompt "My cat wrote all this CUDA code for a new language model and" --topp 0.9 --temperature 0.7 --repetition-penalty 1.2
 ```
 
 
@@ -180,7 +220,7 @@ that is specific to the training framework.
 
 ## Citation
 
-If you use this codebase, or otherwise found our work valuable, please cite Mamba:
+If you use this codebase, or otherwise find our work valuable, please cite Mamba:
 ```
 @article{mamba,
   title={Mamba: Linear-Time Sequence Modeling with Selective State Spaces},
@@ -188,4 +228,12 @@ If you use this codebase, or otherwise found our work valuable, please cite Mamb
   journal={arXiv preprint arXiv:2312.00752},
   year={2023}
 }
+
+@inproceedings{mamba2,
+  title={Transformers are {SSM}s: Generalized Models and Efficient Algorithms Through Structured State Space Duality},
+  author={Dao, Tri and Gu, Albert},
+  booktitle={International Conference on Machine Learning (ICML)},
+  year={2024}
+}
+
 ```

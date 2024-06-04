@@ -325,7 +325,7 @@ void selective_scan_fwd_launch(SSMParamsBase &params, cudaStream_t stream) {
                     // interface for setting kernel launch attributes is slightly different from 
                     // cuda's. In particualar, it seems to expect a plain const void * pointer.
 
-                    auto kernel = &selective_scan_fwd_kernel<Ktraits>; // TODO: change to reinterpret cast. What's the best practice?
+                    auto kernel = &selective_scan_fwd_kernel<Ktraits>;
 
                     
                     if (kSmemSize >= 48 * 1024) {

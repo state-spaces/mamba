@@ -508,7 +508,7 @@ void selective_scan_bwd_launch(SSMParamsBwd &params, cudaStream_t stream) {
 
                         dim3 grid(params.batch, params.dim);
                         
-                        auto kernel = &selective_scan_bwd_kernel<Ktraits>; // TODO: change to reinterpret cast? what's the best practice?
+                        auto kernel = &selective_scan_bwd_kernel<Ktraits>;
 
                         if (kSmemSize >= 48 * 1024) {
 

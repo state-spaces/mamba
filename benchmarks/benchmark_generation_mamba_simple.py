@@ -32,7 +32,7 @@ device = "cuda"
 dtype = torch.float16
 
 print(f"Loading model {args.model_name}")
-is_mamba = args.model_name.startswith("state-spaces/mamba-")
+is_mamba = args.model_name.startswith("state-spaces/mamba") or args.model_name.startswith("state-spaces/transformerpp")
 if is_mamba:
     tokenizer = AutoTokenizer.from_pretrained("EleutherAI/gpt-neox-20b")
     model = MambaLMHeadModel.from_pretrained(args.model_name, device=device, dtype=dtype)
