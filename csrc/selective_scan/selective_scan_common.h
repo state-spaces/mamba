@@ -185,8 +185,11 @@ inline __device__ void load_input(typename Ktraits::input_t *u,
         using vec_t = typename Ktraits::vec_t;
         typename Ktraits::BlockLoadVecT(smem_load_vec).Load(
             reinterpret_cast<vec_t*>(u),
-            reinterpret_cast<vec_t(&)[Ktraits::kNLoads]>(u_vals),
-            Ktraits::kNThreads * Ktraits::kNLoads
+            reinterpret_cast<vec_t(&)[Ktraits::kNLoads]>(u_vals)
+            #ifdef USE_ROCM
+                , Ktraits::kNThreads * Ktraits::kNLoads
+            #endif
+            
        );
     } else {
         typename Ktraits::BlockLoadT(smem_load).Load(u, u_vals, seqlen, 0.f);

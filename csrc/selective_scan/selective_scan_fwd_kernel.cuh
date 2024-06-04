@@ -349,16 +349,27 @@ void selective_scan_fwd_launch(SSMParamsBase &params, cudaStream_t stream) {
 
 template<typename input_t, typename weight_t>
 void selective_scan_fwd_cuda(SSMParamsBase &params, cudaStream_t stream) {
-    /// TODO: make launch parameters platform-dependent!
-    if (params.seqlen <= 128) {           
-        selective_scan_fwd_launch<64, 4, input_t, weight_t>(params, stream);
-    } else if (params.seqlen <= 256) {
-        selective_scan_fwd_launch<64, 8, input_t, weight_t>(params, stream);
-    } else if (params.seqlen <= 512) {
-        selective_scan_fwd_launch<64, 16, input_t, weight_t>(params, stream);
-    } else if (params.seqlen <= 1024) {
-        selective_scan_fwd_launch<64, 16, input_t, weight_t>(params, stream);
-    } else {
-        selective_scan_fwd_launch<128, 16, input_t, weight_t>(params, stream);
-    }
+    #ifndef USE_ROCM
+        if (params.seqlen <= 128) {           
+            selective_scan_fwd_launch<64, 4, input_t, weight_t>(params, stream);
+        } else if (params.seqlen <= 256) {
+            selective_scan_fwd_launch<64, 8, input_t, weight_t>(params, stream);
+        } else if (params.seqlen <= 512) {
+            selective_scan_fwd_launch<64, 16, input_t, weight_t>(params, stream);
+        } else if (params.seqlen <= 1024) {
+            selective_scan_fwd_launch<64, 16, input_t, weight_t>(params, stream);
+        } else {
+            selective_scan_fwd_launch<128, 16, input_t, weight_t>(params, stream);
+        }
+    #else
+        if (params.seqlen <= 256) {
+            selective_scan_fwd_launch<64, 4, input_t, weight_t>(params, stream);
+        } else if (params.seqlen <= 512) {
+            selective_scan_fwd_launch<64, 8, input_t, weight_t>(params, stream);
+        } else if (params.seqlen <= 1024) {
+            selective_scan_fwd_launch<64, 16, input_t, weight_t>(params, stream);
+        } else {
+            selective_scan_fwd_launch<128, 16, input_t, weight_t>(params, stream);
+        }
+    #endif
 }
