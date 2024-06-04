@@ -536,7 +536,7 @@ template<typename input_t, typename weight_t>
 void selective_scan_bwd_cuda(SSMParamsBwd &params, cudaStream_t stream) {
 
     #ifndef USE_ROCM
-        constexpr int warp_size = at::cuda::warp_size();
+        constexpr int warp_size = 32;
     #else
         constexpr int warp_size = rocprim::warp_size();
     #endif
