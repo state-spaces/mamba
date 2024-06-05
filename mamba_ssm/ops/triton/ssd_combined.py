@@ -754,7 +754,7 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
         zx0, z, xBC, dt = torch.split(zxbcdt, [2 * d_nonssm, dim, dim + ngroups * dstate * 2, nheads], dim=-1)
         seq_idx = seq_idx.contiguous() if seq_idx is not None else None
         xBC_conv = rearrange(
-            causal_conv1d_cuda.causal_conv1d_fwd(rearrange(xBC, "b s d -> b d s"),
+            causal_conv1d_cuda.causal_conv1d_fwd(rearrange(xBC, "b s d -> b d s").contiguous(),
                                                  conv1d_weight, conv1d_bias, seq_idx, None, None, activation in ["silu", "swish"]),
             "b d s -> b s d"
         )
@@ -828,7 +828,7 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
         zx0, z, xBC, dt = torch.split(zxbcdt, [2 * d_nonssm, dim, dim + 2 * ctx.ngroups * dstate, nheads], dim=-1)
         # Recompute x, B, C
         xBC_conv = rearrange(
-            causal_conv1d_cuda.causal_conv1d_fwd(rearrange(xBC, "b s d -> b d s"),
+            causal_conv1d_cuda.causal_conv1d_fwd(rearrange(xBC, "b s d -> b d s").contiguous(),
                                                  conv1d_weight, conv1d_bias, seq_idx, None, None, ctx.activation in ["silu", "swish"]),
             "b d s -> b s d"
         )
