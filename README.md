@@ -3,7 +3,7 @@
 ![Mamba](assets/selection.png "Selective State Space")
 > **Mamba: Linear-Time Sequence Modeling with Selective State Spaces**\
 > Albert Gu*, Tri Dao*\
-> Paper: https://arxiv.org/abs/2312.00752\
+> Paper: https://arxiv.org/abs/2312.00752
 
 ![Mamba-2](assets/ssd_algorithm.png "State Space Dual Model")
 > **Transformers are SSMs: Generalized Models and Efficient Algorithms**\
