@@ -16,6 +16,7 @@ from mamba_ssm.modules.mamba_simple import Mamba
 from mamba_ssm.modules.mamba2 import Mamba2
 from mamba_ssm.modules.mha import MHA
 from mamba_ssm.modules.mlp import GatedMLP
+from mamba_ssm.modules.mamba_simple import Block as Block_Mamba1
 from mamba_ssm.modules.block import Block
 from mamba_ssm.utils.generation import GenerationMixin
 from mamba_ssm.utils.hf import load_config_hf, load_state_dict_hf
@@ -70,7 +71,8 @@ def create_block(
         mlp_cls = partial(
             GatedMLP, hidden_features=d_intermediate, out_features=d_model, **factory_kwargs
         )
-    block = Block(
+    block_cls = Block if ssm_layer == "Mamba2" else Block_Mamba1
+    block = block_cls(
         d_model,
         mixer_cls,
         mlp_cls,
