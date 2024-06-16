@@ -24,7 +24,7 @@ template<> __device__ __forceinline__ float conj<float>(float x) { return x; }
 template<> __device__ __forceinline__ complex_t conj<complex_t>(complex_t x) { return std::conj(x); }
 
 template<int kNThreads_, int kNItems_, bool kIsEvenLen_, bool kIsVariableB_, bool kIsVariableC_,
-         bool kDeltaSoftplus_, bool kHasZ_, typename input_t_, typename weight_t_>
+         bool kDeltaSoftplus_, bool kHasZ_,  bool kUseIndex_,typename input_t_, typename weight_t_>
 struct Selective_Scan_bwd_kernel_traits {
     static_assert(kNItems_ % 4 == 0);
     using input_t = input_t_;
@@ -42,6 +42,7 @@ struct Selective_Scan_bwd_kernel_traits {
     static constexpr bool kIsVariableC = kIsVariableC_;
     static constexpr bool kDeltaSoftplus = kDeltaSoftplus_;
     static constexpr bool kHasZ = kHasZ_;
+    static constexpr bool kUseIndex = kUseIndex_;
     // Setting MinBlocksPerMP to be 3 (instead of 2) for 128 threads with float improves occupancy.
     // For complex this would lead to massive register spilling, so we keep it at 2.
     static constexpr int kMinBlocks = kNThreads == 128 && !kIsComplex ? 3 : 2;
@@ -49,6 +50,8 @@ struct Selective_Scan_bwd_kernel_traits {
     using scan_t = std::conditional_t<!kIsComplex, float2, float4>;
     using BlockLoadT = cub::BlockLoad<input_t, kNThreads, kNItems, cub::BLOCK_LOAD_WARP_TRANSPOSE>;
     using BlockLoadVecT = cub::BlockLoad<vec_t, kNThreads, kNLoads, cub::BLOCK_LOAD_WARP_TRANSPOSE>;
+    using BlockLoadIndexT = cub::BlockLoad<int, kNThreads, kNItems, cub::BLOCK_LOAD_WARP_TRANSPOSE>;
+    using BlockLoadIndexVecT = cub::BlockLoad<vec_t, kNThreads, kNLoads, cub::BLOCK_LOAD_WARP_TRANSPOSE>;
     using BlockLoadWeightT = cub::BlockLoad<input_t, kNThreads, !kIsComplex ? kNItems : kNItems * 2, cub::BLOCK_LOAD_WARP_TRANSPOSE>;
     using BlockLoadWeightVecT = cub::BlockLoad<vec_t, kNThreads, !kIsComplex ? kNLoads : kNLoads * 2, cub::BLOCK_LOAD_WARP_TRANSPOSE>;
     using BlockStoreT = cub::BlockStore<input_t, kNThreads, kNItems, cub::BLOCK_STORE_WARP_TRANSPOSE>;
@@ -80,6 +83,7 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
     constexpr bool kIsVariableC = Ktraits::kIsVariableC;
     constexpr bool kDeltaSoftplus = Ktraits::kDeltaSoftplus;
     constexpr bool kHasZ = Ktraits::kHasZ;
+    constexpr bool kUseIndex = Ktraits::kUseIndex;
     constexpr int kNThreads = Ktraits::kNThreads;
     constexpr int kNItems = Ktraits::kNItems;
     using input_t = typename Ktraits::input_t;
@@ -94,6 +98,7 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
     // auto& smem_load = reinterpret_cast<typename BlockLoadT::TempStorage&>(smem_loadstorescan);
     auto& smem_load = reinterpret_cast<typename Ktraits::BlockLoadT::TempStorage&>(smem_);
     auto& smem_load_weight = reinterpret_cast<typename Ktraits::BlockLoadWeightT::TempStorage&>(smem_);
+    auto& smem_load_index = reinterpret_cast<typename Ktraits::BlockLoadIndexT::TempStorage&>(smem_);
     auto& smem_load_weight1 = *reinterpret_cast<typename Ktraits::BlockLoadWeightT::TempStorage*>(smem_ + sizeof(typename Ktraits::BlockLoadWeightT::TempStorage));
     auto& smem_store = reinterpret_cast<typename Ktraits::BlockStoreT::TempStorage&>(smem_);
     auto& smem_exchange = *reinterpret_cast<typename Ktraits::BlockExchangeT::TempStorage*>(smem_ + Ktraits::kSmemIOSize);
@@ -136,21 +141,30 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
         : reinterpret_cast<scan_t *>(params.x_ptr) + (batch_id * params.dim + dim_id) * (params.n_chunks) * params.dstate;
     float dD_val = 0;
     float ddelta_bias_val = 0;
-
+    int *index = !kUseIndex ? nullptr :reinterpret_cast<int *>(params.index_ptr) + batch_id * params.seqlen;
     constexpr int kChunkSize = kNThreads * kNItems;
     u += (params.n_chunks - 1) * kChunkSize;
+    index += (params.n_chunks - 1) * kChunkSize;
     delta += (params.n_chunks - 1) * kChunkSize;
     dout += (params.n_chunks - 1) * kChunkSize;
     Bvar += (params.n_chunks - 1) * kChunkSize * (!kIsComplex ? 1 : 2);
     Cvar += (params.n_chunks - 1) * kChunkSize * (!kIsComplex ? 1 : 2);
     for (int chunk = params.n_chunks - 1; chunk >= 0; --chunk) {
         input_t u_vals[kNItems];
+        
         input_t delta_vals_load[kNItems];
         input_t dout_vals_load[kNItems];
+        int index_vals_load[kNItems];
         __syncthreads();
         load_input<Ktraits>(u, u_vals, smem_load, params.seqlen - chunk * kChunkSize);
         u -= kChunkSize;
         __syncthreads();
+        if constexpr (kUseIndex) {
+            load_index<Ktraits>(index, index_vals_load, smem_load_index, params.seqlen - chunk * kChunkSize);
+            index -= kChunkSize;
+        }
+        __syncthreads();
+
         load_input<Ktraits>(delta, delta_vals_load, smem_load, params.seqlen - chunk * kChunkSize);
         // Will reload delta at the same location if kDeltaSoftplus
         if constexpr (!kDeltaSoftplus) { delta -= kChunkSize; }
@@ -244,8 +258,16 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
             if constexpr (!kIsComplex) {
                 #pragma unroll
                 for (int i = 0; i < kNItems; ++i) {
-                    const float delta_a_exp = exp2f(delta_vals[i] * A_scaled);
+                    float delta_a_exp = exp2f(delta_vals[i] * A_scaled);
+
+                    // Reset A bar for cumulative sequences (Real)
+                    if constexpr (kUseIndex) {
+                        if (index_vals_load[i] == 0) {
+                            delta_a_exp = 0.f;
+                        }
+                    }
                     thread_data[i] = make_float2(delta_a_exp, !kIsVariableB ? delta_vals[i] * float(u_vals[i]) : delta_vals[i] * float(u_vals[i]) * B_vals[i]);
+
                     if (i == 0) {
                         smem_delta_a[threadIdx.x == 0 ? state_idx + (chunk % 2) * MAX_DSTATE : threadIdx.x + 2 * MAX_DSTATE] = delta_a_exp;
                     } else {
@@ -332,6 +354,14 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
                 for (int i = 0; i < kNItems; ++i) {
                     // Pytorch's implementation of complex exp (which calls thrust) is very slow
                     complex_t delta_a_exp = cexp2f(delta_vals[i] * A_scaled);
+
+                    // Reset A bar for cumulative sequences (Complex)
+                    if constexpr (kUseIndex) {
+                        if (index_vals_load[i] == 0) {
+                            delta_a_exp.real_ = 0.f;
+                            delta_a_exp.imag_ = 0.f;
+                        }
+                    }
                     weight_t B_delta_u_val = !kIsVariableB ? delta_vals[i] * float(u_vals[i]) : B_vals[i] * delta_vals[i] * float(u_vals[i]);
                     thread_data[i] = make_float4(delta_a_exp.real_, delta_a_exp.imag_, B_delta_u_val.real_, B_delta_u_val.imag_);
                     if (i == 0) {
@@ -495,19 +525,21 @@ void selective_scan_bwd_launch(SSMParamsBwd &params, cudaStream_t stream) {
             BOOL_SWITCH(params.is_variable_C, kIsVariableC, [&] {
                 BOOL_SWITCH(params.delta_softplus, kDeltaSoftplus, [&] {
                     BOOL_SWITCH(params.z_ptr != nullptr , kHasZ, [&] {
-                        using Ktraits = Selective_Scan_bwd_kernel_traits<kNThreads, kNItems, kIsEvenLen, kIsVariableB, kIsVariableC, kDeltaSoftplus, kHasZ, input_t, weight_t>;
-                        // using Ktraits = Selective_Scan_bwd_kernel_traits<kNThreads, kNItems, true, kIsVariableB, kIsVariableC, kDeltaSoftplus, kHasZ, input_t, weight_t>;
-                        // TODO: check this
-                        constexpr int kSmemSize = Ktraits::kSmemSize + MAX_DSTATE * sizeof(typename Ktraits::scan_t) + (kNThreads + 4 * MAX_DSTATE) * sizeof(typename Ktraits::weight_t);
-                        // printf("smem_size = %d\n", kSmemSize);
-                        dim3 grid(params.batch, params.dim);
-                        auto kernel = &selective_scan_bwd_kernel<Ktraits>;
-                        if (kSmemSize >= 48 * 1024) {
-                            C10_CUDA_CHECK(cudaFuncSetAttribute(
-                                kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
-                        }
-                        kernel<<<grid, Ktraits::kNThreads, kSmemSize, stream>>>(params);
-                        C10_CUDA_KERNEL_LAUNCH_CHECK();
+                        BOOL_SWITCH(params.index_ptr != nullptr , kUseIndex, [&] {
+                            using Ktraits = Selective_Scan_bwd_kernel_traits<kNThreads, kNItems, kIsEvenLen, kIsVariableB, kIsVariableC, kDeltaSoftplus, kHasZ, kUseIndex, input_t, weight_t>;
+                            // using Ktraits = Selective_Scan_bwd_kernel_traits<kNThreads, kNItems, true, kIsVariableB, kIsVariableC, kDeltaSoftplus, kHasZ, input_t, weight_t>;
+                            // TODO: check this
+                            constexpr int kSmemSize = Ktraits::kSmemSize + MAX_DSTATE * sizeof(typename Ktraits::scan_t) + (kNThreads + 4 * MAX_DSTATE) * sizeof(typename Ktraits::weight_t);
+                            // printf("smem_size = %d\n", kSmemSize);
+                            dim3 grid(params.batch, params.dim);
+                            auto kernel = &selective_scan_bwd_kernel<Ktraits>;
+                            if (kSmemSize >= 48 * 1024) {
+                                C10_CUDA_CHECK(cudaFuncSetAttribute(
+                                    kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
+                            }
+                            kernel<<<grid, Ktraits::kNThreads, kSmemSize, stream>>>(params);
+                            C10_CUDA_KERNEL_LAUNCH_CHECK();
+                        });
                     });
                 });
             });

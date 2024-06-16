@@ -116,9 +116,10 @@ class Mamba(nn.Module):
 
         self.out_proj = nn.Linear(self.d_inner, self.d_model, bias=bias, **factory_kwargs)
 
-    def forward(self, hidden_states, inference_params=None):
+    def forward(self, hidden_states, position_indices=None, inference_params=None):
         """
         hidden_states: (B, L, D)
+        position_indices: (B, L)  a tensor that stores the positional indexes of elements within sequences.
         Returns: same shape as hidden_states
         """
         batch, seqlen, dim = hidden_states.shape
@@ -157,6 +158,7 @@ class Mamba(nn.Module):
                 self.D.float(),
                 delta_bias=self.dt_proj.bias.float(),
                 delta_softplus=True,
+                position_indices = position_indices,
             )
         else:
             x, z = xz.chunk(2, dim=1)
