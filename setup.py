@@ -19,7 +19,6 @@ from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
 import torch
 from torch.utils.cpp_extension import (
     BuildExtension,
-    CppExtension,
     CUDAExtension,
     CUDA_HOME,
 )
@@ -254,31 +253,13 @@ setup(
             "mamba_ssm.egg-info",
         )
     ),
-    author="Tri Dao, Albert Gu",
-    author_email="tri@tridao.me, agu@cs.cmu.edu",
-    description="Mamba state-space model",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/state-spaces/mamba",
-    classifiers=[
-        "Programming Language :: Python :: 3",
-        "License :: OSI Approved :: BSD License",
-        "Operating System :: Unix",
-    ],
+    
     ext_modules=ext_modules,
     cmdclass={"bdist_wheel": CachedWheelsCommand, "build_ext": BuildExtension}
     if ext_modules
     else {
         "bdist_wheel": CachedWheelsCommand,
-    },
-    python_requires=">=3.7",
-    install_requires=[
-        "torch",
-        "packaging",
-        "ninja",
-        "einops",
-        "triton",
-        "transformers",
-        # "causal_conv1d>=1.2.0",
-    ],
+    }
 )
