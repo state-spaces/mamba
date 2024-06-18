@@ -8,9 +8,14 @@
 #include <c10/util/Half.h>
 #include <c10/cuda/CUDAException.h>  // For C10_CUDA_CHECK and C10_CUDA_KERNEL_LAUNCH_CHECK
 
-#include <cub/block/block_load.cuh>
-#include <cub/block/block_store.cuh>
-#include <cub/block/block_scan.cuh>
+#ifndef USE_ROCM
+    #include <cub/block/block_load.cuh>
+    #include <cub/block/block_store.cuh>
+    #include <cub/block/block_scan.cuh>
+#else
+    #include <hipcub/hipcub.hpp>
+    namespace cub = hipcub;
+#endif
 
 #include "selective_scan.h"
 #include "selective_scan_common.h"
@@ -30,7 +35,7 @@ struct Selective_Scan_fwd_kernel_traits {
     static constexpr int kNRows = kNRows_;
     static constexpr int kNBytes = sizeof(input_t);
     static_assert(kNBytes == 2 || kNBytes == 4);
-    static constexpr int kNElts = kNBytes == 4 ? 4 : std::min(8, kNItems);
+    static constexpr int kNElts = kNBytes == 4 ? 4 : constexpr_min(8, kNItems);
     static_assert(kNItems % kNElts == 0);
     static constexpr int kNLoads = kNItems / kNElts;
     static constexpr bool kIsComplex = std::is_same_v<weight_t, complex_t>;
@@ -55,7 +60,7 @@ struct Selective_Scan_fwd_kernel_traits {
     // using BlockScanT = cub::BlockScan<scan_t, kNThreads, cub::BLOCK_SCAN_RAKING_MEMOIZE>;
     // using BlockScanT = cub::BlockScan<scan_t, kNThreads, cub::BLOCK_SCAN_RAKING>;
     using BlockScanT = cub::BlockScan<scan_t, kNThreads, cub::BLOCK_SCAN_WARP_SCANS>;
-    static constexpr int kSmemIOSize = std::max({sizeof(typename BlockLoadT::TempStorage),
+    static constexpr int kSmemIOSize = custom_max({sizeof(typename BlockLoadT::TempStorage),
                                                  sizeof(typename BlockLoadVecT::TempStorage),
                                                  (int(kIsVariableB) + int(kIsVariableC)) * sizeof(typename BlockLoadWeightT::TempStorage),
                                                  (int(kIsVariableB) + int(kIsVariableC)) * sizeof(typename BlockLoadWeightVecT::TempStorage),
@@ -143,7 +148,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
         }
         u += kChunkSize;
         delta += kChunkSize;
-
+    
         float delta_vals[kNRows][kNItems], delta_u_vals[kNRows][kNItems], out_vals[kNRows][kNItems];
         #pragma unroll
         for (int r = 0; r < kNRows; ++r) {
@@ -243,7 +248,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                     // running_prefix = chunk > 0 && threadIdx.x == 0 ? smem_running_prefix[state_idx] : make_float4(1.f, 0.f, 0.f, 0.f);
                 }
                 SSMScanPrefixCallbackOp<weight_t> prefix_op(running_prefix);
-                Ktraits::BlockScanT(smem_scan).InclusiveScan(
+                typename Ktraits::BlockScanT(smem_scan).InclusiveScan(
                     thread_data, thread_data, SSMScanOp<weight_t>(), prefix_op
                 );
                 // There's a syncthreads in the scan op, so we don't need to sync here.
@@ -265,7 +270,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                 }
             }
         }
-
+        
         input_t *out = reinterpret_cast<input_t *>(params.out_ptr) + batch_id * params.out_batch_stride
             + dim_id * kNRows * params.out_d_stride + chunk * kChunkSize;
         __syncthreads();
@@ -312,15 +317,28 @@ void selective_scan_fwd_launch(SSMParamsBase &params, cudaStream_t stream) {
             BOOL_SWITCH(params.is_variable_C, kIsVariableC, [&] {
                 BOOL_SWITCH(params.z_ptr != nullptr , kHasZ, [&] {
                     using Ktraits = Selective_Scan_fwd_kernel_traits<kNThreads, kNItems, kNRows, kIsEvenLen, kIsVariableB, kIsVariableC, kHasZ, input_t, weight_t>;
-                    // constexpr int kSmemSize = Ktraits::kSmemSize;
+                    
                     constexpr int kSmemSize = Ktraits::kSmemSize + kNRows * MAX_DSTATE * sizeof(typename Ktraits::scan_t);
-                    // printf("smem_size = %d\n", kSmemSize);
                     dim3 grid(params.batch, params.dim / kNRows);
+
+                    // Had to change this substantially since potentially the hip 
+                    // interface for setting kernel launch attributes is slightly different from 
+                    // cuda's. In particualar, it seems to expect a plain const void * pointer.
+
                     auto kernel = &selective_scan_fwd_kernel<Ktraits>;
+
+                    
                     if (kSmemSize >= 48 * 1024) {
+                        #ifndef USE_ROCM
                         C10_CUDA_CHECK(cudaFuncSetAttribute(
                             kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
+                        #else
+                        C10_CUDA_CHECK(cudaFuncSetAttribute(
+                            (void *) kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
+                            std::cerr << "Warning (selective_scan_fwd_kernel): attempting to set maxDynamicSharedMemorySize on an AMD GPU which is currently a non-op (in ROCm versions <= 6.1). This might lead to undefined behavior. \n" << std::endl;
+                        #endif
                     }
+
                     kernel<<<grid, Ktraits::kNThreads, kSmemSize, stream>>>(params);
                     C10_CUDA_KERNEL_LAUNCH_CHECK();
                 });
@@ -331,15 +349,37 @@ void selective_scan_fwd_launch(SSMParamsBase &params, cudaStream_t stream) {
 
 template<typename input_t, typename weight_t>
 void selective_scan_fwd_cuda(SSMParamsBase &params, cudaStream_t stream) {
-    if (params.seqlen <= 128) {
-        selective_scan_fwd_launch<32, 4, input_t, weight_t>(params, stream);
-    } else if (params.seqlen <= 256) {
-        selective_scan_fwd_launch<32, 8, input_t, weight_t>(params, stream);
-    } else if (params.seqlen <= 512) {
-        selective_scan_fwd_launch<32, 16, input_t, weight_t>(params, stream);
-    } else if (params.seqlen <= 1024) {
-        selective_scan_fwd_launch<64, 16, input_t, weight_t>(params, stream);
-    } else {
-        selective_scan_fwd_launch<128, 16, input_t, weight_t>(params, stream);
+
+    #ifndef USE_ROCM
+        constexpr int warp_size = 32;
+    #else
+        constexpr int warp_size = rocprim::warp_size();
+    #endif
+
+    if (warp_size == 32) {
+        if (params.seqlen <= 128) {           
+            selective_scan_fwd_launch<64, 4, input_t, weight_t>(params, stream);
+        } else if (params.seqlen <= 256) {
+            selective_scan_fwd_launch<64, 8, input_t, weight_t>(params, stream);
+        } else if (params.seqlen <= 512) {
+            selective_scan_fwd_launch<64, 16, input_t, weight_t>(params, stream);
+        } else if (params.seqlen <= 1024) {
+            selective_scan_fwd_launch<64, 16, input_t, weight_t>(params, stream);
+        } else {
+            selective_scan_fwd_launch<128, 16, input_t, weight_t>(params, stream);
+        }
     }
+    #ifdef USE_ROCM
+    else {
+        if (params.seqlen <= 256) {
+            selective_scan_fwd_launch<64, 4, input_t, weight_t>(params, stream);
+        } else if (params.seqlen <= 512) {
+            selective_scan_fwd_launch<64, 8, input_t, weight_t>(params, stream);
+        } else if (params.seqlen <= 1024) {
+            selective_scan_fwd_launch<64, 16, input_t, weight_t>(params, stream);
+        } else {
+            selective_scan_fwd_launch<128, 16, input_t, weight_t>(params, stream);
+        }
+    }
+    #endif
 }

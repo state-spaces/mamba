@@ -17,6 +17,19 @@ Mamba is a new state space model architecture showing promising performance on i
 It is based on the line of progress on [structured state space models](https://github.com/state-spaces/s4),
 with an efficient hardware-aware design and implementation in the spirit of [FlashAttention](https://github.com/Dao-AILab/flash-attention).
 
+## Prerequisites
+
+### Patching ROCm
+
+If you are on ROCm 6.0, run the following steps to avoid errors during compilation. This is not required for ROCm 6.1 onwards.
+
+1. Locate your ROCm installation directory. This is typically found at `/opt/rocm/`, but may vary depending on your installation.
+
+2. Apply the Patch. Run with `sudo` in case you encounter permission issues.
+   ```bash
+    patch /opt/rocm/include/hip/amd_detail/amd_hip_bf16.h < rocm_patch/rocm6_0.patch 
+   ```
+
 ## Installation
 
 - [Option] `pip install causal-conv1d>=1.2.0`: an efficient implementation of a simple causal Conv1d layer used inside the Mamba block.

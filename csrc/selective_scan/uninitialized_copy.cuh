@@ -27,9 +27,17 @@
 
 #pragma once
 
-#include <cub/config.cuh>
+#ifndef USE_ROCM
+    #include <cub/config.cuh>
 
-#include <cuda/std/type_traits>
+    #include <cuda/std/type_traits>
+#else
+    #include <hipcub/hipcub.hpp>
+    // Map ::cuda::std to the standard std namespace
+    namespace cuda {
+        namespace std = ::std;
+    }
+#endif
 
 
 namespace detail
