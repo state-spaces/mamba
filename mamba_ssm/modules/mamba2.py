@@ -170,7 +170,8 @@ class Mamba2(nn.Module):
         zxbcdt = self.in_proj(u)  # (B, L, d_in_proj) or (B * L, d_in_proj)
         if seqlen_og is not None:
             zxbcdt = rearrange(zxbcdt, "(b l) d -> b l d", l=seqlen)
-        A = -torch.exp(self.A_log)  # (nheads) or (d_inner, d_state)
+        # If the model is loaded in fp16, without the .float() here, A might be -inf
+        A = -torch.exp(self.A_log.float())  # (nheads) or (d_inner, d_state)
         dt_limit_kwargs = {} if self.dt_limit == (0.0, float("inf")) else dict(dt_limit=self.dt_limit)
         if self.use_mem_eff_path and inference_params is None:
             out = mamba_split_conv1d_scan_combined(
