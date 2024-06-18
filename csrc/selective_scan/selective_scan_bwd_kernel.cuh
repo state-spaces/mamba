@@ -518,7 +518,7 @@ void selective_scan_bwd_launch(SSMParamsBwd &params, cudaStream_t stream) {
                             #else
                             C10_CUDA_CHECK(cudaFuncSetAttribute(
                                 (void *) kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
-                            std::cerr << "Warning (selective_scan_fwd_kernel): attempting to set maxDynamicSharedMemorySize on an AMD GPU which is currently a non-op (in ROCm versions <= 6.1). This might lead to undefined behavior. \n" << std::endl;
+                            std::cerr << "Warning (selective_scan_bwd_kernel): attempting to set maxDynamicSharedMemorySize on an AMD GPU which is currently a non-op (in ROCm versions <= 6.1). This might lead to undefined behavior. \n" << std::endl;
                             #endif
 
                         }
@@ -541,7 +541,8 @@ void selective_scan_bwd_cuda(SSMParamsBwd &params, cudaStream_t stream) {
         constexpr int warp_size = rocprim::warp_size();
     #endif
 
-    if (warp_size == 32) {
+    #if warp_size == 32
+
         if (params.seqlen <= 128) {
             selective_scan_bwd_launch<32, 4, input_t, weight_t>(params, stream);
         } else if (params.seqlen <= 256) {
@@ -553,9 +554,9 @@ void selective_scan_bwd_cuda(SSMParamsBwd &params, cudaStream_t stream) {
         } else {
             selective_scan_bwd_launch<128, 16, input_t, weight_t>(params, stream);
         }
-    }
-    #ifdef USE_ROCM
-    else {
+
+    #else 
+
         if (params.seqlen <= 256) {
             selective_scan_bwd_launch<64, 4, input_t, weight_t>(params, stream);
         } else if (params.seqlen <= 512) {
@@ -565,6 +566,6 @@ void selective_scan_bwd_cuda(SSMParamsBwd &params, cudaStream_t stream) {
         } else {
             selective_scan_bwd_launch<128, 16, input_t, weight_t>(params, stream);
         }
-    }
+
     #endif
 }
