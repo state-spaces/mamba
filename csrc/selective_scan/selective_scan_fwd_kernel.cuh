@@ -358,11 +358,11 @@ void selective_scan_fwd_cuda(SSMParamsBase &params, cudaStream_t stream) {
 
     if (warp_size == 32) {
         if (params.seqlen <= 128) {           
-            selective_scan_fwd_launch<64, 4, input_t, weight_t>(params, stream);
+            selective_scan_fwd_launch<32, 4, input_t, weight_t>(params, stream);
         } else if (params.seqlen <= 256) {
-            selective_scan_fwd_launch<64, 8, input_t, weight_t>(params, stream);
+            selective_scan_fwd_launch<32, 8, input_t, weight_t>(params, stream);
         } else if (params.seqlen <= 512) {
-            selective_scan_fwd_launch<64, 16, input_t, weight_t>(params, stream);
+            selective_scan_fwd_launch<32, 16, input_t, weight_t>(params, stream);
         } else if (params.seqlen <= 1024) {
             selective_scan_fwd_launch<64, 16, input_t, weight_t>(params, stream);
         } else {
