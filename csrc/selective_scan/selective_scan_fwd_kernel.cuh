@@ -368,7 +368,6 @@ void selective_scan_fwd_cuda(SSMParamsBase &params, cudaStream_t stream) {
         } else {
             selective_scan_fwd_launch<128, 16, input_t, weight_t>(params, stream);
         }
-    
     #else
         if (params.seqlen <= 256) {
             selective_scan_fwd_launch<64, 4, input_t, weight_t>(params, stream);
