@@ -131,10 +131,6 @@ cmdclass = {}
 ext_modules = []
 
 
-if not torch.cuda.is_available():
-    raise RuntimeError(f"CUDA/HIP not available within Pytorch. {PACKAGE_NAME} is intended for a CUDA/HIP-enabled Pytorch installation.")
-
-
 HIP_BUILD = bool(torch.version.hip)
 
 if not SKIP_CUDA_BUILD:
