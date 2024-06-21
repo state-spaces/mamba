@@ -169,10 +169,9 @@ inline __device__ void load_index(int *u,
                                   int seqlen) {
     if constexpr (Ktraits::kIsEvenLen) {
         auto& smem_load_index_vec = reinterpret_cast<typename Ktraits::BlockLoadIndexVecT::TempStorage&>(smem_load_index);
-        using vec_t = typename Ktraits::vec_t;
         Ktraits::BlockLoadIndexVecT(smem_load_index_vec).Load(
-            reinterpret_cast<vec_t*>(u),
-            reinterpret_cast<vec_t(&)[Ktraits::kNLoads]>(u_vals)
+            reinterpret_cast<uint4*>(u),
+            reinterpret_cast<uint4(&)[Ktraits::kNLoadsIndex]>(u_vals)
        );
     } else {
         Ktraits::BlockLoadIndexT(smem_load_index).Load(u, u_vals, seqlen, 0);

@@ -14,7 +14,22 @@ except ImportError:
     causal_conv1d_cuda = None
 
 import selective_scan_cuda
+class AlignTimer:
+    def __init__(self, message='kernel_no_name'):
+        self.message = message
 
+    def __enter__(self):
+        torch.cuda.synchronize()  
+        self.starter = torch.cuda.Event(enable_timing=True)
+        self.starter.record()
+        return self
+
+    def __exit__(self, type, value, traceback):
+        self.ender = torch.cuda.Event(enable_timing=True)
+        self.ender.record()
+        torch.cuda.synchronize()  
+        self.time = self.starter.elapsed_time(self.ender)
+        print('{} uses time {:.4f} ms'.format(self.message, self.time))
 
 class SelectiveScanFn(torch.autograd.Function):
 
@@ -189,9 +204,11 @@ class MambaInnerFn(torch.autograd.Function):
         conv1d_weight = rearrange(conv1d_weight, "d 1 w -> d w")
         x, z = xz.chunk(2, dim=1)
         conv1d_bias = conv1d_bias.contiguous() if conv1d_bias is not None else None
+        
         conv1d_out = causal_conv1d_cuda.causal_conv1d_fwd(
-            x, conv1d_weight, conv1d_bias, None, None, None, True
+            x, conv1d_weight, conv1d_bias, None, position_indices, None, None, True
         )
+        
         # We're being very careful here about the layout, to avoid extra transposes.
         # We want delta to have d as the slowest moving dimension
         # and L as the fastest moving dimension, since those are what the ssm_scan kernel expects.
@@ -255,7 +272,7 @@ class MambaInnerFn(torch.autograd.Function):
             dout = dout.contiguous()
         if ctx.checkpoint_lvl == 1:
             conv1d_out = causal_conv1d_cuda.causal_conv1d_fwd(
-                x, conv1d_weight, conv1d_bias, None, None, None, True
+                x, conv1d_weight, conv1d_bias, None, position_indices, None, None, True
             )
             delta = rearrange(delta_proj_weight @ x_dbl[:, :delta_rank].t(),
                               "d (b l) -> b d l", l = L)
@@ -302,10 +319,20 @@ class MambaInnerFn(torch.autograd.Function):
         # The kernel supports passing in a pre-allocated dx (e.g., in case we want to fuse the
         # backward of conv1d with the backward of chunk).
         dx, dconv1d_weight, dconv1d_bias, *_ = causal_conv1d_cuda.causal_conv1d_bwd(
-            x, conv1d_weight, conv1d_bias, dconv1d_out, None, None, None, dx, False, True
+            x, conv1d_weight, conv1d_bias, dconv1d_out, None, position_indices, None, None, dx, False, True
         )
         dconv1d_bias = dconv1d_bias if conv1d_bias is not None else None
         dconv1d_weight = rearrange(dconv1d_weight, "d w -> d 1 w")
+        
+        # grad_results = {"dx":dx,"dconv1d_weight":dconv1d_weight,"dconv1d_bias":dconv1d_bias,"dx_proj_weight":dx_proj_weight,"ddelta_proj_weight":ddelta_proj_weight,
+        #                 "dout_proj_weight":dout_proj_weight,"dout_proj_bias":dout_proj_bias, 
+        #                 "dA":dA, "dB":dB, "dC":dC, "dD":dD, "dB_proj_bias":dB_proj_bias,"dC_proj_bias":dC_proj_bias
+        #                 }
+        # if position_indices is None:
+        #     torch.save(grad_results, 'no_position_grad_results.pt')
+        # else:
+        #     torch.save(grad_results, 'use_position_grad_results.pt')
+        
         return (dxz, dconv1d_weight, dconv1d_bias, dx_proj_weight, ddelta_proj_weight,
                 dout_proj_weight, dout_proj_bias,
                 dA, dB, dC, dD,

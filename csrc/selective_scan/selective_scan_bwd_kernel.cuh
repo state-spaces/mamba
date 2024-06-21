@@ -43,6 +43,7 @@ struct Selective_Scan_bwd_kernel_traits {
     static constexpr bool kDeltaSoftplus = kDeltaSoftplus_;
     static constexpr bool kHasZ = kHasZ_;
     static constexpr bool kUseIndex = kUseIndex_;
+    static constexpr int kNLoadsIndex = kNItems / 4;
     // Setting MinBlocksPerMP to be 3 (instead of 2) for 128 threads with float improves occupancy.
     // For complex this would lead to massive register spilling, so we keep it at 2.
     static constexpr int kMinBlocks = kNThreads == 128 && !kIsComplex ? 3 : 2;
@@ -51,7 +52,7 @@ struct Selective_Scan_bwd_kernel_traits {
     using BlockLoadT = cub::BlockLoad<input_t, kNThreads, kNItems, cub::BLOCK_LOAD_WARP_TRANSPOSE>;
     using BlockLoadVecT = cub::BlockLoad<vec_t, kNThreads, kNLoads, cub::BLOCK_LOAD_WARP_TRANSPOSE>;
     using BlockLoadIndexT = cub::BlockLoad<int, kNThreads, kNItems, cub::BLOCK_LOAD_WARP_TRANSPOSE>;
-    using BlockLoadIndexVecT = cub::BlockLoad<vec_t, kNThreads, kNLoads, cub::BLOCK_LOAD_WARP_TRANSPOSE>;
+    using BlockLoadIndexVecT = cub::BlockLoad<uint4, kNThreads, kNLoadsIndex, cub::BLOCK_LOAD_WARP_TRANSPOSE>;
     using BlockLoadWeightT = cub::BlockLoad<input_t, kNThreads, !kIsComplex ? kNItems : kNItems * 2, cub::BLOCK_LOAD_WARP_TRANSPOSE>;
     using BlockLoadWeightVecT = cub::BlockLoad<vec_t, kNThreads, !kIsComplex ? kNLoads : kNLoads * 2, cub::BLOCK_LOAD_WARP_TRANSPOSE>;
     using BlockStoreT = cub::BlockStore<input_t, kNThreads, kNItems, cub::BLOCK_STORE_WARP_TRANSPOSE>;

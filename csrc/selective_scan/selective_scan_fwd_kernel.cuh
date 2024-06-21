@@ -41,15 +41,15 @@ struct Selective_Scan_fwd_kernel_traits {
     static constexpr bool kUseIndex = kUseIndex_;
 
     static constexpr bool kDirectIO = kIsEvenLen && kNLoads == 1;
-
+    static constexpr int kNLoadsIndex = kNItems / 4;
     using vec_t = typename BytesToType<kNBytes * kNElts>::Type;
     using scan_t = std::conditional_t<!kIsComplex, float2, float4>;
     using BlockLoadT = cub::BlockLoad<input_t, kNThreads, kNItems, cub::BLOCK_LOAD_WARP_TRANSPOSE>;
     using BlockLoadVecT = cub::BlockLoad<vec_t, kNThreads, kNLoads,
         !kDirectIO ? cub::BLOCK_LOAD_WARP_TRANSPOSE : cub::BLOCK_LOAD_DIRECT>;
     using BlockLoadIndexT = cub::BlockLoad<int, kNThreads, kNItems, cub::BLOCK_LOAD_WARP_TRANSPOSE>;
-    using BlockLoadIndexVecT = cub::BlockLoad<vec_t, kNThreads, kNLoads,
-        !kDirectIO ? cub::BLOCK_LOAD_WARP_TRANSPOSE : cub::BLOCK_LOAD_DIRECT>;
+    using BlockLoadIndexVecT = cub::BlockLoad<uint4, kNThreads, kNLoadsIndex,
+        !(kIsEvenLen && kNLoadsIndex == 1) ? cub::BLOCK_LOAD_WARP_TRANSPOSE : cub::BLOCK_LOAD_DIRECT>;
     using BlockLoadWeightT = cub::BlockLoad<input_t, kNThreads, !kIsComplex ? kNItems : kNItems * 2, cub::BLOCK_LOAD_WARP_TRANSPOSE>;
     using BlockLoadWeightVecT = cub::BlockLoad<vec_t, kNThreads, !kIsComplex ? kNLoads : kNLoads * 2,
         !kDirectIO ? cub::BLOCK_LOAD_WARP_TRANSPOSE  : cub::BLOCK_LOAD_DIRECT>;
@@ -116,7 +116,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     input_t *Cvar = reinterpret_cast<input_t *>(params.C_ptr) + batch_id * params.C_batch_stride + group_id * params.C_group_stride;
     scan_t *x = reinterpret_cast<scan_t *>(params.x_ptr) + (batch_id * params.dim + dim_id * kNRows) * params.n_chunks * params.dstate;
     int *index = !kUseIndex ? nullptr :reinterpret_cast<int *>(params.index_ptr) + batch_id * params.seqlen;
-    
+
     float D_val[kNRows] = {0};
     if (params.D_ptr != nullptr) {
         #pragma unroll
@@ -142,7 +142,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     for (int chunk = 0; chunk < params.n_chunks; ++chunk) {
         input_t u_vals[kNRows][kNItems], delta_vals_load[kNRows][kNItems];
         int index_vals_load[kNRows][kNItems];
-        
+
         __syncthreads();
         #pragma unroll
         for (int r = 0; r < kNRows; ++r) {
@@ -196,7 +196,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
             // If both B and C vary, this is unused.
             weight_t BC_val[kNRows];
             weight_t B_vals[kNItems], C_vals[kNItems];
-            if constexpr (kIsVariableB) {
+                        if constexpr (kIsVariableB) {
                 load_weight<Ktraits>(Bvar + state_idx * params.B_dstate_stride, B_vals,
                     smem_load_weight, (params.seqlen - chunk * kChunkSize) * (!kIsComplex ? 1 : 2));
                 if constexpr (!kIsVariableC) {
@@ -229,7 +229,6 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                 if (r > 0) { __syncthreads(); }  // Scan could be using the same smem
                 scan_t thread_data[kNItems];
                 #pragma unroll
-                // printf("blockIdx.x:%d,blockIdx.y:%d,threadIdx.x:%d \t index[0][0]: %d\tindex[0][1]: %d\tindex[0][2]: %d\tindex[0][3]: %d\n",blockIdx.x, blockIdx.y,threadIdx.x, index_vals_load[0][0],index_vals_load[0][1],index_vals_load[0][2],index_vals_load[0][3]);
                 for (int i = 0; i < kNItems; ++i) {
                     if constexpr (!kIsComplex) {
                         thread_data[i] = make_float2(exp2f(delta_vals[r][i] * A_val[r]),
