@@ -86,7 +86,7 @@ def get_hip_version(rocm_dir):
 
     for line in raw_output.split("\n"):
         if "HIP version" in line:
-            rocm_version = parse(line.split()[-1].replace("-", "+")) # local version is not parsed correctly
+            rocm_version = parse(line.split()[-1].rstrip('-').replace('-', '+')) # local version is not parsed correctly
             return line, rocm_version
 
     return None, None
@@ -95,7 +95,7 @@ def get_hip_version(rocm_dir):
 def get_torch_hip_version():
 
     if torch.version.hip:
-        return parse(torch.version.hip.split()[-1].replace("-", "+"))
+        return parse(torch.version.hip.split()[-1].rstrip('-').replace('-', '+'))
     else:
         return None
 
