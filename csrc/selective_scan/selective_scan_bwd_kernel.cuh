@@ -536,12 +536,6 @@ template<typename input_t, typename weight_t>
 void selective_scan_bwd_cuda(SSMParamsBwd &params, cudaStream_t stream) {
 
     #ifndef USE_ROCM
-        #define warp_size 32
-    #else
-        #define warp_size ROCM_WARP_SIZE
-    #endif
-
-    #if warp_size == 32 
         if (params.seqlen <= 128) {
             selective_scan_bwd_launch<32, 4, input_t, weight_t>(params, stream);
         } else if (params.seqlen <= 256) {
