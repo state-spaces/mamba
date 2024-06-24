@@ -34,6 +34,8 @@ Other requirements:
 - PyTorch 1.12+
 - CUDA 11.6+
 
+For AMD cards, see additional prerequisites below.
+
 ## Usage
 
 We expose several levels of interface with the Mamba model.
@@ -205,6 +207,19 @@ For [example](https://github.com/state-spaces/mamba/blob/f0affcf69f06d1d06cef018
 However, some frameworks may have post-initialization hooks (e.g. setting all bias terms in `nn.Linear` modules to zero).
 If this is the case, you may have to add custom logic (e.g. this [line](https://github.com/state-spaces/mamba/blob/f0affcf69f06d1d06cef018ff640bf080a11c421/mamba_ssm/modules/mamba_simple.py#L104) turns off re-initializing in our trainer, but would be a no-op in any other framework)
 that is specific to the training framework.
+
+## Additional Prerequisites for AMD cards
+
+### Patching ROCm
+
+If you are on ROCm 6.0, run the following steps to avoid errors during compilation. This is not required for ROCm 6.1 onwards.
+
+1. Locate your ROCm installation directory. This is typically found at `/opt/rocm/`, but may vary depending on your installation.
+
+2. Apply the Patch. Run with `sudo` in case you encounter permission issues.
+   ```bash
+    patch /opt/rocm/include/hip/amd_detail/amd_hip_bf16.h < rocm_patch/rocm6_0.patch 
+   ```
 
 
 ## Citation

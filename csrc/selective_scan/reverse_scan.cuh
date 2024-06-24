@@ -4,12 +4,17 @@
 
 #pragma once
 
-#include <cub/config.cuh>
-
-#include <cub/util_ptx.cuh>
-#include <cub/util_type.cuh>
-#include <cub/block/block_raking_layout.cuh>
-// #include <cub/detail/uninitialized_copy.cuh>
+#ifndef USE_ROCM
+    #include <cub/config.cuh>
+    
+    #include <cub/util_ptx.cuh>
+    #include <cub/util_type.cuh>
+    #include <cub/block/block_raking_layout.cuh>
+    // #include <cub/detail/uninitialized_copy.cuh>
+#else
+    #include <hipcub/hipcub.hpp>
+    namespace cub = hipcub;
+#endif
 #include "uninitialized_copy.cuh"
 
 /**
@@ -46,6 +51,7 @@ __device__ __forceinline__ T ThreadReverseScanInclusive(
         inclusive = scan_op(inclusive, input[i]);
         output[i] = inclusive;
     }
+    return inclusive; 
 }
 
 /**
@@ -89,7 +95,15 @@ struct WarpReverseScan {
     //---------------------------------------------------------------------
 
     /// Whether the logical warp size and the PTX warp size coincide
-    static constexpr bool IS_ARCH_WARP = (LOGICAL_WARP_THREADS == CUB_WARP_THREADS(0));
+
+    // In hipcub, warp_threads is defined as HIPCUB_WARP_THREADS ::rocprim::warp_size()
+    // While in cub, it's defined as a macro that takes a redundant unused argument.
+    #ifndef USE_ROCM
+        #define WARP_THREADS CUB_WARP_THREADS(0)
+    #else
+        #define WARP_THREADS HIPCUB_WARP_THREADS
+    #endif
+    static constexpr bool IS_ARCH_WARP = (LOGICAL_WARP_THREADS == WARP_THREADS);
     /// The number of warp scan steps
     static constexpr int STEPS = cub::Log2<LOGICAL_WARP_THREADS>::VALUE;
     static_assert(LOGICAL_WARP_THREADS == 1 << STEPS);

@@ -12,6 +12,8 @@ import triton.language as tl
 
 from einops import rearrange, repeat
 
+from mamba_ssm.ops.triton.softplus import softplus
+
 
 def init_to_zero(names):
     return lambda nargs: [nargs[name].zero_() for name in names if nargs[name] is not None]
@@ -66,7 +68,7 @@ def _chunk_cumsum_fwd_kernel(
         dt_bias = tl.load(dt_bias_ptr + offs_h * stride_dt_bias_head, mask=offs_h < nheads, other=0.0).to(tl.float32)
         dt += dt_bias[:, None]
     if DT_SOFTPLUS:
-        dt = tl.where(dt <= 20.0, tl.math.log1p(tl.exp(dt)), dt)
+        dt = softplus(dt)
     # As of Triton 2.2.0, tl.clamp is not available yet
     # dt = tl.clamp(dt, dt_min, dt_max)
     dt = tl.minimum(tl.maximum(dt, dt_min), dt_max)
@@ -139,7 +141,7 @@ def _chunk_cumsum_bwd_kernel(
         dt += dt_bias[:, None]
     if DT_SOFTPLUS:
         dt_presoftplus = dt
-        dt = tl.where(dt <= 20.0, tl.math.log1p(tl.exp(dt)), ddt)
+        dt = softplus(dt)
     clamp_mask = (dt < dt_min) | (dt > dt_max)
     # As of Triton 2.2.0, tl.clamp is not available yet
     # dt = tl.clamp(dt, dt_min, dt_max)

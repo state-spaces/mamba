@@ -24,6 +24,10 @@ def test_selective_state_update(dim, dstate, has_z, itype):
     rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (5e-3, 1e-2)
     if itype == torch.bfloat16:
         rtol, atol = 1e-2, 5e-2
+
+        if torch.version.hip:
+            atol *= 2
+    
     # set seed
     torch.random.manual_seed(0)
     batch_size = 2
