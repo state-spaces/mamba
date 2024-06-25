@@ -71,14 +71,11 @@ def generate_random_cu_seqlens(seq_len, packages_num = 2):
     return cu_seqlens, index
 
 
-def main():
+def test_mamba_block(hidden_dim = 2048, seq_len = 4096, batch_size = 1, packages_num = 8):
     # config tested with A100
-    hidden_dim = 4
-    seq_len = 1024
-    batch_size = 2
     device='cuda'
     
-    itype = torch.half
+    itype = torch.bfloat16
     rtol, atol = (6e-4, 2e-3) if itype == torch.float32 else (3e-3, 5e-3)
     if itype == torch.bfloat16:
         rtol, atol = 3e-2, 5e-2
@@ -86,7 +83,6 @@ def main():
     # If we have z, the errors on the weights seem higher
     rtolw = max(rtolw, rtol)
     atolw = max(atolw, atol)
-    packages_num = 8
     # Generate random cu_seqlens for testing
     cu_seqlens, index = generate_random_cu_seqlens(seq_len, packages_num = packages_num)
     cu_seqlens = torch.tensor(cu_seqlens).cuda()
@@ -160,7 +156,6 @@ def main():
     gradients_ref = {name: param.grad.clone() for name, param in mamba_ref.named_parameters()}
     
         
-    # 比较两组梯度
     for name in gradients_ref:
         if name in gradients:
             is_equal = torch.allclose(gradients_ref[name], gradients[name], rtol=rtol, atol=atol)
@@ -184,4 +179,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # warm up
+    test_mamba_block(hidden_dim = 2048, seq_len = 4096, batch_size = 1, packages_num = 1)
+    # compare the duration of the pack process.
+    test_mamba_block(hidden_dim = 2048, seq_len = 4096, batch_size = 1, packages_num = 1)
+    # compare the acceleration ratio of the pack under common parameters.
+    test_mamba_block(hidden_dim = 2048, seq_len = 4096, batch_size = 1, packages_num = 8)
