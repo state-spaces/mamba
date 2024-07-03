@@ -110,4 +110,4 @@ def test_generation_varlen():
         sequences.append(sampled_tokens)
     out_varlen = torch.cat(scores, dim=1)
     print(f"Max diff: {(out_varlen - out_ref).abs().max()}")
-    assert (out_varlen - out_ref).abs().max() < 5 * (out_loop - out_ref).abs().max()
+    assert (out_varlen - out_ref).abs().max() < 2 * (out_loop - out_ref).abs().max()

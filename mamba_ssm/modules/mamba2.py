@@ -226,6 +226,7 @@ class Mamba2(nn.Module):
                     conv_state.copy_(conv_varlen_states)
             assert self.activation in ["silu", "swish"]
             if causal_conv1d_fn is None or self.activation not in ["silu", "swish"]:
+                assert seq_idx is None, "varlen conv1d requires the causal_conv1d package"
                 xBC = self.act(
                     self.conv1d(xBC.transpose(1, 2)).transpose(1, 2)[:, -(self.dconv - 1):]
                 )  # (B, L, self.d_ssm + 2 * ngroups * d_state)
@@ -235,6 +236,7 @@ class Mamba2(nn.Module):
                     rearrange(self.conv1d.weight, "d 1 w -> d w"),
                     bias=self.conv1d.bias,
                     activation=self.activation,
+                    seq_idx=seq_idx,
                 ).transpose(1, 2)
             x, B, C = torch.split(xBC, [self.d_ssm, self.ngroups * self.d_state, self.ngroups * self.d_state], dim=-1)
             y = mamba_chunk_scan_combined(
