@@ -4,8 +4,8 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 from einops import rearrange, repeat
+from huggingface_hub import PyTorchModelHubMixin
 
 try:
     from causal_conv1d import causal_conv1d_fn
@@ -21,7 +21,13 @@ from mamba_ssm.ops.triton.ssd_combined import mamba_chunk_scan_combined
 from mamba_ssm.ops.triton.ssd_combined import mamba_split_conv1d_scan_combined
 
 
-class Mamba2Simple(nn.Module):
+class Mamba2Simple(
+        nn.Module,
+        PyTorchModelHubMixin,
+        library_name="mamba_ssm",
+        repo_url="https://github.com/state-spaces/mamba",
+        tags=["mamba2simple", "arXiv:2312.00752", "arXiv:2405.21060"],
+    ):
     def __init__(
         self,
         d_model,
