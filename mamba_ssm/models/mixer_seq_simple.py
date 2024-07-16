@@ -194,7 +194,7 @@ class MixerModel(nn.Module):
         residual = None
         for layer in self.layers:
             hidden_states, residual = layer(
-                hidden_states, residual, cu_seqlens=cu_seqlens, inference_params=inference_params
+                hidden_states, residual, cu_seqlens=cu_seqlens, inference_params=inference_params, **mixer_kwargs
             )
         if not self.fused_add_norm:
             residual = (hidden_states + residual) if residual is not None else hidden_states
