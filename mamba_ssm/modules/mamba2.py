@@ -35,7 +35,7 @@ from mamba_ssm.ops.triton.ssd_combined import mamba_split_conv1d_scan_combined
 class Mamba2(
         nn.Module,
         PyTorchModelHubMixin,
-        library_name="mamba_ssm",
+        library_name="mamba-ssm",
         repo_url="https://github.com/state-spaces/mamba",
         tags=["mamba2", "arXiv:2312.00752", "arXiv:2405.21060"],
     ):

@@ -32,7 +32,7 @@ except ImportError:
 class Mamba(
         nn.Module,
         PyTorchModelHubMixin,
-        library_name="mamba_ssm",
+        library_name="mamba-ssm",
         repo_url="https://github.com/state-spaces/mamba",
         tags=["mamba", "arXiv:2312.00752"],
     ):
