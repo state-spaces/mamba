@@ -9,7 +9,6 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from einops import rearrange, repeat
-from huggingface_hub import PyTorchModelHubMixin
 
 from mamba_ssm.ops.selective_scan_interface import selective_scan_fn, mamba_inner_fn
 
@@ -29,13 +28,7 @@ except ImportError:
     RMSNorm, layer_norm_fn, rms_norm_fn = None, None, None
 
 
-class Mamba(
-        nn.Module,
-        PyTorchModelHubMixin,
-        library_name="mamba-ssm",
-        repo_url="https://github.com/state-spaces/mamba",
-        tags=["mamba", "arXiv:2312.00752"],
-    ):
+class Mamba(nn.Module):
     def __init__(
         self,
         d_model,

@@ -5,8 +5,8 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 from einops import rearrange, repeat
-from huggingface_hub import PyTorchModelHubMixin
 
 try:
     from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
@@ -31,14 +31,10 @@ from mamba_ssm.distributed.distributed_utils import all_reduce, reduce_scatter
 from mamba_ssm.ops.triton.ssd_combined import mamba_chunk_scan_combined
 from mamba_ssm.ops.triton.ssd_combined import mamba_split_conv1d_scan_combined
 
+from huggingface_hub import PyTorchModelHubMixin
 
-class Mamba2(
-        nn.Module,
-        PyTorchModelHubMixin,
-        library_name="mamba-ssm",
-        repo_url="https://github.com/state-spaces/mamba",
-        tags=["mamba2", "arXiv:2312.00752", "arXiv:2405.21060"],
-    ):
+
+class Mamba2(nn.Module, PyTorchModelHubMixin):
     def __init__(
         self,
         d_model,
