@@ -215,6 +215,7 @@ class MambaLMHeadModel(
         library_name="mamba-ssm",
         repo_url="https://github.com/state-spaces/mamba",
         tags=["arXiv:2312.00752", "arXiv:2405.21060"],
+        pipeline_tag="text-generation",
     ):
 
     def __init__(
