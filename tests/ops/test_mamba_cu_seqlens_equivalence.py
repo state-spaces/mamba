@@ -1,3 +1,4 @@
+import copy
 import random
 import torch
 
@@ -82,7 +83,7 @@ def main():
     assert max([hs.shape[0] for hs in hidden_states_list]) == hidden_states.shape[1]
 
     # creat one simple mamba block
-    mamba = Mamba(
+    mamba_ref = Mamba(
         # This module uses roughly 3 * expand * d_model^2 parameters
         d_model=hidden_dim, # Model dimension d_model
         d_state=16,  # SSM state expansion factor
@@ -91,17 +92,34 @@ def main():
     ).to(device)
 
     # reference output for forwardding hidden_states
-    out_ref = mamba(hidden_states)
-    out_ref = pack(out_ref, cu_seqlens).unsqueeze(0)
+    out_ref_original = mamba_ref(hidden_states)
+    out_ref = pack(out_ref_original, cu_seqlens).unsqueeze(0)
 
     # output for forwardding packed_hidden_states with cu_seqlens
+    mamba = copy.deepcopy(mamba_ref)
     out = mamba(packed_hidden_states, cu_seqlens)
 
     # Testing the max/mean diff
-    print(f'Output max diff: {(out - out_ref).abs().max().item()}')
-    print(f'Output mean diff: {(out - out_ref).abs().mean().item()}')
+    print(f'Output max diff for output in varlen_mamba fwd pass: {(out - out_ref).abs().max().item()}')
+    print(f'Output mean diff for output in varlen_mamba fwd pass: {(out - out_ref).abs().mean().item()}')
     assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
 
+    # bwd for mamba w/ cu_seqlens
+    g = torch.randn_like(out)
+    out.backward(g)
+    mamba_grad = {name: param.grad.clone() for name, param in mamba.named_parameters()}
+
+    # bwd for mamba wo/ cu_seqlens
+    g_ref = unpack(g, cu_seqlens)
+    out_ref_original.backward(g_ref)
+    mamba_ref_grad = {name: param.grad.clone() for name, param in mamba_ref.named_parameters()}
+
+    # check bwd pass
+    assert set(mamba_grad.keys()) == set(mamba_ref_grad.keys())
+    for name in mamba_ref_grad:
+        print(f'Output max diff for {name} in varlen_mamba bwd pass: {( - mamba_ref_grad[name]).abs().max().item()}')
+        print(f'Output mean diff for {name} in varlen_mamba bwd pass: {(mamba_grad[name] - mamba_ref_grad[name]).abs().mean().item()}')
+        assert torch.allclose(mamba_grad[name], mamba_ref_grad[name], rtol=rtol, atol=atol)
 
 if __name__ == "__main__":
     main()
