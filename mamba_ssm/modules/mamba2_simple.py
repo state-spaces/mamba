@@ -167,6 +167,7 @@ class Mamba2Simple(nn.Module):
                 xBC = self.act(
                     self.conv1d(xBC.transpose(1, 2)).transpose(1, 2)
                 )  # (B, L, self.d_inner + 2 * ngroups * d_state)
+                xBC = xBC[:, :seqlen, :]
             else:
                 xBC = causal_conv1d_fn(
                     x=xBC.transpose(1, 2),
