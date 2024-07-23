@@ -138,7 +138,7 @@ def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D, has_z
         print(f'State max diff: {(state - state_ref).abs().max().item()}')
         assert torch.allclose(state, state_ref, rtol=rtol, atol=atol)
     if scan_chunks > 1:
-        ## skip grad test in case of scan chunks ( not supported atm )
+        # skip grad test in case of scan chunks ( not supported atm )
         return
 
     g = torch.randn_like(out)

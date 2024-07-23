@@ -90,7 +90,7 @@ class SelectiveScanFn(torch.autograd.Function):
 def selective_scan_fn(u, delta, A, B, C, D=None, z=None, delta_bias=None, delta_softplus=False,
                      return_last_state=False, prev_state=None):
     """if return_last_state is True, returns (out, last_state)
-    last_state has shape (batch, dim, dstate). Note that the gradient of the last state is
+    last_state has shape (batch, dim, dstate). Note that the gradient of the last state and prev_state (if provided) is
     not considered in the backward pass.
     """
     return SelectiveScanFn.apply(u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state, prev_state)
