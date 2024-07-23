@@ -4,6 +4,7 @@
 
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
+#include <cstdio>
 #include <torch/extension.h>
 #include <vector>
 
@@ -229,7 +230,7 @@ selective_scan_fwd(const at::Tensor &u, const at::Tensor &delta,
                   const c10::optional<at::Tensor> &D_,
                   const c10::optional<at::Tensor> &z_,
                   const c10::optional<at::Tensor> &delta_bias_,
-                  bool delta_softplus) {
+                  bool delta_softplus, const c10::optional<at::Tensor> &prev_state) {
     auto input_type = u.scalar_type();
     auto weight_type = A.scalar_type();
     TORCH_CHECK(input_type == at::ScalarType::Float || input_type == at::ScalarType::Half || input_type == at::ScalarType::BFloat16);
@@ -310,7 +311,13 @@ selective_scan_fwd(const at::Tensor &u, const at::Tensor &delta,
     // Right now u has BHL layout and delta has HBL layout, and we want out to have HBL layout
     at::Tensor out = torch::empty_like(delta);
     at::Tensor x;
-    x = torch::empty({batch_size, dim, n_chunks, dstate * 2}, u.options().dtype(weight_type));
+    if (prev_state.has_value()){
+        x = prev_state.value();
+    }
+    else {
+        x = torch::zeros({batch_size, dim, n_chunks, dstate * 2}, u.options().dtype(weight_type));
+    }
+    printf(u.sizes());
 
     SSMParamsBase params;
     set_ssm_params_fwd(params, batch_size, dim, seqlen, dstate, n_groups, n_chunks, is_variable_B, is_variable_C,

@@ -241,7 +241,18 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                 scan_t running_prefix;
                 if constexpr (!kIsComplex) {
                     // If we use WARP_SCAN then all lane 0 of all warps (not just thread 0) needs to read
-                    running_prefix = chunk > 0 && threadIdx.x % 32 == 0 ? smem_running_prefix[state_idx + r * MAX_DSTATE] : make_float2(1.f, 0.f);
+                    if (chunk == 0){
+                        running_prefix = x[state_idx];
+                    }
+                    else {
+                        if (threadIdx.x % 32 == 0){
+                             running_prefix = smem_running_prefix[state_idx + r * MAX_DSTATE];
+                        }
+                        else {
+                            running_prefix = make_float2(1.f, 0.f);
+                        }
+                    }
+                    // running_prefix = chunk > 0 && threadIdx.x & 32 == 0? smem_running_prefix[state_idx + r * MAX_DSTATE] : make_float2(1.f, 0.f);
                     // running_prefix = chunk > 0 && threadIdx.x == 0 ? smem_running_prefix[state_idx] : make_float2(1.f, 0.f);
                 } else {
                     running_prefix = chunk > 0 && threadIdx.x % 32 == 0 ? smem_running_prefix[state_idx + r * MAX_DSTATE] : make_float4(1.f, 0.f, 0.f, 0.f);

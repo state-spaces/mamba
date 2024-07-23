@@ -1,5 +1,6 @@
 # Copyright (c) 2023, Tri Dao, Albert Gu.
 
+import math
 import torch
 import torch.nn.functional as F
 from torch.cuda.amp import custom_bwd, custom_fwd
@@ -20,7 +21,7 @@ class SelectiveScanFn(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, u, delta, A, B, C, D=None, z=None, delta_bias=None, delta_softplus=False,
-                return_last_state=False):
+                return_last_state=False, prev_state=None):
         if u.stride(-1) != 1:
             u = u.contiguous()
         if delta.stride(-1) != 1:
@@ -39,10 +40,27 @@ class SelectiveScanFn(torch.autograd.Function):
         if C.dim() == 3:
             C = rearrange(C, "b dstate l -> b 1 dstate l")
             ctx.squeeze_C = True
-        out, x, *rest = selective_scan_cuda.fwd(u, delta, A, B, C, D, z, delta_bias, delta_softplus)
+        tmp = None
+        # n_chunks = 
+        tmp = torch.zeros((
+            u.shape[0],
+            u.shape[1],
+            1,
+            int(A.shape[1] * 2),
+        ),device=u.device,dtype=torch.float32) ## BS , dim, chunks, dstate
+        if prev_state is not None:
+            print(u.shape,flush=True) 
+            tmp[:,:,0,0::2] = 1
+            tmp[:,:,0,1::2].copy_(prev_state)
+        else:
+            # tmp[:,:,1:,1::2] = 1
+            tmp[:,:,:,0::2] = 1
+        out, x, *rest = selective_scan_cuda.fwd(u, delta, A, B, C, D, z, delta_bias, delta_softplus, tmp)
         ctx.delta_softplus = delta_softplus
         ctx.has_z = z is not None
+        # print(x[:, :, -1, :].mean(-1) )
         last_state = x[:, :, -1, 1::2]  # (batch, dim, dstate)
+        print(x.dtype)
         if not ctx.has_z:
             ctx.save_for_backward(u, delta, A, B, C, D, delta_bias, x)
             return out if not return_last_state else (out, last_state)
@@ -80,12 +98,12 @@ class SelectiveScanFn(torch.autograd.Function):
 
 
 def selective_scan_fn(u, delta, A, B, C, D=None, z=None, delta_bias=None, delta_softplus=False,
-                     return_last_state=False):
+                     return_last_state=False,prev_state=None):
     """if return_last_state is True, returns (out, last_state)
     last_state has shape (batch, dim, dstate). Note that the gradient of the last state is
     not considered in the backward pass.
     """
-    return SelectiveScanFn.apply(u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state)
+    return SelectiveScanFn.apply(u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state, prev_state)
 
 
 def selective_scan_ref(u, delta, A, B, C, D=None, z=None, delta_bias=None, delta_softplus=False,
