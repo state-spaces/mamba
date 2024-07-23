@@ -100,8 +100,8 @@ def main():
     out = mamba(packed_hidden_states, cu_seqlens)
 
     # Testing the max/mean diff
-    print(f'Output max diff for output in varlen_mamba fwd pass: {(out - out_ref).abs().max().item()}')
-    print(f'Output mean diff for output in varlen_mamba fwd pass: {(out - out_ref).abs().mean().item()}')
+    print(f'max diff for output in varlen_mamba fwd pass: {(out - out_ref).abs().max().item()}')
+    print(f'mean diff for output in varlen_mamba fwd pass: {(out - out_ref).abs().mean().item()}')
     assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
 
     # bwd for mamba w/ cu_seqlens
@@ -117,8 +117,8 @@ def main():
     # check bwd pass
     assert set(mamba_grad.keys()) == set(mamba_ref_grad.keys())
     for name in mamba_ref_grad:
-        print(f'Output max diff for {name} in varlen_mamba bwd pass: {( - mamba_ref_grad[name]).abs().max().item()}')
-        print(f'Output mean diff for {name} in varlen_mamba bwd pass: {(mamba_grad[name] - mamba_ref_grad[name]).abs().mean().item()}')
+        print(f'max diff for {name} in varlen_mamba bwd pass: {(mamba_grad[name] - mamba_ref_grad[name]).abs().max().item()}')
+        print(f'mean diff for {name} in varlen_mamba bwd pass: {(mamba_grad[name] - mamba_ref_grad[name]).abs().mean().item()}')
         assert torch.allclose(mamba_grad[name], mamba_ref_grad[name], rtol=rtol, atol=atol)
 
 if __name__ == "__main__":
