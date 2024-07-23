@@ -95,6 +95,7 @@ def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D, has_z
     delta_bias_ref = delta_bias.detach().clone().requires_grad_() if delta_bias is not None else None
     state = None
     state_ref = None
+    outs = []
     for c in range(scan_chunks):
         chunked_prompt_len = seqlen // scan_chunks
         chunk_start = chunked_prompt_len * c
@@ -115,24 +116,18 @@ def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D, has_z
             delta_bias=delta_bias, delta_softplus=delta_softplus,
             return_last_state=return_last_state,prev_state=state if c > 0 else None
         )
+        outs.append(out)
         if return_last_state:
             state = rest[0]
-        _B_ref = B_ref
-        if is_variable_B:
-            _B_ref = B_ref[...,chunk_start:chunk_end]
-        _C_ref = C_ref
-        if is_variable_B:
-            _C_ref = C_ref[...,chunk_start:chunk_end]
-        _z_ref = z_ref
-        if has_z:
-            _z_ref = z_ref[...,chunk_start:chunk_end]
-        out_ref, *rest = selective_scan_ref(
-            u_ref[...,chunk_start:chunk_end], delta_ref[...,chunk_start:chunk_end], A_ref, _B_ref, _C_ref, D_ref, z=_z_ref,
-            delta_bias=delta_bias_ref, delta_softplus=delta_softplus,
-            return_last_state=return_last_state,prev_state=state_ref if c > 0 else None
-        )
-        if return_last_state:
-            state_ref = rest[0]
+    if len(outs) > 1:
+        out = torch.cat(outs,dim=-1)
+    out_ref, *rest = selective_scan_ref(
+        u_ref, delta_ref, A_ref, B_ref, C_ref, D_ref, z=z_ref,
+        delta_bias=delta_bias_ref, delta_softplus=delta_softplus,
+        return_last_state=return_last_state
+    )
+    if return_last_state:
+        state_ref = rest[0]
     # dA = torch.exp(torch.einsum('bdl,dn->bdln', delta, A))
     # dt_u = delta * u
 
