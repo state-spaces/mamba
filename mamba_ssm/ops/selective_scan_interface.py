@@ -84,8 +84,7 @@ class SelectiveScanFn(torch.autograd.Function):
                 dD if D is not None else None,
                 dz,
                 ddelta_bias if delta_bias is not None else None,
-                None,
-                None)
+                None, None, None)
 
 
 def selective_scan_fn(u, delta, A, B, C, D=None, z=None, delta_bias=None, delta_softplus=False,
@@ -131,7 +130,7 @@ def selective_scan_ref(u, delta, A, B, C, D=None, z=None, delta_bias=None, delta
     else:
         B = B.float()
         C = C.float()
-    x = A.new_zeros((batch, dim, dstate)) if prev_state is not None else prev_state
+    x = A.new_zeros((batch, dim, dstate)) if prev_state is None else prev_state
     ys = []
     deltaA = torch.exp(torch.einsum('bdl,dn->bdln', delta, A))
     if not is_variable_B:
