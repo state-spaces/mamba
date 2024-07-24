@@ -43,7 +43,8 @@ class SelectiveScanFn(torch.autograd.Function):
         x = torch.zeros(
             (u.shape[0], u.shape[1], n_chunks, int(A.shape[1] * 2),),
             device=u.device,
-            dtype=torch.float32
+            dtype=torch.float32,
+            requires_grad=u.requires_grad
         )
         x[:, :, 0, 0::2] = 1
         if prev_state is not None:
@@ -53,21 +54,22 @@ class SelectiveScanFn(torch.autograd.Function):
         ctx.has_z = z is not None
         last_state = x[:, :, -1, 1::2]  # (batch, dim, dstate)
         if not ctx.has_z:
-            ctx.save_for_backward(u, delta, A, B, C, D, delta_bias, x)
+            ctx.save_for_backward(u, delta, A, B, C, D, delta_bias, x, prev_state)
             return out if not return_last_state else (out, last_state)
         else:
-            ctx.save_for_backward(u, delta, A, B, C, D, z, delta_bias, x, out)
+            ctx.save_for_backward(u, delta, A, B, C, D, z, delta_bias, x, out, prev_state)
             out_z = rest[0]
             return out_z if not return_last_state else (out_z, last_state)
 
     @staticmethod
     def backward(ctx, dout, *args):
         if not ctx.has_z:
-            u, delta, A, B, C, D, delta_bias, x = ctx.saved_tensors
+            u, delta, A, B, C, D, delta_bias, x, prev_state = ctx.saved_tensors
             z = None
             out = None
         else:
-            u, delta, A, B, C, D, z, delta_bias, x, out = ctx.saved_tensors
+            u, delta, A, B, C, D, z, delta_bias, x, out, prev_state = ctx.saved_tensors
+        assert prev_state is None, "providing prev_state is not supported in training configuration"
         if dout.stride(-1) != 1:
             dout = dout.contiguous()
         # The kernel supports passing in a pre-allocated dz (e.g., in case we want to fuse the
