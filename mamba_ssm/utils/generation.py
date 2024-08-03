@@ -36,7 +36,7 @@ class InferenceParams:
 
 def modify_logits_for_min_p_filtering(logits, min_p):
     """Set the logits for none min_p values to -inf. Done in-place."""
-    if min_p <= 0.0 or min_p >= 1.0:
+    if (min_p <= 0.0).any() or (min_p >= 1.0).any():
         return
     indices_to_remove = logits < min_p
     logits.masked_fill_(indices_to_remove, float("-Inf"))
@@ -103,7 +103,7 @@ def sample(logits, top_k=1, top_p=0.0, min_p=0.0, temperature=1.0):
         else:
             if min_p > 0.0:
                 logits_top = logits.clone()
-                max_prob = logits_top[..., 0].item()
+                max_prob, _ = (torch.softmax(logits_top, dim=-1)).max(dim=-1, keepdim=True)
                 min_prob = max_prob * min_p
                 modify_logits_for_min_p_filtering(logits_top, min_prob)
                 if temperature != 1.0:
