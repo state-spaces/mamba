@@ -190,11 +190,6 @@ class Mamba(nn.Module):
                     x = self.act(self.conv1d(x)[..., :seqlen])
             else:
                 assert self.activation in ["silu", "swish"]
-                if cu_seqlens is not None:
-                    seq_idx = torch.cat([torch.full((s,), i, dtype=torch.int32, device=cu_seqlens.device) 
-                                         for i, s in enumerate(cu_seqlens[1:]-cu_seqlens[:-1])], dim=0).unsqueeze(0)
-                else:
-                    seq_idx = None
                 x = causal_conv1d_fn(
                     x=x.transpose(1,2).contiguous().transpose(1,2) if cu_seqlens is not None else x,
                     weight=rearrange(self.conv1d.weight, "d 1 w -> d w"),
