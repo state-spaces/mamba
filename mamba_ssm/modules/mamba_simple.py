@@ -116,15 +116,22 @@ class Mamba(nn.Module):
 
         self.out_proj = nn.Linear(self.d_inner, self.d_model, bias=bias, **factory_kwargs)
 
-    def forward(self, hidden_states, cu_seqlens=None, inference_params=None):
+    def forward(self, hidden_states, cu_seqlens=None, seq_idx=None, inference_params=None):
         """
         hidden_states: (B, L, D)
         cu_seqlens: (Optional) cumulative sum of the sequence lengths, starting from 0 and end with L, and must already be sorted.
         Returns: same shape as hidden_states
         """
         batch, seqlen, dim = hidden_states.shape
+
         if cu_seqlens is not None:
             assert batch == 1 and cu_seqlens.ndimension() == 1, "varlen mamba1 is only supported with B=1"
+            # compute seq_idx if not provided
+            if seq_idx is None:
+                seq_idx = torch.cat([torch.full((s,), i, dtype=torch.int32, device=cu_seqlens.device) 
+                        for i, s in enumerate(cu_seqlens[1:]-cu_seqlens[:-1])], dim=0).unsqueeze(0)
+        else:
+            seq_idx = None
 
         conv_state, ssm_state = None, None
         if inference_params is not None:
@@ -160,7 +167,8 @@ class Mamba(nn.Module):
                 self.D.float(),
                 delta_bias=self.dt_proj.bias.float(),
                 delta_softplus=True,
-                cu_seqlens=cu_seqlens
+                cu_seqlens=cu_seqlens,
+                seq_idx=seq_idx,
             )
         else:
             x, z = xz.chunk(2, dim=1)
