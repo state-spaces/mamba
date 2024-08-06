@@ -69,7 +69,7 @@ class Block(nn.Module):
         if self.mlp is not None:
             if not self.fused_add_norm:
                 residual = hidden_states + residual
-                residual = self.norm2(residual.to(dtype=self.norm2.weight.dtype))
+                hidden_states = self.norm2(residual.to(dtype=self.norm2.weight.dtype))
                 if self.residual_in_fp32:
                     residual = residual.to(torch.float32)
             else:
