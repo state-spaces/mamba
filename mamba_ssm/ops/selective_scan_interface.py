@@ -20,7 +20,7 @@ class SelectiveScanFn(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, u, delta, A, B, C, D=None, z=None, delta_bias=None, delta_softplus=False,
-                return_last_state=False):
+                return_last_state=False, prev_state=None):
         if u.stride(-1) != 1:
             u = u.contiguous()
         if delta.stride(-1) != 1:
@@ -39,26 +39,37 @@ class SelectiveScanFn(torch.autograd.Function):
         if C.dim() == 3:
             C = rearrange(C, "b dstate l -> b 1 dstate l")
             ctx.squeeze_C = True
-        out, x, *rest = selective_scan_cuda.fwd(u, delta, A, B, C, D, z, delta_bias, delta_softplus)
+        n_chunks = int((u.shape[-1] + 2048 - 1) / 2048)
+        x = torch.zeros(
+            (u.shape[0], u.shape[1], n_chunks, int(A.shape[1] * 2),),
+            device=u.device,
+            dtype=torch.float32,
+            requires_grad=u.requires_grad
+        )
+        x[:, :, 0, 0::2] = 1
+        if prev_state is not None:
+            x[:, :, 0, 1::2].copy_(prev_state)
+        out, x, *rest = selective_scan_cuda.fwd(u, delta, A, B, C, D, z, delta_bias, delta_softplus, x)
         ctx.delta_softplus = delta_softplus
         ctx.has_z = z is not None
         last_state = x[:, :, -1, 1::2]  # (batch, dim, dstate)
         if not ctx.has_z:
-            ctx.save_for_backward(u, delta, A, B, C, D, delta_bias, x)
+            ctx.save_for_backward(u, delta, A, B, C, D, delta_bias, x, prev_state)
             return out if not return_last_state else (out, last_state)
         else:
-            ctx.save_for_backward(u, delta, A, B, C, D, z, delta_bias, x, out)
+            ctx.save_for_backward(u, delta, A, B, C, D, z, delta_bias, x, out, prev_state)
             out_z = rest[0]
             return out_z if not return_last_state else (out_z, last_state)
 
     @staticmethod
     def backward(ctx, dout, *args):
         if not ctx.has_z:
-            u, delta, A, B, C, D, delta_bias, x = ctx.saved_tensors
+            u, delta, A, B, C, D, delta_bias, x, prev_state = ctx.saved_tensors
             z = None
             out = None
         else:
-            u, delta, A, B, C, D, z, delta_bias, x, out = ctx.saved_tensors
+            u, delta, A, B, C, D, z, delta_bias, x, out, prev_state = ctx.saved_tensors
+        assert prev_state is None, "providing prev_state is not supported in training configuration"
         if dout.stride(-1) != 1:
             dout = dout.contiguous()
         # The kernel supports passing in a pre-allocated dz (e.g., in case we want to fuse the
@@ -75,21 +86,20 @@ class SelectiveScanFn(torch.autograd.Function):
                 dD if D is not None else None,
                 dz,
                 ddelta_bias if delta_bias is not None else None,
-                None,
-                None)
+                None, None, None)
 
 
 def selective_scan_fn(u, delta, A, B, C, D=None, z=None, delta_bias=None, delta_softplus=False,
-                     return_last_state=False):
+                     return_last_state=False, prev_state=None):
     """if return_last_state is True, returns (out, last_state)
-    last_state has shape (batch, dim, dstate). Note that the gradient of the last state is
+    last_state has shape (batch, dim, dstate). Note that the gradient of the last state and prev_state (if provided) is
     not considered in the backward pass.
     """
-    return SelectiveScanFn.apply(u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state)
+    return SelectiveScanFn.apply(u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state, prev_state)
 
 
 def selective_scan_ref(u, delta, A, B, C, D=None, z=None, delta_bias=None, delta_softplus=False,
-                      return_last_state=False):
+                      return_last_state=False, prev_state=None):
     """
     u: r(B D L)
     delta: r(B D L)
@@ -99,6 +109,7 @@ def selective_scan_ref(u, delta, A, B, C, D=None, z=None, delta_bias=None, delta
     D: r(D)
     z: r(B D L)
     delta_bias: r(D), fp32
+    prev_state: r(B D N), fp32
 
     out: r(B D L)
     last_state (optional): r(B D dstate) or c(B D dstate)
@@ -121,7 +132,7 @@ def selective_scan_ref(u, delta, A, B, C, D=None, z=None, delta_bias=None, delta
     else:
         B = B.float()
         C = C.float()
-    x = A.new_zeros((batch, dim, dstate))
+    x = A.new_zeros((batch, dim, dstate)) if prev_state is None else prev_state
     ys = []
     deltaA = torch.exp(torch.einsum('bdl,dn->bdln', delta, A))
     if not is_variable_B:
