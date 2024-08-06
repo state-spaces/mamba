@@ -173,12 +173,15 @@ class MHA(nn.Module):
             # TODO: this only uses seqlen_offset and not lengths_per_sample.
             kv = self._update_kv_cache(kv, inference_params)
             k, v = kv.unbind(dim=-3)
+            k = torch.repeat_interleave(k, dim=2, repeats=self.num_heads // self.num_heads_kv)
+            v = torch.repeat_interleave(v, dim=2, repeats=self.num_heads // self.num_heads_kv)
             return F.scaled_dot_product_attention(
                 q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), is_causal=self.causal, scale=self.softmax_scale
             ).transpose(1, 2)
         else:
             batch = q.shape[0]
-            kv_cache = inference_params.key_value_memory_dict[self.layer_idx][:batch]
+            kv_cache, _ = inference_params.key_value_memory_dict[self.layer_idx]
+            kv_cache = kv_cache[:batch]
             cache_seqlens = (
                 inference_params.lengths_per_sample[:batch]
                 if inference_params.lengths_per_sample is not None
@@ -275,6 +278,8 @@ class MHA(nn.Module):
                 )
             if inference_params is None:
                 k, v = kv.unbind(dim=-3)
+                k = torch.repeat_interleave(k, dim=2, repeats=self.num_heads // self.num_heads_kv)
+                v = torch.repeat_interleave(v, dim=2, repeats=self.num_heads // self.num_heads_kv)
                 context = F.scaled_dot_product_attention(
                     q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), is_causal=self.causal, scale=self.softmax_scale
                 ).transpose(1, 2)

@@ -151,3 +151,19 @@ def _swiglu_bwd(xy, dout, dxy=None, recompute_output=False, out=None):
         return dxy.reshape(*batch_shape, dxy.shape[-1])
     else:
         return dxy.reshape(*batch_shape, dxy.shape[-1]), out.reshape(*batch_shape, out.shape[-1])
+
+
+class SwiGLU(torch.autograd.Function):
+
+    @staticmethod
+    def forward(ctx, xy):
+        ctx.save_for_backward(xy)
+        return _swiglu_fwd(xy)
+
+    @staticmethod
+    def backward(ctx, dout):
+        xy, = ctx.saved_tensors
+        return _swiglu_bwd(xy, dout)
+
+
+swiglu = SwiGLU.apply

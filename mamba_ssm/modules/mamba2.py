@@ -14,6 +14,11 @@ except ImportError:
     causal_conv1d_fn, causal_conv1d_update = None, None
 
 try:
+    from causal_conv1d.causal_conv1d_varlen import causal_conv1d_varlen_states
+except ImportError:
+    causal_conv1d_varlen_states = None
+
+try:
     from mamba_ssm.ops.triton.selective_state_update import selective_state_update
 except ImportError:
     selective_state_update = None
@@ -26,8 +31,10 @@ from mamba_ssm.distributed.distributed_utils import all_reduce, reduce_scatter
 from mamba_ssm.ops.triton.ssd_combined import mamba_chunk_scan_combined
 from mamba_ssm.ops.triton.ssd_combined import mamba_split_conv1d_scan_combined
 
+from huggingface_hub import PyTorchModelHubMixin
 
-class Mamba2(nn.Module):
+
+class Mamba2(nn.Module, PyTorchModelHubMixin):
     def __init__(
         self,
         d_model,
@@ -144,7 +151,7 @@ class Mamba2(nn.Module):
                                               process_group=self.process_group, sequence_parallel=self.sequence_parallel,
                                               **factory_kwargs)
 
-    def forward(self, u, seqlen=None, seq_idx=None, inference_params=None):
+    def forward(self, u, seqlen=None, seq_idx=None, cu_seqlens=None, inference_params=None):
         """
         u: (batch, seqlen, hidden_dim) if seqlen=None.
             If seqlen is not None, u is (batch * seqlen, hidden_dim). This is so that when we
@@ -161,7 +168,8 @@ class Mamba2(nn.Module):
 
         conv_state, ssm_state = None, None
         if inference_params is not None:
-            conv_state, ssm_state = self._get_states_from_cache(inference_params, batch)
+            inference_batch = cu_seqlens.shape[0] - 1 if cu_seqlens is not None else batch
+            conv_state, ssm_state = self._get_states_from_cache(inference_params, inference_batch)
             if inference_params.seqlen_offset > 0:
                 # The states are updated inplace
                 out, _, _ = self.step(u, conv_state, ssm_state)
@@ -206,14 +214,23 @@ class Mamba2(nn.Module):
                 dim=-1
             )
             if conv_state is not None:
-                # If we just take xBC[:, :, -self.d_conv :], it will error if seqlen < self.d_conv
-                # Instead F.pad will pad with zeros if seqlen < self.d_conv, and truncate otherwise.
-                xBC_t = rearrange(xBC, "b l d -> b d l")
-                conv_state.copy_(F.pad(xBC_t, (self.d_conv - xBC_t.shape[-1], 0)))  # Update state (B D W)
+                if cu_seqlens is None:
+                    # If we just take xBC[:, :, -self.d_conv :], it will error if seqlen < self.d_conv
+                    # Instead F.pad will pad with zeros if seqlen < self.d_conv, and truncate otherwise.
+                    xBC_t = rearrange(xBC, "b l d -> b d l")
+                    conv_state.copy_(F.pad(xBC_t, (self.d_conv - xBC_t.shape[-1], 0)))  # Update state (B D W)
+                else:
+                    assert causal_conv1d_varlen_states is not None, "varlen inference requires causal_conv1d package"
+                    assert batch == 1, "varlen inference only supports batch dimension 1"
+                    conv_varlen_states = causal_conv1d_varlen_states(
+                        xBC.squeeze(0), cu_seqlens, state_len=conv_state.shape[-1]
+                    )
+                    conv_state.copy_(conv_varlen_states)
             assert self.activation in ["silu", "swish"]
             if causal_conv1d_fn is None or self.activation not in ["silu", "swish"]:
+                assert seq_idx is None, "varlen conv1d requires the causal_conv1d package"
                 xBC = self.act(
-                    self.conv1d(xBC.transpose(1, 2)).transpose(1, 2)
+                    self.conv1d(xBC.transpose(1, 2)).transpose(1, 2)[:, -(self.dconv - 1):]
                 )  # (B, L, self.d_ssm + 2 * ngroups * d_state)
             else:
                 xBC = causal_conv1d_fn(
@@ -221,6 +238,7 @@ class Mamba2(nn.Module):
                     rearrange(self.conv1d.weight, "d 1 w -> d w"),
                     bias=self.conv1d.bias,
                     activation=self.activation,
+                    seq_idx=seq_idx,
                 ).transpose(1, 2)
             x, B, C = torch.split(xBC, [self.d_ssm, self.ngroups * self.d_state, self.ngroups * self.d_state], dim=-1)
             y = mamba_chunk_scan_combined(
@@ -235,12 +253,18 @@ class Mamba2(nn.Module):
                 dt_bias=self.dt_bias,
                 dt_softplus=True,
                 seq_idx=seq_idx,
+                cu_seqlens=cu_seqlens,
                 **dt_limit_kwargs,
                 return_final_states=ssm_state is not None,
+                return_varlen_states=cu_seqlens is not None and inference_params is not None,
             )
             if ssm_state is not None:
-                y, last_state = y
-                ssm_state.copy_(last_state)
+                y, last_state, *rest = y
+                if cu_seqlens is None:
+                    ssm_state.copy_(last_state)
+                else:
+                    varlen_states = rest[0]
+                    ssm_state.copy_(varlen_states)
             y = rearrange(y, "b l h p -> b l (h p)")
             if self.rmsnorm:
                 y = self.norm(y, z)
@@ -322,8 +346,8 @@ class Mamba2(nn.Module):
         device = self.out_proj.weight.device
         conv_dtype = self.conv1d.weight.dtype if dtype is None else dtype
         conv_state = torch.zeros(
-            batch_size, self.conv1d.weight.shape[0], self.d_conv, device=device, dtype=conv_dtype
-        )
+            batch_size, self.d_conv, self.conv1d.weight.shape[0], device=device, dtype=conv_dtype
+        ).transpose(1, 2)
         ssm_dtype = self.in_proj.weight.dtype if dtype is None else dtype
         ssm_state = torch.zeros(
             batch_size, self.nheads, self.headdim, self.d_state, device=device, dtype=ssm_dtype
@@ -336,11 +360,11 @@ class Mamba2(nn.Module):
             batch_shape = (batch_size,)
             conv_state = torch.zeros(
                 batch_size,
-                self.conv1d.weight.shape[0],
                 self.d_conv,
+                self.conv1d.weight.shape[0],
                 device=self.conv1d.weight.device,
                 dtype=self.conv1d.weight.dtype,
-            )
+            ).transpose(1, 2)
             ssm_state = torch.zeros(
                 batch_size,
                 self.nheads,
