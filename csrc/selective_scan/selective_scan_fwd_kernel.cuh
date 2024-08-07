@@ -112,7 +112,16 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     weight_t *C = reinterpret_cast<weight_t *>(params.C_ptr) + dim_id * kNRows * params.C_d_stride;
     input_t *Cvar = reinterpret_cast<input_t *>(params.C_ptr) + batch_id * params.C_batch_stride + group_id * params.C_group_stride;
     scan_t *x = reinterpret_cast<scan_t *>(params.x_ptr) + (batch_id * params.dim + dim_id * kNRows) * params.n_chunks * params.dstate;
-    long *cu_seqlens = reinterpret_cast<long *>(params.cu_seqlens_ptr) + batch_id * params.u_batch_stride;
+    
+    // Load cu_seqlens into shared memory
+    const int cu_seqlens_size = params.cu_seqlens_size;
+    long *cu_seqlens = reinterpret_cast<long *>(params.cu_seqlens_ptr);
+    __shared__ long smem_cu_seqlens[1024];  // Adjust size as needed
+    for (int i = threadIdx.x; i < cu_seqlens_size; i += blockDim.x) {
+        smem_cu_seqlens[i] = cu_seqlens[i];
+    }
+    __syncthreads();
+
 
     float D_val[kNRows] = {0};
     if (params.D_ptr != nullptr) {
@@ -224,15 +233,17 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                         
                         // Reset A bar for cumulative sequences (Real)
                         int left = 1;
-                        int right = params.cu_seqlens_size - 2;
+                        int right = cu_seqlens_size - 2;
+                        int idx = threadIdx.x * kNItems + i + chunk * kChunkSize;
                         while (left <= right) {
-                            if (cu_seqlens[(left + right) >> 1] == threadIdx.x * kNItems + i + chunk * kChunkSize) {
+                            int mid = (left + right) >> 1;
+                            if (smem_cu_seqlens[mid] == idx) {
                                 thread_data[i].x = 0.f;
                                 break;
-                            } else if (cu_seqlens[(left + right) >> 1] < threadIdx.x * kNItems + i + chunk * kChunkSize) {
-                                left = ((left + right) >> 1) + 1;
+                            } else if (smem_cu_seqlens[mid] < idx) {
+                                left = mid + 1;
                             } else {
-                                right = ((left + right) >> 1) - 1;
+                                right = mid - 1;
                             }
                         }
 
@@ -249,18 +260,21 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
 
                         // Reset A bar for cumulative sequences (Complex)
                         int left = 1;
-                        int right = params.cu_seqlens_size - 2;
+                        int right = cu_seqlens_size - 2;
+                        int idx = threadIdx.x * kNItems + i + chunk * kChunkSize;
                         while (left <= right) {
-                            if (cu_seqlens[(left + right) >> 1] == threadIdx.x * kNItems + i + chunk * kChunkSize) {
+                            int mid = (left + right) >> 1;
+                            if (smem_cu_seqlens[mid] == idx) {
                                 thread_data[i].x = 0.f;
                                 thread_data[i].y = 0.f;
                                 break;
-                            } else if (cu_seqlens[(left + right) >> 1] < threadIdx.x * kNItems + i + chunk * kChunkSize) {
-                                left = ((left + right) >> 1) + 1;
+                            } else if (smem_cu_seqlens[mid] < idx) {
+                                left = mid + 1;
                             } else {
-                                right = ((left + right) >> 1) - 1;
+                                right = mid - 1;
                             }
                         }
+
 
                         if constexpr (!Ktraits::kIsEvenLen) {  // So that the last state is correct
                             if (threadIdx.x * kNItems + i >= params.seqlen - chunk * kChunkSize) {
