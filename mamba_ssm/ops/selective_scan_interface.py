@@ -14,7 +14,7 @@ except ImportError:
     causal_conv1d_cuda = None
 
 import selective_scan_cuda
-
+from .triton.layer_norm import _layer_norm_fwd
 
 class SelectiveScanFn(torch.autograd.Function):
 
@@ -78,6 +78,24 @@ class SelectiveScanFn(torch.autograd.Function):
                 None,
                 None)
 
+def rms_norm_forward(
+    x,
+    weight,
+    bias,
+    eps=1e-6,
+    is_rms_norm=True,
+):
+    # x (b l) d
+    if x.stride(-1) != 1:
+        x = x.contiguous()
+    weight = weight.contiguous()
+    if bias is not None:
+        bias = bias.contiguous()
+    y, mean, rstd, residual_out = _layer_norm_fwd(
+        x, weight, bias, eps, None, residual_dtype=None, is_rms_norm=is_rms_norm
+    )
+    # y (b l) d
+    return y, residual_out, weight, bias, mean, rstd
 
 def selective_scan_fn(u, delta, A, B, C, D=None, z=None, delta_bias=None, delta_softplus=False,
                      return_last_state=False):
@@ -164,7 +182,7 @@ class MambaInnerFn(torch.autograd.Function):
     def forward(ctx, xz, conv1d_weight, conv1d_bias, x_proj_weight, delta_proj_weight,
                 out_proj_weight, out_proj_bias,
                 A, B=None, C=None, D=None, delta_bias=None, B_proj_bias=None,
-                C_proj_bias=None, delta_softplus=True, checkpoint_lvl=1):
+                C_proj_bias=None, delta_softplus=True, checkpoint_lvl=1, b_rms_weight= None, c_rms_weight= None, dt_rms_weight= None, b_c_dt_rms_eps=1e-6):
         """
              xz: (batch, dim, seqlen)
         """
@@ -222,6 +240,17 @@ class MambaInnerFn(torch.autograd.Function):
                 C = C.contiguous()
         if D is not None:
             D = D.contiguous()
+            
+        if b_rms_weight is not None:
+            ctx.b_rms_weight = b_rms_weight
+            B = rms_norm_forward(B, b_rms_weight, eps=b_c_dt_rms_eps)
+        if c_rms_weight is not None:
+            ctx.c_rms_weight = c_rms_weight
+            C = rms_norm_forward(C, c_rms_weight, eps=b_c_dt_rms_eps)
+        if dt_rms_weight is not None:
+            ctx.dt_rms_weight = dt_rms_weight
+            delta = rms_norm_forward(delta, dt_rms_weight, eps=b_c_dt_rms_eps)
+            
         out, scan_intermediates, out_z = selective_scan_cuda.fwd(
             conv1d_out, delta, A, B, C, D, z, delta_bias, delta_softplus
         )
@@ -312,11 +341,11 @@ def mamba_inner_fn(
     xz, conv1d_weight, conv1d_bias, x_proj_weight, delta_proj_weight,
     out_proj_weight, out_proj_bias,
     A, B=None, C=None, D=None, delta_bias=None, B_proj_bias=None,
-    C_proj_bias=None, delta_softplus=True
+    C_proj_bias=None, delta_softplus=True, b_rms_weight= None, c_rms_weight= None, dt_rms_weight= None, b_c_dt_rms_eps=1e-6
 ):
     return MambaInnerFn.apply(xz, conv1d_weight, conv1d_bias, x_proj_weight, delta_proj_weight,
                               out_proj_weight, out_proj_bias,
-                              A, B, C, D, delta_bias, B_proj_bias, C_proj_bias, delta_softplus)
+                              A, B, C, D, delta_bias, B_proj_bias, C_proj_bias, delta_softplus, b_rms_weight, c_rms_weight, dt_rms_weight, b_c_dt_rms_eps)
 
 
 def mamba_inner_ref(
