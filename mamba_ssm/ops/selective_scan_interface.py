@@ -263,6 +263,7 @@ class MambaInnerFn(torch.autograd.Function):
         ctx.delta_softplus = delta_softplus
         ctx.out_proj_bias_is_None = out_proj_bias is None
         ctx.checkpoint_lvl = checkpoint_lvl
+        ctx.b_c_dt_rms_eps = b_c_dt_rms_eps
         if checkpoint_lvl >= 1:  # Will recompute conv1d_out and delta in the backward pass
             conv1d_out, delta = None, None
         ctx.save_for_backward(xz, conv1d_weight, conv1d_bias, x_dbl, x_proj_weight,
@@ -287,8 +288,26 @@ class MambaInnerFn(torch.autograd.Function):
             conv1d_out = causal_conv1d_cuda.causal_conv1d_fwd(
                 x, conv1d_weight, conv1d_bias, None, None, None, True
             )
-            delta = rearrange(delta_proj_weight @ x_dbl[:, :delta_rank].t(),
-                              "d (b l) -> b d l", l = L)
+            if getattr(ctx, "dt_rms_weight", None) is not None:
+                delta = rearrange(delta_proj_weight @ x_dbl[:, :delta_rank].t(), "d (b l) -> b d l", l = L)
+                delta = rearrange(delta, "b d l -> (b l) d", l=L).contiguous()
+                
+                delta = rms_norm_forward(delta, ctx.dt_rms_weight, None, ctx.b_c_dt_rms_eps)
+                delta = rearrange(delta, "(b l) d -> b d l", l=L).contiguous()
+
+                # Recompute & RMSNorm B
+                B = rearrange(B, "b 1 dstate l -> (b l) dstate", l=L).contiguous()
+                B = rms_norm_forward(
+                    B, ctx.b_rms_weight, None, ctx.b_c_dt_rms_eps
+                )
+                B = rearrange(B, "(b l) dstate -> b 1 dstate l", l=L).contiguous()
+                # Recompute & RMSNorm C
+                C = rearrange(C, "b 1 dstate l -> (b l) dstate", l=L).contiguous()
+                C = rms_norm_forward(
+                    C, ctx.c_rms_weight, None, ctx.b_c_dt_rms_eps
+                )
+                C = rearrange(C, "(b l) dstate -> b 1 dstate l", l=L).contiguous()
+            
         # The kernel supports passing in a pre-allocated dz (e.g., in case we want to fuse the
         # backward of selective_scan_cuda with the backward of chunk).
         dxz = torch.empty_like(xz)  # (batch, dim, seqlen)
