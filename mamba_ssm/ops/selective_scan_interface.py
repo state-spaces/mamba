@@ -182,7 +182,7 @@ class MambaInnerFn(torch.autograd.Function):
     def forward(ctx, xz, conv1d_weight, conv1d_bias, x_proj_weight, delta_proj_weight,
                 out_proj_weight, out_proj_bias,
                 A, B=None, C=None, D=None, delta_bias=None, B_proj_bias=None,
-                C_proj_bias=None, delta_softplus=True, checkpoint_lvl=1, b_rms_weight= None, c_rms_weight= None, dt_rms_weight= None, b_c_dt_rms_eps=1e-6):
+                C_proj_bias=None, delta_softplus=True, checkpoint_lvl=1, b_rms_weight=None, c_rms_weight= None, dt_rms_weight= None, b_c_dt_rms_eps=1e-6):
         """
              xz: (batch, dim, seqlen)
         """
@@ -242,17 +242,14 @@ class MambaInnerFn(torch.autograd.Function):
             D = D.contiguous()
             
         if b_rms_weight is not None:
-            ctx.b_rms_weight = b_rms_weight
             B = rearrange(B, "b 1 dstate l -> (b l) dstate", l=L).contiguous()
             B = rms_norm_forward(B, b_rms_weight, bias=None, eps=b_c_dt_rms_eps)
             B = rearrange(B, "(b l) dstate -> b 1 dstate l", l=L).contiguous()
         if c_rms_weight is not None:
-            ctx.c_rms_weight = c_rms_weight
             C = rearrange(C, "b 1 dstate l -> (b l) dstate", l=L).contiguous()
             C = rms_norm_forward(C, c_rms_weight, bias=None, eps=b_c_dt_rms_eps)
             C = rearrange(C, "(b l) dstate -> b 1 dstate l", l=L).contiguous()
         if dt_rms_weight is not None:
-            ctx.dt_rms_weight = dt_rms_weight
             delta = rearrange(delta, "b d l -> (b l) d", l=L).contiguous()
             delta = rms_norm_forward(delta, dt_rms_weight, bias=None, eps=b_c_dt_rms_eps)
             delta = rearrange(delta, "(b l) d -> b d l", l=L).contiguous()
@@ -263,12 +260,15 @@ class MambaInnerFn(torch.autograd.Function):
         ctx.delta_softplus = delta_softplus
         ctx.out_proj_bias_is_None = out_proj_bias is None
         ctx.checkpoint_lvl = checkpoint_lvl
+        ctx.b_rms_weight = b_rms_weight
+        ctx.c_rms_weight = c_rms_weight
+        ctx.dt_rms_weight = dt_rms_weight
         ctx.b_c_dt_rms_eps = b_c_dt_rms_eps
         if checkpoint_lvl >= 1:  # Will recompute conv1d_out and delta in the backward pass
             conv1d_out, delta = None, None
         ctx.save_for_backward(xz, conv1d_weight, conv1d_bias, x_dbl, x_proj_weight,
                               delta_proj_weight, out_proj_weight, conv1d_out, delta,
-                              A, B, C, D, delta_bias, scan_intermediates, out)
+                              A, B, C, D, delta_bias, scan_intermediates, b_rms_weight, c_rms_weight, dt_rms_weight, out)
         return F.linear(rearrange(out_z, "b d l -> b l d"), out_proj_weight, out_proj_bias)
 
     @staticmethod
@@ -277,7 +277,7 @@ class MambaInnerFn(torch.autograd.Function):
         # dout: (batch, seqlen, dim)
         assert causal_conv1d_cuda is not None, "causal_conv1d_cuda is not available. Please install causal-conv1d."
         (xz, conv1d_weight, conv1d_bias, x_dbl, x_proj_weight, delta_proj_weight, out_proj_weight,
-         conv1d_out, delta, A, B, C, D, delta_bias, scan_intermediates, out) = ctx.saved_tensors
+         conv1d_out, delta, A, B, C, D, delta_bias, scan_intermediates, b_rms_weight, c_rms_weight, dt_rms_weight, out) = ctx.saved_tensors
         L = xz.shape[-1]
         delta_rank = delta_proj_weight.shape[1]
         d_state = A.shape[-1] * (1 if not A.is_complex() else 2)
@@ -288,19 +288,20 @@ class MambaInnerFn(torch.autograd.Function):
             conv1d_out = causal_conv1d_cuda.causal_conv1d_fwd(
                 x, conv1d_weight, conv1d_bias, None, None, None, True
             )
-            if getattr(ctx, "dt_rms_weight", None) is not None:
-                delta = rearrange(delta_proj_weight @ x_dbl[:, :delta_rank].t(), "d (b l) -> b d l", l = L)
+            delta = rearrange(delta_proj_weight @ x_dbl[:, :delta_rank].t(),
+                              "d (b l) -> b d l", l = L)
+            if dt_rms_weight is not None:
                 delta = rearrange(delta, "b d l -> (b l) d", l=L).contiguous()
-                
                 delta = rms_norm_forward(delta, ctx.dt_rms_weight, None, ctx.b_c_dt_rms_eps)
                 delta = rearrange(delta, "(b l) d -> b d l", l=L).contiguous()
-
+            if b_rms_weight is not None:
                 # Recompute & RMSNorm B
                 B = rearrange(B, "b 1 dstate l -> (b l) dstate", l=L).contiguous()
                 B = rms_norm_forward(
                     B, ctx.b_rms_weight, None, ctx.b_c_dt_rms_eps
                 )
                 B = rearrange(B, "(b l) dstate -> b 1 dstate l", l=L).contiguous()
+            if c_rms_weight is not None:
                 # Recompute & RMSNorm C
                 C = rearrange(C, "b 1 dstate l -> (b l) dstate", l=L).contiguous()
                 C = rms_norm_forward(
@@ -359,7 +360,8 @@ class MambaInnerFn(torch.autograd.Function):
                 dout_proj_weight, dout_proj_bias,
                 dA, dB, dC, dD,
                 ddelta_bias if delta_bias is not None else None,
-                dB_proj_bias, dC_proj_bias, None)
+                # 6-None are delta_softplus, checkpoint_lvl, b_rms_weight, c_rms_weight, dt_rms_weight, b_c_dt_rms_eps
+                dB_proj_bias, dC_proj_bias, None, None, None, None, None, None)
 
 
 def mamba_inner_fn(
