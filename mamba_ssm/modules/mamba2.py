@@ -34,6 +34,13 @@ from mamba_ssm.ops.triton.ssd_combined import mamba_split_conv1d_scan_combined
 from huggingface_hub import PyTorchModelHubMixin
 
 
+# Context Parallel - split input sequence
+# Going to want to shard this outside of Mamba2 class, so it can run over multiple layers...
+# auto_shard_seq = not force_ring_reduce_off and self.auto_shard_seq and is_distributed()
+# mask = None
+# (u, _), batch_sizes, num_sharded_batches = sharded_batch_to_sharded_seq(u, mask, self.ring_seq_size)
+# End Context Parallel
+
 class Mamba2(nn.Module, PyTorchModelHubMixin):
     def __init__(
         self,
