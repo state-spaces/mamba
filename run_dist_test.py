@@ -1,7 +1,6 @@
 from mamba_ssm import Mamba2
 import torch
 import torch.distributed as dist
-torch.manual_seed(0)
 
 if not dist.is_available():
     raise Exception("Distributed note abval")
@@ -12,9 +11,10 @@ parser = argparse.ArgumentParser()
 # These are your own arguments
 #parser.add_argument("--master_addr", type=str)
 parser.add_argument("--nproc_per_node", type=int)
+parser.add_argument("--random_seed", type=int)
 args = parser.parse_args()
 print(args)
-
+torch.manual_seed(args.random_seed)
 num_gpus =  args.nproc_per_node
 
 print('running on ',num_gpus)

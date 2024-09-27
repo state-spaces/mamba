@@ -318,15 +318,16 @@ def _mamba_chunk_scan_combined_fwd(x, dt, A, B, C, chunk_size, D=None, z=None, d
     # dA_cumsum_tmp1, dt_tmp1 = _chunk_cumsum_fwd(dt[:, 147:], A, chunk_size, dt_bias=dt_bias, dt_softplus=dt_softplus)
     # dA_cumsum_tmp2, dt_tmp2 = _chunk_cumsum_fwd(dt[:, 147:256], A, chunk_size, dt_bias=dt_bias, dt_softplus=dt_softplus)
     dA_cumsum, dt = _chunk_cumsum_fwd(dt, A, chunk_size, dt_bias=dt_bias, dt_softplus=dt_softplus, dt_limit=dt_limit)
-
+    torch.save(rearrange(dA_cumsum,'i j k l -> i k j l'), f"dA_cumsum_prev_{dist.get_rank()}.pt")
     #Update the cumulative sum for Context Parallel
-    if dist.get_world_size() > 1:
-        dA_cumsum_last = _gather(dA_cumsum[:, :, -1, :].unsqueeze(2).contiguous())
-        for i in range(dist.get_rank()):
-            print('adding', i)
-            dA_cumsum += dA_cumsum_last[i]
-
+    #if dist.get_world_size() > 1:
+    #    dA_cumsum_last = _gather(dA_cumsum[:, :, -1, :].unsqueeze(2).contiguous())
+    #    for i in range(dist.get_rank()):
+    #        print('adding', i)
+    #        dA_cumsum += dA_cumsum_last[i]
+    torch.save(rearrange(dA_cumsum,'i j k l -> i k j l'), f"dA_cumsum_{dist.get_rank()}.pt")
     states = _chunk_state_fwd(B, x, dt, dA_cumsum, seq_idx=seq_idx, states_in_fp32=True)
+    torch.save(states, f"states_{dist.get_rank()}.pt")
     # states_tmp0 = _chunk_state_fwd(B[:, :147], x[:, :147], dt_tmp0, dA_cumsum_tmp0, states_in_fp32=True)
     # states_tmp1 = _chunk_state_fwd(B[:, 147:], x[:, 147:], dt_tmp1, dA_cumsum_tmp1, states_in_fp32=True)
     # states_tmp2 = _chunk_state_fwd(B[:, 147:256], x[:, 147:256], dt_tmp2, dA_cumsum_tmp2, states_in_fp32=True)
@@ -353,12 +354,14 @@ def _mamba_chunk_scan_combined_fwd(x, dt, A, B, C, chunk_size, D=None, z=None, d
             #States returned should now match if they were calculated on a single GPU, but only for this chunk_gpu_group
         return states
     if dist.get_world_size() > 1:
+        torch.save(final_states,f"final_states_{dist.get_rank()}.pt")
+        torch.save(states,f"passed_states_{dist.get_rank()}.pt")
         print(f"Trying it {dist.get_rank()}")
         final_states = _gather(final_states)
         n_chunks_per_gpu = seqlen
         states = reduce(final_states, states, n_chunks_per_gpu, n_chunks_per_gpu * dist.get_rank(), n_chunks_per_gpu)
         print('Done', dist.get_rank())
-
+    #torch.save(states,f"passed_states_{dist.get_rank()}.pt")
     # states_tmp0 = rearrange(_state_passing_fwd(rearrange(states_tmp0, "... p n -> ... (p n)"), dA_cumsum_tmp0[:, :, :, -1], chunk_size=chunk_size), "... (p n) -> ... p n", n=dstate)
     # states_tmp1 = rearrange(_state_passing_fwd(rearrange(states_tmp1, "... p n -> ... (p n)"), dA_cumsum_tmp1[:, :, :, -1], chunk_size=chunk_size), "... (p n) -> ... p n", n=dstate)
     CB = _bmm_chunk_fwd(C, B, chunk_size, seq_idx=seq_idx, output_dtype=torch.float32)
