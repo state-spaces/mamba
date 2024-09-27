@@ -279,6 +279,12 @@ def _chunk_scan_chunk_state_bwd_dx(x, dt, dA_cumsum, B, CB, dout, dstates, D=Non
             dD = rearrange(dD, "h 1 -> h")
     return dx, ddt.to(dtype=dt.dtype), dD
 
+def _gather(tensor):
+    #group = dist.new_group(list(range(rank + 1)))
+    #shape = tensor.shape
+    tensor_list = [torch.zeros_like(tensor) for _ in range(dist.get_world_size())]
+    dist.all_gather(tensor_list, tensor) #  group=group)
+    return tensor_list
 
 def _mamba_chunk_scan_combined_fwd(x, dt, A, B, C, chunk_size, D=None, z=None, dt_bias=None, initial_states=None, seq_idx=None, cu_seqlens=None, dt_softplus=False, dt_limit=(0.0, float("inf"))):
     batch, seqlen, nheads, headdim = x.shape
@@ -313,6 +319,13 @@ def _mamba_chunk_scan_combined_fwd(x, dt, A, B, C, chunk_size, D=None, z=None, d
     # dA_cumsum_tmp2, dt_tmp2 = _chunk_cumsum_fwd(dt[:, 147:256], A, chunk_size, dt_bias=dt_bias, dt_softplus=dt_softplus)
     dA_cumsum, dt = _chunk_cumsum_fwd(dt, A, chunk_size, dt_bias=dt_bias, dt_softplus=dt_softplus, dt_limit=dt_limit)
 
+    #Update the cumulative sum for Context Parallel
+    if dist.get_world_size() > 1:
+        dA_cumsum_last = _gather(dA_cumsum[:, :, :, -1])
+        for i in range(dist.get_rank()-1):
+            print('adding', i)
+            dA_cumsum += dA_cumsum_last[i]
+
     states = _chunk_state_fwd(B, x, dt, dA_cumsum, seq_idx=seq_idx, states_in_fp32=True)
     # states_tmp0 = _chunk_state_fwd(B[:, :147], x[:, :147], dt_tmp0, dA_cumsum_tmp0, states_in_fp32=True)
     # states_tmp1 = _chunk_state_fwd(B[:, 147:], x[:, 147:], dt_tmp1, dA_cumsum_tmp1, states_in_fp32=True)
@@ -324,13 +337,6 @@ def _mamba_chunk_scan_combined_fwd(x, dt, A, B, C, chunk_size, D=None, z=None, d
     states, final_states = [rearrange(t, "... (p n) -> ... p n", n=dstate) for t in [states, final_states]]
     """-------------------Added distributed stuff here -------------------"""
     # TODO: CP reduce to form cumulative sum for N states. Need to first gather, then sum with weights from prods of A
-    def gather(tensor):
-        #group = dist.new_group(list(range(rank + 1)))
-        #shape = tensor.shape
-        tensor_list = [torch.zeros_like(tensor) for _ in range(dist.get_world_size())]
-        dist.all_gather(tensor_list, tensor) #  group=group)
-        return tensor_list
-
     def reduce(tensor_list, states, chunk_start, chunk_end, stride):
         dA_temp = dA_cumsum[:, :, :, -1] #dA_cumsum (b,h,c,dim_c) #State passing get's last element for some reason
         #Each chunk has a previous state, which needs to be updated from previous states from chunks on other GPUs.
@@ -340,17 +346,19 @@ def _mamba_chunk_scan_combined_fwd(x, dt, A, B, C, chunk_size, D=None, z=None, d
             #c should be the start chunk of that chunk_gpu_group, so that the dA_cumsum product can be calculated
             #   to update its weight
             dA_prod = torch.prod(dA_temp[:, :, c:chunk_end], dim=2)
-            print(f"{dA_prod.shape = }")
-            print(f"{tensor_list[i].shape = }")
-            print(f"{states.shape = }")
+            #print(f"{dA_prod.shape = }")
+            #print(f"{tensor_list[i].shape = }")
+            #print(f"{states.shape = }")
             states += repeat(dA_prod[:,:,None,None]*tensor_list[i],'i k l m -> i j k l m',j=states.shape[1])
             #States returned should now match if they were calculated on a single GPU, but only for this chunk_gpu_group
         return states
-    print(f"Trying it {dist.get_rank()}")
-    final_states = gather(final_states)
-    n_chunks_per_gpu = seqlen 
-    states = reduce(final_states, states, n_chunks_per_gpu, n_chunks_per_gpu * dist.get_rank(), n_chunks_per_gpu)
-    print('Done',dist.get_rank())
+    if dist.get_world_size() > 1:
+        print(f"Trying it {dist.get_rank()}")
+        final_states = _gather(final_states)
+        n_chunks_per_gpu = seqlen
+        states = reduce(final_states, states, n_chunks_per_gpu, n_chunks_per_gpu * dist.get_rank(), n_chunks_per_gpu)
+        print('Done', dist.get_rank())
+
     # states_tmp0 = rearrange(_state_passing_fwd(rearrange(states_tmp0, "... p n -> ... (p n)"), dA_cumsum_tmp0[:, :, :, -1], chunk_size=chunk_size), "... (p n) -> ... p n", n=dstate)
     # states_tmp1 = rearrange(_state_passing_fwd(rearrange(states_tmp1, "... p n -> ... (p n)"), dA_cumsum_tmp1[:, :, :, -1], chunk_size=chunk_size), "... (p n) -> ... p n", n=dstate)
     CB = _bmm_chunk_fwd(C, B, chunk_size, seq_idx=seq_idx, output_dtype=torch.float32)
