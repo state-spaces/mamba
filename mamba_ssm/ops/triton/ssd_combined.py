@@ -321,8 +321,8 @@ def _mamba_chunk_scan_combined_fwd(x, dt, A, B, C, chunk_size, D=None, z=None, d
 
     #Update the cumulative sum for Context Parallel
     if dist.get_world_size() > 1:
-        dA_cumsum_last = _gather(dA_cumsum[:, :, :, -1])
-        for i in range(dist.get_rank()-1):
+        dA_cumsum_last = _gather(dA_cumsum[:, :, -1, :].unsqueeze(2).contiguous())
+        for i in range(dist.get_rank()):
             print('adding', i)
             dA_cumsum += dA_cumsum_last[i]
 
@@ -816,11 +816,12 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
         assert A.shape == (nheads,)
         zx0, z, xBC, dt = torch.split(zxbcdt, [2 * d_nonssm, dim, dim + ngroups * dstate * 2, nheads], dim=-1)
         seq_idx = seq_idx.contiguous() if seq_idx is not None else None
-        xBC_conv = rearrange(
-            causal_conv1d_cuda.causal_conv1d_fwd(rearrange(xBC, "b s d -> b d s"),
-                                                 conv1d_weight, conv1d_bias, seq_idx, None, None, activation in ["silu", "swish"]),
-            "b d s -> b s d"
-        )
+        #xBC_conv = rearrange(
+        #    causal_conv1d_cuda.causal_conv1d_fwd(rearrange(xBC, "b s d -> b d s"),
+        #                                         conv1d_weight, conv1d_bias, seq_idx, None, None, activation in ["silu", "swish"]),
+        #    "b d s -> b s d"
+        #)
+        xBC_conv = xBC.clone()
         x, B, C = torch.split(xBC_conv, [dim, ngroups * dstate, ngroups * dstate], dim=-1)
         x = rearrange(x, "b l (h p) -> b l h p", h=nheads)
         B = rearrange(B, "b l (g n) -> b l g n", g=ngroups)
