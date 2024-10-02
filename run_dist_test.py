@@ -18,14 +18,16 @@ print(args)
 torch.manual_seed(args.random_seed)
 num_gpus =  args.nproc_per_node
 batch = args.batch_size
-length = 1024
-seq = torch.randn([batch,length*8,256],device='cuda')
+length = 2**14
+mesh_1d = dist.device_mesh.init_device_mesh("cuda", mesh_shape=(num_gpus,))
+seq = torch.randn([batch,length*8,256],device='cpu')
 #seq = torch.cat([(torch.ones([batch,length,256],dtype = torch.float32)*x).cuda() for x in range(num_gpus)], dim=1)
 assert seq.shape[1]%num_gpus == 0
 seq_per_gpu = seq.shape[1]//num_gpus
-mesh_1d = dist.device_mesh.init_device_mesh("cuda", mesh_shape=(num_gpus,))
 print('running on ',dist.get_rank(), ' with ', seq_per_gpu)
 
+print(mesh_1d.get_group().bound_device_id)
+exit()
 if dist.get_rank() == 0:
     #N.B. must use contiguous when splitting tensors for distributed ops!
     sequence = rearrange(seq, 'i (n j) k -> i n j k', n = dist.get_world_size())
