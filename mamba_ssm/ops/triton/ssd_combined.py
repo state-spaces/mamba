@@ -279,12 +279,48 @@ def _chunk_scan_chunk_state_bwd_dx(x, dt, dA_cumsum, B, CB, dout, dstates, D=Non
             dD = rearrange(dD, "h 1 -> h")
     return dx, ddt.to(dtype=dt.dtype), dD
 
-def _gather(tensor):
+def _all_gather(tensor):
     #group = dist.new_group(list(range(rank + 1)))
     #shape = tensor.shape
     tensor_list = [torch.zeros_like(tensor) for _ in range(dist.get_world_size())]
     dist.all_gather(tensor_list, tensor) #  group=group)
     return tensor_list
+
+
+def _gather(tensor, rank):
+    #group = dist.new_group(list(range(rank + 1)))
+    #shape = tensor.shape
+    tensor_list = [torch.zeros_like(tensor) for _ in range(dist.get_world_size())]
+    dist._gather(tensor_list, tensor) #  group=group)
+    return tensor_list
+
+
+def _transfer(tensor, send_rank, recv_rank, group=None):
+    """
+        Sends tensor to root process, which store it in tensor_list.
+    """
+
+    rank = dist.get_rank()
+    if rank not in [send_rank, recv_rank]:
+        return tensor
+    if rank == send_rank:
+        dist.send(tensor, recv_rank, group=group)
+    else:
+        dist.recv(tensor, send_rank, group=group)
+    return tensor
+
+
+def gather():
+    for rank1, rank2 in zip(range(world_size[:-1]),range(world_size[1:])):
+        if group is None:
+            group = dist.group.WORLD
+        if rank == root:
+            assert (tensor_list is not None)
+            dist.gather(tensor, gather_list=tensor_list, group=group)
+        else:
+            dist.gather(tensor, dst=root, group=group)
+
+        torch.distributed.barrier()  # Make sure only the first process in distributed training will download model & vocab
 
 def _mamba_chunk_scan_combined_fwd(x, dt, A, B, C, chunk_size, D=None, z=None, dt_bias=None, initial_states=None, seq_idx=None, cu_seqlens=None, dt_softplus=False, dt_limit=(0.0, float("inf"))):
     batch, seqlen, nheads, headdim = x.shape
@@ -331,36 +367,32 @@ def _mamba_chunk_scan_combined_fwd(x, dt, A, B, C, chunk_size, D=None, z=None, d
     # states_tmp0 = _chunk_state_fwd(B[:, :147], x[:, :147], dt_tmp0, dA_cumsum_tmp0, states_in_fp32=True)
     # states_tmp1 = _chunk_state_fwd(B[:, 147:], x[:, 147:], dt_tmp1, dA_cumsum_tmp1, states_in_fp32=True)
     # states_tmp2 = _chunk_state_fwd(B[:, 147:256], x[:, 147:256], dt_tmp2, dA_cumsum_tmp2, states_in_fp32=True)
+    def _state_passing_fwd_wrap(states, dA_cumsum, initial_states, seq_idx, chunk_size, C):
+        states, final_states = _state_passing_fwd(rearrange(states, "... p n -> ... (p n)"), dA_cumsum[:, :, :, -1],
+                                                  initial_states=rearrange(initial_states,
+                                                                           "... p n -> ... (p n)") if initial_states is not None else None,
+                                                  seq_idx=seq_idx, chunk_size=chunk_size, out_dtype=C.dtype)
+        states, final_states = [rearrange(t, "... (p n) -> ... p n", n=dstate) for t in [states, final_states]]
+        return states, final_states
 
-    states, final_states = _state_passing_fwd(rearrange(states, "... p n -> ... (p n)"), dA_cumsum[:, :, :, -1],
-                                              initial_states=rearrange(initial_states, "... p n -> ... (p n)") if initial_states is not None else None,
-                                              seq_idx=seq_idx, chunk_size=chunk_size, out_dtype=C.dtype)
-    states, final_states = [rearrange(t, "... (p n) -> ... p n", n=dstate) for t in [states, final_states]]
-    """-------------------Added distributed stuff here -------------------"""
-    # TODO: CP reduce to form cumulative sum for N states. Need to first gather, then sum with weights from prods of A
-    def reduce(tensor_list, states, chunk_start, chunk_end, stride):
-        dA_temp = dA_cumsum[:, :, :, -1] #dA_cumsum (b,h,c,dim_c) #State passing get's last element for some reason
-        #Each chunk has a previous state, which needs to be updated from previous states from chunks on other GPUs.
-        #The final state per GPU can be used to update the next GPU's state's (h_i + sum_k(A_k..j^Xh_k-1))
-        for i,c in enumerate(range(chunk_start, chunk_end, stride)):# prod of chunks
-            #i should be the chunk_gpu_group_number (the final_states out of each GPU gathered above)
-            #c should be the start chunk of that chunk_gpu_group, so that the dA_cumsum product can be calculated
-            #   to update its weight
-            dA_prod = torch.prod(dA_temp[:, :, c:chunk_end], dim=2)
-            #print(f"{dA_prod.shape = }")
-            #print(f"{tensor_list[i].shape = }")
-            #print(f"{states.shape = }")
-            states += repeat(dA_prod[:,:,None,None]*tensor_list[i],'i k l m -> i j k l m',j=states.shape[1])
-            #States returned should now match if they were calculated on a single GPU, but only for this chunk_gpu_group
-        return states
+    world_size = dist.get_world_size()
+    if world_size > 1:
+        rank = dist.get_rank()
+        if rank == 0:
+            states, final_states = _state_passing_fwd_wrap(states, dA_cumsum, initial_states, seq_idx, chunk_size, C)
+        dist.barrier()
+        for rank1, rank2 in zip(range(world_size[:-1]),range(world_size[1:])):
+            if rank in [rank1,rank2]:
+                print(f"transfer {rank1}:{rank2}")
+                initial_states = _transfer(final_states, rank1, rank2)
+            if rank == rank2:
+                print(f"state passing {rank2}")
+                states, final_states = _state_passing_fwd_wrap(states, dA_cumsum, initial_states, seq_idx, chunk_size, C)
+            dist.barrier()
+    else:
+        states, final_states = _state_passing_fwd_wrap(states, dA_cumsum, initial_states, seq_idx, chunk_size, C)
     torch.save(final_states,f"final_states_{dist.get_rank()}.pt")
     torch.save(states,f"passed_states_{dist.get_rank()}.pt")
-    if dist.get_world_size() > 1:
-        print(f"Trying it {dist.get_rank()}")
-        final_states = _gather(final_states)
-        n_chunks_per_gpu = seqlen
-        states = reduce(final_states, states, n_chunks_per_gpu, n_chunks_per_gpu * dist.get_rank(), n_chunks_per_gpu)
-        print('Done', dist.get_rank())
     #torch.save(states,f"passed_states_{dist.get_rank()}.pt")
     # states_tmp0 = rearrange(_state_passing_fwd(rearrange(states_tmp0, "... p n -> ... (p n)"), dA_cumsum_tmp0[:, :, :, -1], chunk_size=chunk_size), "... (p n) -> ... p n", n=dstate)
     # states_tmp1 = rearrange(_state_passing_fwd(rearrange(states_tmp1, "... p n -> ... (p n)"), dA_cumsum_tmp1[:, :, :, -1], chunk_size=chunk_size), "... (p n) -> ... p n", n=dstate)
