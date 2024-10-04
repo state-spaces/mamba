@@ -582,7 +582,7 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
 
     torch.save(dB, f"dB_{dist.get_rank()}.pt")
     torch.save(ddA_next,f"ddA_next_{dist.get_rank()}.pt")
-    torch.save(dC,f"fC_{dist.get_rank()}.pt")
+    torch.save(dC,f"dC_{dist.get_rank()}.pt")
     torch.save(ddA_cumsum_prev,f"ddA_cumsum_prev_{dist.get_rank()}.pt")
 
     # Computing ddA with the dcb kernel is much slower, so we're not using it for now
@@ -620,7 +620,9 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
     # These 2 lines are just to test ddt and dA being computed by old code
     # _, dA = selective_scan_bwd(dout, x, dt, A, B, C, D=D.float(), z=z)
     # ddt_given.copy_(ddt)
-
+    torch.save(dC_given,f"dC_given_{dist.get_rank()}.pt")
+    torch.save(dB_given,f"dB_given_{dist.get_rank()}.pt")
+    torch.save(ddt_given,f"ddt_given_{dist.get_rank()}.pt")
     return_vals = (dx, ddt_given, dA, dB_given, dC_given, dD, dz, ddt_bias, dinitial_states)
     return return_vals if not recompute_output else (*return_vals, outz)
 
@@ -730,9 +732,6 @@ class MambaChunkScanCombinedFn(torch.autograd.Function):
         assert not ctx.return_varlen_states, "return_varlen_states is not supported in backward"
         dfinal_states = args[0] if ctx.return_final_states else None
         dx, ddt, dA, dB, dC, dD, dz, ddt_bias, dinitial_states = _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, ctx.chunk_size, D=D, z=z, dt_bias=dt_bias, initial_states=initial_states, dfinal_states=dfinal_states, seq_idx=seq_idx, dt_softplus=ctx.dt_softplus, dt_limit=ctx.dt_limit)
-        torch.save(dx_out, f"dx_{dist.get_rank()}.pt")
-        torch.save(dB, f"dB_{dist.get_rank()}.pt")
-        torch.save(dC, f"dC_{dist.get_rank()}.pt")
         return dx, ddt, dA, dB, dC, None, dD, dz, ddt_bias, dinitial_states, None, None, None, None, None, None
 
 
