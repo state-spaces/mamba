@@ -489,7 +489,7 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
                 states, final_states = _state_passing_fwd_wrap(states, dA_cumsum, initial_states, seq_idx, chunk_size,
                                                                C)
             dist.barrier()
-        initial_states = None
+        #initial_states = None
     else:
         states, final_states = _state_passing_fwd_wrap(states, dA_cumsum, initial_states, seq_idx, chunk_size, C)
     torch.save(dout, f"dout_{dist.get_rank()}.pt")
@@ -936,7 +936,7 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
         #                                         conv1d_weight, conv1d_bias, seq_idx, None, None, activation in ["silu", "swish"]),
         #    "b d s -> b s d"
         #)
-        xBC_conv = xBC.clone()
+        xBC_conv = xBC #.clone()
         x, B, C = torch.split(xBC_conv, [dim, ngroups * dstate, ngroups * dstate], dim=-1)
         x = rearrange(x, "b l (h p) -> b l h p", h=nheads)
         B = rearrange(B, "b l (g n) -> b l g n", g=ngroups)
@@ -1058,12 +1058,13 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
             doutproj_bias = dout_og.sum(dim=(0, 1)) if outproj_bias is not None else None
         else:
             doutproj_weight, doutproj_bias = None, None
-        dxBC_given = rearrange(dxBC_given, "b s d -> b d s")
-        dxBC_given, dweight, dbias, *_ = causal_conv1d_cuda.causal_conv1d_bwd(
-            rearrange(xBC, "b s d -> b d s"), conv1d_weight, conv1d_bias,
-            rearrange(dxBC, "b s d -> b d s"), seq_idx, None, None, dxBC_given, False, ctx.activation in ["silu", "swish"]
-        )
-        dxBC_given = rearrange(dxBC_given, "b d s -> b s d")
+        #dxBC_given = rearrange(dxBC_given, "b s d -> b d s")
+        #dxBC_given, dweight, dbias, *_ = causal_conv1d_cuda.causal_conv1d_bwd(
+        #    rearrange(xBC, "b s d -> b d s"), conv1d_weight, conv1d_bias,
+        #    rearrange(dxBC, "b s d -> b d s"), seq_idx, None, None, dxBC_given, False, ctx.activation in ["silu", "swish"]
+        #)
+        dweight, dbias = None, None
+        #dxBC_given = rearrange(dxBC_given, "b d s -> b s d")
         return dzxbcdt, dweight, dbias, ddt_bias, dA, dD, None, dinitial_states, None, None, None, None, drmsnorm_weight, None, doutproj_weight, doutproj_bias, None, None, None
 
 

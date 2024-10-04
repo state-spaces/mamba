@@ -3,7 +3,7 @@ import pandas as pd
 from mamba_ssm import Mamba2
 import torch
 import torch.distributed as dist
-import torch.distributed.autograd as dist_autograd
+#import torch.distributed.autograd as dist_autograd
 from einops import rearrange
 if not dist.is_available():
     raise Exception("Distributed note abval")
@@ -63,8 +63,8 @@ for s in range(10,11):
     print('running on ',dist.get_rank(), ' with ', seq_per_gpu)
     sequence = rearrange(seq, 'i b (n j) k -> i n b j k', n = world_size)
     #sequence = [sequence[:,i,:,:].contiguous() for i in range(world_size)]
-    with dist_autograd.context() as context_id:
-        
+    #with dist_autograd.context() as context_id:
+    if True:   
         for i in range(iterations):
             input_tensor = sequence[i,rank].cuda()
             #with torch.autograd.profiler.profile(use_cuda=True) as prof:
@@ -79,10 +79,11 @@ for s in range(10,11):
             print("forward",rank,i, a/10**9, r/10**9, 'GB')
             #print(rank,prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=3))
             print("forward",rank,i,t, 'ms')
-            if rank == world_size-1: #world_size == 1:
+            if True: #rank == world_size-1: #world_size == 1:
                 layer.zero_grad()
                 start.record()
-                dist_autograd.backward(context_id, [output[:,-1,:].sum()])
+                #dist_autograd.backward(context_id, [output[:,-1,:].sum()]) #For RPC only
+                output.sum().backward()
                 end.record()
                 torch.cuda.synchronize()
                 r = torch.cuda.memory_reserved(rank)
