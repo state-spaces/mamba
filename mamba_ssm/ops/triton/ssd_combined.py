@@ -471,7 +471,7 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
         return states, final_states
 
     world_size = dist.get_world_size() if dist.is_available() and dist.is_initialized() else 1
-    if False: #world_size > 1:
+    if world_size > 1:
         rank = dist.get_rank()
         if rank == 0:
             states, final_states = _state_passing_fwd_wrap(states, dA_cumsum, initial_states, seq_idx, chunk_size, C)
@@ -492,7 +492,7 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
         initial_states = None
     else:
         states, final_states = _state_passing_fwd_wrap(states, dA_cumsum, initial_states, seq_idx, chunk_size, C)
-
+    torch.save(dout, f"dout_{dist.get_rank()}.pt")
     torch.save(states,f"passed_states_{dist.get_rank()}.pt")
     torch.save(final_states,f"final_states_{dist.get_rank()}.pt")
 
@@ -502,6 +502,9 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
     else:
         dz = None
         outz = out
+
+    #FIXME: if this is not the GPU where a gradient is calculated, dout is zero,
+    #FIXME: But the rest of the pass still needs calculation if rank < grad rank (causal ordering)
     dstates = _chunk_scan_bwd_dstates(C, dA_cumsum, dout, seq_idx=seq_idx, dtype=states.dtype)
     # dstates has length nchunks, containing the gradient to initial states at index 0 and
     # gradient to the states of chunk (nchunks - 2) at index (nchunks - 1)
@@ -533,7 +536,7 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
 
     #Reusue initial states from fwd recalc above, hopefully they haven't been overwritten
     world_size = dist.get_world_size() if dist.is_available() and dist.is_initialized() else 1
-    if False: #world_size > 1:
+    if world_size > 1:
         rank = dist.get_rank()
         if rank == world_size-1:
             states, dstates, dinitial_states, ddA_chunk_cumsum = _state_passing_bwd_wrap(states, dA_cumsum, dstates, dfinal_states, initial_states, seq_idx, chunk_size, x)
