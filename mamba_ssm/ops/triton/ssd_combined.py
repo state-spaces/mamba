@@ -730,6 +730,9 @@ class MambaChunkScanCombinedFn(torch.autograd.Function):
         assert not ctx.return_varlen_states, "return_varlen_states is not supported in backward"
         dfinal_states = args[0] if ctx.return_final_states else None
         dx, ddt, dA, dB, dC, dD, dz, ddt_bias, dinitial_states = _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, ctx.chunk_size, D=D, z=z, dt_bias=dt_bias, initial_states=initial_states, dfinal_states=dfinal_states, seq_idx=seq_idx, dt_softplus=ctx.dt_softplus, dt_limit=ctx.dt_limit)
+        torch.save(dx_out, f"dx_{dist.get_rank()}.pt")
+        torch.save(dB, f"dB_{dist.get_rank()}.pt")
+        torch.save(dC, f"dC_{dist.get_rank()}.pt")
         return dx, ddt, dA, dB, dC, None, dD, dz, ddt_bias, dinitial_states, None, None, None, None, None, None
 
 
