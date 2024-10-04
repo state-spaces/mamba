@@ -497,6 +497,7 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
     torch.save(final_states,f"final_states_{dist.get_rank()}.pt")
 
     if z is not None:
+        print(f"z not none, chunk scan bwd dz, {dist.get_rank()}")
         dz, dout, dD, *rest = _chunk_scan_bwd_dz(x, z, out, dout, chunk_size=chunk_size, has_ddAcs=False, D=D, dz=dz, recompute_output=recompute_output)
         outz = rest[0] if recompute_output else out
     else:
@@ -568,10 +569,22 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
     torch.save(ddA_chunk_cumsum,f"ddA_chunk_cumsum_{dist.get_rank()}.pt")
     
     dx, ddt, dD_from_x = _chunk_scan_chunk_state_bwd_dx(x, dt, dA_cumsum, B, CB, dout, dstates, D=D, seq_idx=seq_idx, dx=dx)
+
+    torch.save(dx, f"dx_{dist.get_rank()}.pt")
+    torch.save(ddt,f"ddt_{dist.get_rank()}.pt")
+    torch.save(dD_from_x,f"fdD_from_x_{dist.get_rank()}.pt")
+
+
     # dB = _chunk_state_bwd_db(x, dt, dA_cumsum, dstates, seq_idx=seq_idx, ngroups=ngroups)
     dB, ddA_next = _chunk_state_bwd_db(x, dt, dA_cumsum, dstates, seq_idx=seq_idx, B=B, ngroups=ngroups)
     # dC = _chunk_scan_bwd_dC(states[:, :-1].to(x.dtype), dA_cumsum, dout, seq_idx=seq_idx, ngroups=ngroups)
     dC, ddA_cumsum_prev = _chunk_scan_bwd_dC(states.to(x.dtype), dA_cumsum, dout, seq_idx=seq_idx, C=C, ngroups=ngroups)
+
+    torch.save(dB, f"dB_{dist.get_rank()}.pt")
+    torch.save(ddA_next,f"ddA_next_{dist.get_rank()}.pt")
+    torch.save(dC,f"fC_{dist.get_rank()}.pt")
+    torch.save(ddA_cumsum_prev,f"ddA_cumsum_prev_{dist.get_rank()}.pt")
+
     # Computing ddA with the dcb kernel is much slower, so we're not using it for now
     dCB = _chunk_scan_bwd_dcb(x, dt, dA_cumsum, dout, seq_idx=seq_idx, ngroups=ngroups)
     # dCB, ddA_tmp = _chunk_scan_bwd_dcb(x, dt, dA_cumsum, dout, seq_idx=seq_idx, CB=CB, ngroups=ngroups)
