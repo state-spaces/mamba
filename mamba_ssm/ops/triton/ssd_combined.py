@@ -416,6 +416,7 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
                                    dt_bias=None, initial_states=None, dfinal_states=None, seq_idx=None, dt_softplus=False,
                                    dt_limit=(0.0, float("inf")),
                                    dx=None, ddt=None, dB=None, dC=None, dz=None, recompute_output=False):
+    print('chunk_scan_combined_bwd')
     if dout.stride(-1) != 1:
         dout = dout.contiguous()
     batch, seqlen, nheads, headdim = x.shape
@@ -459,7 +460,8 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
                                       dt_limit=dt_limit)
     CB = _bmm_chunk_fwd(C, B, chunk_size, seq_idx=seq_idx, output_dtype=torch.float32)
     states = _chunk_state_fwd(B, x, dt, dA_cumsum, seq_idx=seq_idx, states_in_fp32=True)
-
+    torch.save(states,f"states_{dist.get_rank()}.pt")
+    torch.save(dA_cumsum,f"dA_cumsum_{dist.get_rank()}.pt")   
     def _state_passing_fwd_wrap(states, dA_cumsum, initial_states, seq_idx, chunk_size, C):
         states, final_states = _state_passing_fwd(rearrange(states, "... p n -> ... (p n)"), dA_cumsum[:, :, :, -1],
                                        initial_states=rearrange(initial_states, "... p n -> ... (p n)") if initial_states is not None else None,
@@ -469,7 +471,7 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
         return states, final_states
 
     world_size = dist.get_world_size() if dist.is_available() and dist.is_initialized() else 1
-    if world_size > 1:
+    if False: #world_size > 1:
         rank = dist.get_rank()
         if rank == 0:
             states, final_states = _state_passing_fwd_wrap(states, dA_cumsum, initial_states, seq_idx, chunk_size, C)
@@ -490,6 +492,9 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
     else:
         states, final_states = _state_passing_fwd_wrap(states, dA_cumsum, initial_states, seq_idx, chunk_size, C)
 
+    torch.save(states,f"passed_states_{dist.get_rank()}.pt")
+    torch.save(states,f"final_states_{dist.get_rank()}.pt")
+
     if z is not None:
         dz, dout, dD, *rest = _chunk_scan_bwd_dz(x, z, out, dout, chunk_size=chunk_size, has_ddAcs=False, D=D, dz=dz, recompute_output=recompute_output)
         outz = rest[0] if recompute_output else out
@@ -502,7 +507,9 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
     # Do computation in fp32 but convert dstates and states to fp16/bf16 since dstates and states
     # will be used in matmul in the next kernels.
 
-    def _state_passing_bwd_wrap(states, dA_cumsum, dstates, dfinal_states, initial_states, seq_idx, chunk_size, x)
+    torch.save(states,f"dstates_{dist.get_rank()}.pt")
+
+    def _state_passing_bwd_wrap(states, dA_cumsum, dstates, dfinal_states, initial_states, seq_idx, chunk_size, x):
         dstates, ddA_chunk_cumsum, dinitial_states, states = _state_passing_bwd(
             rearrange(states, "... p n -> ... (p n)"),
             dA_cumsum[:, :, :, -1],
@@ -525,7 +532,7 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
 
     #Reusue initial states from fwd recalc above, hopefully they haven't been overwritten
     world_size = dist.get_world_size() if dist.is_available() and dist.is_initialized() else 1
-    if world_size > 1:
+    if False: #world_size > 1:
         rank = dist.get_rank()
         if rank == world_size-1:
             states, dstates, dinitial_states, ddA_chunk_cumsum = _state_passing_bwd_wrap(states, dA_cumsum, dstates, dfinal_states, initial_states, seq_idx, chunk_size, x)
@@ -536,7 +543,7 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
             if rank in [rank1, rank2]:
                 print(f"transfer {rank1}:{rank2}")
                 if rank == rank2:
-                    final_states = torch.zeros_like(states[:, -1])
+                    dinitial_states = torch.zeros_like(states[:, -1])
                 dfinal_states = _transfer(dinitial_states, rank1, rank2)
             if rank == rank2:
                 print(f"state passing Wbackward {rank2}")
@@ -545,11 +552,17 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
                                                                                              initial_states, seq_idx,
                                                                                              chunk_size, x)
             dist.barrier()
+        dinitial_states = None #FIXME hack to because no initial states are used except between GPUs
     else:
         states, dstates, dinitial_states, ddA_chunk_cumsum = _state_passing_bwd_wrap(states, dA_cumsum, dstates,
                                                                                      dfinal_states, initial_states,
                                                                                      seq_idx, chunk_size, x)
 
+    torch.save(states,f"dbw_states_{dist.get_rank()}.pt")
+    torch.save(states,f"dpassed_states_{dist.get_rank()}.pt")
+    torch.save(states,f"dinitial_states_{dist.get_rank()}.pt")
+    torch.save(states,f"ddA_chunk_cumsum_{dist.get_rank()}.pt")
+    
     dx, ddt, dD_from_x = _chunk_scan_chunk_state_bwd_dx(x, dt, dA_cumsum, B, CB, dout, dstates, D=D, seq_idx=seq_idx, dx=dx)
     # dB = _chunk_state_bwd_db(x, dt, dA_cumsum, dstates, seq_idx=seq_idx, ngroups=ngroups)
     dB, ddA_next = _chunk_state_bwd_db(x, dt, dA_cumsum, dstates, seq_idx=seq_idx, B=B, ngroups=ngroups)
