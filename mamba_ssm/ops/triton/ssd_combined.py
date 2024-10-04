@@ -460,8 +460,8 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
                                       dt_limit=dt_limit)
     CB = _bmm_chunk_fwd(C, B, chunk_size, seq_idx=seq_idx, output_dtype=torch.float32)
     states = _chunk_state_fwd(B, x, dt, dA_cumsum, seq_idx=seq_idx, states_in_fp32=True)
-    torch.save(states,f"states_{dist.get_rank()}.pt")
-    torch.save(dA_cumsum,f"dA_cumsum_{dist.get_rank()}.pt")   
+    #torch.save(states,f"states_{dist.get_rank()}.pt")
+    #torch.save(dA_cumsum,f"dA_cumsum_{dist.get_rank()}.pt")   
     def _state_passing_fwd_wrap(states, dA_cumsum, initial_states, seq_idx, chunk_size, C):
         states, final_states = _state_passing_fwd(rearrange(states, "... p n -> ... (p n)"), dA_cumsum[:, :, :, -1],
                                        initial_states=rearrange(initial_states, "... p n -> ... (p n)") if initial_states is not None else None,
@@ -492,9 +492,9 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
         #initial_states = None
     else:
         states, final_states = _state_passing_fwd_wrap(states, dA_cumsum, initial_states, seq_idx, chunk_size, C)
-    torch.save(dout, f"dout_{dist.get_rank()}.pt")
-    torch.save(states,f"passed_states_{dist.get_rank()}.pt")
-    torch.save(final_states,f"final_states_{dist.get_rank()}.pt")
+    #torch.save(dout, f"dout_{dist.get_rank()}.pt")
+    #torch.save(states,f"passed_states_{dist.get_rank()}.pt")
+    #torch.save(final_states,f"final_states_{dist.get_rank()}.pt")
 
     if z is not None:
         print(f"z not none, chunk scan bwd dz, {dist.get_rank()}")
@@ -512,7 +512,7 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
     # Do computation in fp32 but convert dstates and states to fp16/bf16 since dstates and states
     # will be used in matmul in the next kernels.
 
-    torch.save(dstates,f"dstates_{dist.get_rank()}.pt")
+    #torch.save(dstates,f"dstates_{dist.get_rank()}.pt")
 
     def _state_passing_bwd_wrap(states, dA_cumsum, dstates, dfinal_states, initial_states, seq_idx, chunk_size, x):
         dstates, ddA_chunk_cumsum, dinitial_states, states = _state_passing_bwd(
@@ -563,16 +563,16 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
                                                                                      dfinal_states, initial_states,
                                                                                      seq_idx, chunk_size, x)
 
-    torch.save(states,f"bw_states_{dist.get_rank()}.pt")
-    torch.save(dstates,f"dpassed_states_{dist.get_rank()}.pt")
+    #torch.save(states,f"bw_states_{dist.get_rank()}.pt")
+    #torch.save(dstates,f"dpassed_states_{dist.get_rank()}.pt")
     #torch.save(dinitial_states,f"dinitial_states_{dist.get_rank()}.pt")
-    torch.save(ddA_chunk_cumsum,f"ddA_chunk_cumsum_{dist.get_rank()}.pt")
+    #torch.save(ddA_chunk_cumsum,f"ddA_chunk_cumsum_{dist.get_rank()}.pt")
     
     dx, ddt, dD_from_x = _chunk_scan_chunk_state_bwd_dx(x, dt, dA_cumsum, B, CB, dout, dstates, D=D, seq_idx=seq_idx, dx=dx)
 
-    torch.save(dx, f"dx_{dist.get_rank()}.pt")
-    torch.save(ddt,f"ddt_{dist.get_rank()}.pt")
-    torch.save(dD_from_x,f"fdD_from_x_{dist.get_rank()}.pt")
+    #torch.save(dx, f"dx_{dist.get_rank()}.pt")
+    #torch.save(ddt,f"ddt_{dist.get_rank()}.pt")
+    #torch.save(dD_from_x,f"fdD_from_x_{dist.get_rank()}.pt")
 
 
     # dB = _chunk_state_bwd_db(x, dt, dA_cumsum, dstates, seq_idx=seq_idx, ngroups=ngroups)
@@ -580,10 +580,10 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
     # dC = _chunk_scan_bwd_dC(states[:, :-1].to(x.dtype), dA_cumsum, dout, seq_idx=seq_idx, ngroups=ngroups)
     dC, ddA_cumsum_prev = _chunk_scan_bwd_dC(states.to(x.dtype), dA_cumsum, dout, seq_idx=seq_idx, C=C, ngroups=ngroups)
 
-    torch.save(dB, f"dB_{dist.get_rank()}.pt")
-    torch.save(ddA_next,f"ddA_next_{dist.get_rank()}.pt")
-    torch.save(dC,f"dC_{dist.get_rank()}.pt")
-    torch.save(ddA_cumsum_prev,f"ddA_cumsum_prev_{dist.get_rank()}.pt")
+    #torch.save(dB, f"dB_{dist.get_rank()}.pt")
+    #torch.save(ddA_next,f"ddA_next_{dist.get_rank()}.pt")
+    #torch.save(dC,f"dC_{dist.get_rank()}.pt")
+    #torch.save(ddA_cumsum_prev,f"ddA_cumsum_prev_{dist.get_rank()}.pt")
 
     # Computing ddA with the dcb kernel is much slower, so we're not using it for now
     dCB = _chunk_scan_bwd_dcb(x, dt, dA_cumsum, dout, seq_idx=seq_idx, ngroups=ngroups)
@@ -600,10 +600,10 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
     # However, this is numerically unstable: when we do the reverse cumsum on ddA_cumsum, there might
     # be a lot of underflow.
 
-    torch.save(dCB, f"dCB_{dist.get_rank()}.pt")
-    torch.save(C,f"C_{dist.get_rank()}.pt")
-    torch.save(B,f"B_{dist.get_rank()}.pt")
-    torch.save(x,f"x_{dist.get_rank()}.pt")
+    #torch.save(dCB, f"dCB_{dist.get_rank()}.pt")
+    #torch.save(C,f"C_{dist.get_rank()}.pt")
+    #torch.save(B,f"B_{dist.get_rank()}.pt")
+    #torch.save(x,f"x_{dist.get_rank()}.pt")
 
     # This is already done as part of bwd_dC kernel
     # ddA_cumsum_prev = _chunk_scan_bwd_ddAcs_prev(states[:, :-1], C, dout, dA_cumsum, seq_idx=seq_idx)
@@ -620,9 +620,9 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
     # These 2 lines are just to test ddt and dA being computed by old code
     # _, dA = selective_scan_bwd(dout, x, dt, A, B, C, D=D.float(), z=z)
     # ddt_given.copy_(ddt)
-    torch.save(dC_given,f"dC_given_{dist.get_rank()}.pt")
-    torch.save(dB_given,f"dB_given_{dist.get_rank()}.pt")
-    torch.save(ddt_given,f"ddt_given_{dist.get_rank()}.pt")
+    #torch.save(dC_given,f"dC_given_{dist.get_rank()}.pt")
+    #torch.save(dB_given,f"dB_given_{dist.get_rank()}.pt")
+    #torch.save(ddt_given,f"ddt_given_{dist.get_rank()}.pt")
     return_vals = (dx, ddt_given, dA, dB_given, dC_given, dD, dz, ddt_bias, dinitial_states)
     return return_vals if not recompute_output else (*return_vals, outz)
 
@@ -1084,6 +1084,7 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
         #    rearrange(dxBC, "b s d -> b d s"), seq_idx, None, None, dxBC_given, False, ctx.activation in ["silu", "swish"]
         #)
         dxBC_given, dweight, dbias = dxBC, None, None
+        dzxbcdt[ :,:,2 * d_nonssm+ dim:2*d_nonssm+dim+ dim + 2 * ctx.ngroups * dstate] = dxBC
         #dxBC_given = rearrange(dxBC_given, "b d s -> b s d")
         return dzxbcdt, dweight, dbias, ddt_bias, dA, dD, None, dinitial_states, None, None, None, None, drmsnorm_weight, None, doutproj_weight, doutproj_bias, None, None, None
 
