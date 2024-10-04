@@ -3,6 +3,7 @@ import pandas as pd
 from mamba_ssm import Mamba2
 import torch
 import torch.distributed as dist
+import torch.distributed.autograd as dist_autograd
 from einops import rearrange
 if not dist.is_available():
     raise Exception("Distributed note abval")
@@ -62,33 +63,36 @@ for s in range(10,11):
     print('running on ',dist.get_rank(), ' with ', seq_per_gpu)
     sequence = rearrange(seq, 'i b (n j) k -> i n b j k', n = world_size)
     #sequence = [sequence[:,i,:,:].contiguous() for i in range(world_size)]
-    for i in range(iterations):
-        input_tensor = sequence[i,rank].cuda()
-        #with torch.autograd.profiler.profile(use_cuda=True) as prof:
-        start.record()
-        output = layer(input_tensor)
-        end.record()
-        torch.cuda.synchronize()
-        r = torch.cuda.memory_reserved(rank)
-        a = torch.cuda.memory_allocated(rank)
-        t = start.elapsed_time(end)
-        res_forward.append({'exp':s,'it':i,'res':r,'all':a,'time':t})
-        print("forward",rank,i, a/10**9, r/10**9, 'GB')
-        #print(rank,prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=3))
-        print("forward",rank,i,t, 'ms')
-        if True: #world_size == 1:
-            layer.zero_grad()
+    with dist_autograd.context() as context_id:
+        
+        for i in range(iterations):
+            input_tensor = sequence[i,rank].cuda()
+            #with torch.autograd.profiler.profile(use_cuda=True) as prof:
             start.record()
-            output[:,0,:].sum().backward()
+            output = layer(input_tensor)
             end.record()
             torch.cuda.synchronize()
             r = torch.cuda.memory_reserved(rank)
             a = torch.cuda.memory_allocated(rank)
             t = start.elapsed_time(end)
-            res_backward.append({'exp':s,'it':i,'res':r,'all':a,'time':t})
-            print("backward",rank,i, a/10**9, r/10**9, 'GB')
+            res_forward.append({'exp':s,'it':i,'res':r,'all':a,'time':t})
+            print("forward",rank,i, a/10**9, r/10**9, 'GB')
             #print(rank,prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=3))
-            print("backward",rank,i,t, 'ms')
+            print("forward",rank,i,t, 'ms')
+            if rank == world_size-1: #world_size == 1:
+                layer.zero_grad()
+                start.record()
+                dist_autograd.backward(context_id, [output[:,-1,:].sum()])
+                end.record()
+                torch.cuda.synchronize()
+                r = torch.cuda.memory_reserved(rank)
+                a = torch.cuda.memory_allocated(rank)
+                t = start.elapsed_time(end)
+                res_backward.append({'exp':s,'it':i,'res':r,'all':a,'time':t})
+                print("backward",rank,i, a/10**9, r/10**9, 'GB')
+                #print(rank,prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=3))
+                print("backward",rank,i,t, 'ms')
+            dist.barrier()
     torch.save(input_tensor,f'input_{rank}.pt')
     torch.save(output, f"output_{rank}.pt")
     torch.save({x[0]:x[1].grad for x in layer.named_parameters()}, f"grad_dict_{rank}.pt")

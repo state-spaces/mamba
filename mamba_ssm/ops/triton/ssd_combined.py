@@ -489,11 +489,12 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
                 states, final_states = _state_passing_fwd_wrap(states, dA_cumsum, initial_states, seq_idx, chunk_size,
                                                                C)
             dist.barrier()
+        initial_states = None
     else:
         states, final_states = _state_passing_fwd_wrap(states, dA_cumsum, initial_states, seq_idx, chunk_size, C)
 
     torch.save(states,f"passed_states_{dist.get_rank()}.pt")
-    torch.save(states,f"final_states_{dist.get_rank()}.pt")
+    torch.save(final_states,f"final_states_{dist.get_rank()}.pt")
 
     if z is not None:
         dz, dout, dD, *rest = _chunk_scan_bwd_dz(x, z, out, dout, chunk_size=chunk_size, has_ddAcs=False, D=D, dz=dz, recompute_output=recompute_output)
@@ -507,7 +508,7 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
     # Do computation in fp32 but convert dstates and states to fp16/bf16 since dstates and states
     # will be used in matmul in the next kernels.
 
-    torch.save(states,f"dstates_{dist.get_rank()}.pt")
+    torch.save(dstates,f"dstates_{dist.get_rank()}.pt")
 
     def _state_passing_bwd_wrap(states, dA_cumsum, dstates, dfinal_states, initial_states, seq_idx, chunk_size, x):
         dstates, ddA_chunk_cumsum, dinitial_states, states = _state_passing_bwd(
@@ -558,10 +559,10 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
                                                                                      dfinal_states, initial_states,
                                                                                      seq_idx, chunk_size, x)
 
-    torch.save(states,f"dbw_states_{dist.get_rank()}.pt")
-    torch.save(states,f"dpassed_states_{dist.get_rank()}.pt")
-    torch.save(states,f"dinitial_states_{dist.get_rank()}.pt")
-    torch.save(states,f"ddA_chunk_cumsum_{dist.get_rank()}.pt")
+    torch.save(states,f"bw_states_{dist.get_rank()}.pt")
+    torch.save(dstates,f"dpassed_states_{dist.get_rank()}.pt")
+    #torch.save(dinitial_states,f"dinitial_states_{dist.get_rank()}.pt")
+    torch.save(ddA_chunk_cumsum,f"ddA_chunk_cumsum_{dist.get_rank()}.pt")
     
     dx, ddt, dD_from_x = _chunk_scan_chunk_state_bwd_dx(x, dt, dA_cumsum, B, CB, dout, dstates, D=D, seq_idx=seq_idx, dx=dx)
     # dB = _chunk_state_bwd_db(x, dt, dA_cumsum, dstates, seq_idx=seq_idx, ngroups=ngroups)
