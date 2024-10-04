@@ -600,6 +600,11 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
     # However, this is numerically unstable: when we do the reverse cumsum on ddA_cumsum, there might
     # be a lot of underflow.
 
+    torch.save(dCB, f"dCB_{dist.get_rank()}.pt")
+    torch.save(C,f"C_{dist.get_rank()}.pt")
+    torch.save(B,f"B_{dist.get_rank()}.pt")
+    torch.save(x,f"x_{dist.get_rank()}.pt")
+
     # This is already done as part of bwd_dC kernel
     # ddA_cumsum_prev = _chunk_scan_bwd_ddAcs_prev(states[:, :-1], C, dout, dA_cumsum, seq_idx=seq_idx)
     ddA_cumsum_prev[..., -1] += ddA_chunk_cumsum
@@ -1024,7 +1029,7 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
         #                                         conv1d_weight, conv1d_bias, seq_idx, None, None, ctx.activation in ["silu", "swish"]),
         #    "b d s -> b s d"
         #)
-        xBC_conv = xBC.clone()
+        xBC_conv = xBC #.clone()
         x, B, C = torch.split(xBC_conv, [dim, ctx.ngroups * dstate, ctx.ngroups * dstate], dim=-1)
         x = rearrange(x, "b l (h p) -> b l h p", h=nheads)
         B = rearrange(B, "b l (g n) -> b l g n", g=ctx.ngroups)
@@ -1076,7 +1081,7 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
         #    rearrange(xBC, "b s d -> b d s"), conv1d_weight, conv1d_bias,
         #    rearrange(dxBC, "b s d -> b d s"), seq_idx, None, None, dxBC_given, False, ctx.activation in ["silu", "swish"]
         #)
-        dweight, dbias = None, None
+        dxBC_given, dweight, dbias = None, None, dxBC
         #dxBC_given = rearrange(dxBC_given, "b d s -> b s d")
         return dzxbcdt, dweight, dbias, ddt_bias, dA, dD, None, dinitial_states, None, None, None, None, drmsnorm_weight, None, doutproj_weight, doutproj_bias, None, None, None
 
