@@ -1083,7 +1083,7 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
         #    rearrange(xBC, "b s d -> b d s"), conv1d_weight, conv1d_bias,
         #    rearrange(dxBC, "b s d -> b d s"), seq_idx, None, None, dxBC_given, False, ctx.activation in ["silu", "swish"]
         #)
-        dxBC_given, dweight, dbias = None, None, dxBC
+        dxBC_given, dweight, dbias = dxBC, None, None
         #dxBC_given = rearrange(dxBC_given, "b d s -> b s d")
         return dzxbcdt, dweight, dbias, ddt_bias, dA, dD, None, dinitial_states, None, None, None, None, drmsnorm_weight, None, doutproj_weight, doutproj_bias, None, None, None
 
