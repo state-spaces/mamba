@@ -951,12 +951,14 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
         assert A.shape == (nheads,)
         zx0, z, xBC, dt = torch.split(zxbcdt, [2 * d_nonssm, dim, dim + ngroups * dstate * 2, nheads], dim=-1)
         seq_idx = seq_idx.contiguous() if seq_idx is not None else None
-        #xBC_conv = rearrange(
-        #    causal_conv1d_cuda.causal_conv1d_fwd(rearrange(xBC, "b s d -> b d s"),
-        #                                         conv1d_weight, conv1d_bias, seq_idx, None, None, activation in ["silu", "swish"]),
-        #    "b d s -> b s d"
-        #)
-        xBC_conv = xBC #.clone()
+
+        lb = 0 if dist.get_rank() == 0 else conv1d_weight.shape[1] - 1 #Added for context parallel
+        xBC_conv = rearrange(
+            causal_conv1d_cuda.causal_conv1d_fwd(rearrange(xBC, "b s d -> b d s"),
+                                                 conv1d_weight, conv1d_bias, seq_idx, None, None, activation in ["silu", "swish"]),
+            "b d s -> b s d"
+        )[:, lb:, :]
+        #xBC_conv = xBC #.clone()
         x, B, C = torch.split(xBC_conv, [dim, ngroups * dstate, ngroups * dstate], dim=-1)
         x = rearrange(x, "b l (h p) -> b l h p", h=nheads)
         B = rearrange(B, "b l (g n) -> b l g n", g=ngroups)
@@ -1026,12 +1028,13 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
             out0_recompute, out1_recompute = out_recompute.split([d_nonssm, dim], dim=-1)
         zx0, z, xBC, dt = torch.split(zxbcdt, [2 * d_nonssm, dim, dim + 2 * ctx.ngroups * dstate, nheads], dim=-1)
         # Recompute x, B, C
-        #xBC_conv = rearrange(
-        #    causal_conv1d_cuda.causal_conv1d_fwd(rearrange(xBC, "b s d -> b d s"),
-        #                                         conv1d_weight, conv1d_bias, seq_idx, None, None, ctx.activation in ["silu", "swish"]),
-        #    "b d s -> b s d"
-        #)
-        xBC_conv = xBC #.clone()
+        lb = 0 if dist.get_rank() == 0 else conv1d_weight.shape[1] - 1 #Added for context parallel
+        xBC_conv = rearrange(
+            causal_conv1d_cuda.causal_conv1d_fwd(rearrange(xBC, "b s d -> b d s"),
+                                                 conv1d_weight, conv1d_bias, seq_idx, None, None, ctx.activation in ["silu", "swish"]),
+            "b d s -> b s d"
+        )[:, lb:, :]
+        #xBC_conv = xBC #.clone()
         x, B, C = torch.split(xBC_conv, [dim, ctx.ngroups * dstate, ctx.ngroups * dstate], dim=-1)
         x = rearrange(x, "b l (h p) -> b l h p", h=nheads)
         B = rearrange(B, "b l (g n) -> b l g n", g=ctx.ngroups)
@@ -1078,14 +1081,14 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
             doutproj_bias = dout_og.sum(dim=(0, 1)) if outproj_bias is not None else None
         else:
             doutproj_weight, doutproj_bias = None, None
-        #dxBC_given = rearrange(dxBC_given, "b s d -> b d s")
-        #dxBC_given, dweight, dbias, *_ = causal_conv1d_cuda.causal_conv1d_bwd(
-        #    rearrange(xBC, "b s d -> b d s"), conv1d_weight, conv1d_bias,
-        #    rearrange(dxBC, "b s d -> b d s"), seq_idx, None, None, dxBC_given, False, ctx.activation in ["silu", "swish"]
-        #)
-        dxBC_given, dweight, dbias = dxBC, None, None
-        dzxbcdt[ :,:,2 * d_nonssm+ dim:2*d_nonssm+dim+ dim + 2 * ctx.ngroups * dstate] = dxBC
-        #dxBC_given = rearrange(dxBC_given, "b d s -> b s d")
+        dxBC_given = rearrange(dxBC_given, "b s d -> b d s")
+        dxBC_given, dweight, dbias, *_ = causal_conv1d_cuda.causal_conv1d_bwd(
+            rearrange(xBC, "b s d -> b d s"), conv1d_weight, conv1d_bias,
+            rearrange(dxBC, "b s d -> b d s"), seq_idx, None, None, dxBC_given, False, ctx.activation in ["silu", "swish"]
+        )
+        #dxBC_given, dweight, dbias = dxBC, None, None #Context parallel test
+        #dzxbcdt[ :,:,2 * d_nonssm+ dim:2*d_nonssm+dim+ dim + 2 * ctx.ngroups * dstate] = dxBC
+        dxBC_given = rearrange(dxBC_given, "b d s -> b s d")
         return dzxbcdt, dweight, dbias, ddt_bias, dA, dD, None, dinitial_states, None, None, None, None, drmsnorm_weight, None, doutproj_weight, doutproj_bias, None, None, None
 
 
