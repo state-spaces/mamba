@@ -34,6 +34,13 @@ from mamba_ssm.ops.triton.ssd_combined import mamba_split_conv1d_scan_combined
 from huggingface_hub import PyTorchModelHubMixin
 
 
+# Context Parallel - split input sequence
+# Going to want to shard this outside of Mamba2 class, so it can run over multiple layers...
+# auto_shard_seq = not force_ring_reduce_off and self.auto_shard_seq and is_distributed()
+# mask = None
+# (u, _), batch_sizes, num_sharded_batches = sharded_batch_to_sharded_seq(u, mask, self.ring_seq_size)
+# End Context Parallel
+
 class Mamba2(nn.Module, PyTorchModelHubMixin):
     def __init__(
         self,
@@ -159,6 +166,7 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
             (in case batch is small).
         Returns: same shape as u
         """
+        print("Forward")
         seqlen_og = seqlen
         if seqlen is None:
             batch, seqlen, dim = u.shape
@@ -181,7 +189,9 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
         # If the model is loaded in fp16, without the .float() here, A might be -inf
         A = -torch.exp(self.A_log.float())  # (nheads) or (d_inner, d_state)
         dt_limit_kwargs = {} if self.dt_limit == (0.0, float("inf")) else dict(dt_limit=self.dt_limit)
+
         if self.use_mem_eff_path and inference_params is None:
+            print('Using mem_eff_path combined conv1d/scan')
             out = mamba_split_conv1d_scan_combined(
                 zxbcdt,
                 rearrange(self.conv1d.weight, "d 1 w -> d w"),
@@ -241,6 +251,7 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
                     seq_idx=seq_idx,
                 ).transpose(1, 2)
             x, B, C = torch.split(xBC, [self.d_ssm, self.ngroups * self.d_state, self.ngroups * self.d_state], dim=-1)
+            print('Running chunk_scan_combined')
             y = mamba_chunk_scan_combined(
                 rearrange(x, "b l (h p) -> b l h p", p=self.headdim),
                 dt,
