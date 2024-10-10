@@ -1076,20 +1076,20 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
             print("rmsnorm_weight")
             batch = dout.shape[0]
             dy_rms = rearrange(dout, "b s h p -> (b s) (h p)")
-            dz = rearrange(dz, "b l d -> (b l) d")
+            dz = rearrange(dz, "b l d -> (b l) d").clone()
             x_rms = rearrange(out, "b s h p -> (b s) (h p)")
             z_rms = rearrange(z, "b s h p -> (b s) (h p)")
-            torch.save(z, f"z_{dist.get_rank()}.pt") #Good
-            torch.save(out, f"out_{dist.get_rank()}.pt") #Good
-            torch.save(dz,f"dz_i_{dist.get_rank()}.pt") #Bad
-            torch.save(dy_rms,f"dy_rms_{dist.get_rank()}.pt") #Bad
-            torch.save(x_rms,f"x_rms_{dist.get_rank()}.pt") #Bad
-            torch.save(dy_rms,f"dy_rms_{dist.get_rank()}.pt")
-            torch.save(rmsnorm_weight,f"rmsnorm_weight_{dist.get_rank()}.pt")
-            torch.save(z_rms,f"z_rms_{dist.get_rank()}.pt")
-            torch.save(rstd,f"rstd_{dist.get_rank()}.pt")
-            print(z.shape, out.shape, dist.get_rank())
-            dz = torch.zeros_like(dz) #.clone()
+            #torch.save(z, f"z_{dist.get_rank()}.pt") #Good
+            #torch.save(out, f"out_{dist.get_rank()}.pt") #Good
+            #torch.save(dz,f"dz_i_{dist.get_rank()}.pt") #Bad
+            #torch.save(dy_rms,f"dy_rms_{dist.get_rank()}.pt") #Bad
+            #torch.save(x_rms,f"x_rms_{dist.get_rank()}.pt") #Bad
+            #torch.save(dy_rms,f"dy_rms_{dist.get_rank()}.pt")
+            #torch.save(rmsnorm_weight,f"rmsnorm_weight_{dist.get_rank()}.pt")
+            #torch.save(z_rms,f"z_rms_{dist.get_rank()}.pt")
+            #torch.save(rstd,f"rstd_{dist.get_rank()}.pt")
+            #print(z.shape, out.shape, dist.get_rank())
+            #dz = _like(dz) #.clone()
             out1_recompute = rearrange(out1_recompute, "b s d -> (b s) d") if recompute_output else None
             dout, drmsnorm_weight, _, dz, *rest = _layer_norm_bwd(dy_rms, x_rms, rmsnorm_weight, None, ctx.rmsnorm_eps, None, rstd, z_rms, group_size=dim//ctx.ngroups, norm_before_gate=ctx.norm_before_gate, is_rms_norm=True, recompute_output=recompute_output, dz=dz, out=out1_recompute if recompute_output else None)
             print(f'{dz.shape = }')
