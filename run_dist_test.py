@@ -57,20 +57,24 @@ layer = Mamba2(256).cuda()
 for s in range(10,11):
     length = 2**s
     seq = torch.randn([iterations,batch,length*8,256],device='cpu')
+    torch.save(seq,'seq.pt')
     #seq = torch.cat([(torch.ones([batch,length,256],dtype = torch.float32)*x).cuda() for x in range(num_gpus)], dim=1)
     assert seq.shape[1]%num_gpus == 0
-    seq_per_gpu = seq.shape[1]//num_gpus
+    seq_per_gpu = seq.shape[2]//num_gpus
     print('running on ',dist.get_rank(), ' with ', seq_per_gpu)
     #Equal split sequences - easy test
     #sequence = rearrange(seq, 'i b (n j) k -> i n b j k', n = world_size)
     #sequence = [sequence[:,i,:,:].contiguous() for i in range(world_size)]
     #Split with padded repeats for 1d conv overlap
     padding = layer.d_conv - 1 #Convolutional kernel size - 1
-    sequence = [sequence[:, :, s*r:s*(r+1)+padding] for r in range(world_size)]
+    sequence = [seq[:, :, seq_per_gpu*r:seq_per_gpu*(r+1)+padding] for r in range(world_size)]
     #with dist_autograd.context() as context_id:
     if True:   
         for i in range(iterations):
             #input_tensor = sequence[i,rank].cuda()
+            print(f"{sequence[rank].shape = }") 
+            
+            
             input_tensor = sequence[rank][i].cuda().contiguous()
             #with torch.autograd.profiler.profile(use_cuda=True) as prof:
             start.record()
