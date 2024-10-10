@@ -1095,7 +1095,9 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
             print(f'{dz.shape = }')
             torch.save(dz,f"dz_{dist.get_rank()}.pt")
             torch.save(dout,f"dout_{dist.get_rank()}.pt")
-            dzxbcdt[:,lb:,:dim] = rearrange(dz, "(b l) d -> b l d", b = batch)
+            #FIXME - the dzxbcdt matrix is being corrupted due to the reindexing by dropped indices
+            dzxbcdt[:,lb:,:dim] = rearrange(dz, "(b l) d -> b l d", b = batch) #Added for context parallel fix
+            dzxbcdt[:,:lb,:dim] = 0.0 #Added to test context parllel
             out_for_linear = out_recompute if recompute_output else None
             dout = rearrange(dout, "(b s) (h p) -> b s h p", b=batch, p=headdim)
             dx, ddt, dA, dB, dC, dD, _, ddt_bias, dinitial_states = _mamba_chunk_scan_combined_bwd(
