@@ -1043,42 +1043,40 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
                                                  conv1d_weight, conv1d_bias, seq_idx, None, None, ctx.activation in ["silu", "swish"]),
             "b d s -> b s d"
         )[:, lb:, :].contiguous()
-        #xBC_conv = xBC #.clone()
         x, B, C = torch.split(xBC_conv, [dim, ctx.ngroups * dstate, ctx.ngroups * dstate], dim=-1)
         x = rearrange(x, "b l (h p) -> b l h p", h=nheads)
         B = rearrange(B, "b l (g n) -> b l g n", g=ctx.ngroups)
         C = rearrange(C, "b l (g n) -> b l g n", g=ctx.ngroups)
+
+        #Create empty output tensors for gradients
+        #TODO where do these go in later functions?
         dzxbcdt = torch.empty_like(zxbcdt)
         dzx0, dz, dxBC_given, ddt_given = torch.split(dzxbcdt, [2 * d_nonssm, dim, dim + 2 * ctx.ngroups * dstate, nheads], dim=-1)
         dzx0, dz, ddt_given = dzx0[:,lb:], dz[:,lb:], ddt_given[:,lb:]
         dxBC = torch.empty_like(xBC)
-        dx, dB, dC = torch.split(dxBC[:,lb:], [dim, ctx.ngroups * dstate, ctx.ngroups * dstate], dim=-1)
+        dx, dB, dC = torch.split(dxBC[:, lb:], [dim, ctx.ngroups * dstate, ctx.ngroups * dstate], dim=-1)
         z = rearrange(z, "b l (h p) -> b l h p", h=nheads)
         dx = rearrange(dx, "b l (h p) -> b l h p", h=nheads)
         dB = rearrange(dB, "b l (g n) -> b l g n", g=ctx.ngroups)
         dC = rearrange(dC, "b l (g n) -> b l g n", g=ctx.ngroups)
+
         if outproj_weight is not None:
             dout_og = dout
             dout = F.linear(dout, outproj_weight.t())
         if d_nonssm > 0:
             dout0, dout = dout.split([d_nonssm, dim], dim=-1)
             _swiglu_bwd(zx0, dout0, dxy=dzx0, recompute_output=True, out=out0_recompute)
+
         dout = rearrange(dout, "b s (h p) -> b s h p", p=headdim)
         if rmsnorm_weight is None:
-            print("rmsnorm_weight is None")
-            dz = rearrange(dz, "b l (h p) -> b l h p", h=nheads)
-            dx, ddt, dA, dB, dC, dD, dz, ddt_bias, dinitial_states, *rest = _mamba_chunk_scan_combined_bwd(
-                dout, x, dt, A, B, C, out, ctx.chunk_size, D=D, z=z, dt_bias=dt_bias, initial_states=initial_states, dfinal_states=dfinal_states, seq_idx=seq_idx, dt_softplus=True, dt_limit=ctx.dt_limit, dx=dx, ddt=ddt_given, dB=dB, dC=dC, dz=dz, recompute_output=recompute_output
-            )
-            out_for_linear = rearrange(rest[0], "b s h p -> b s (h p)") if recompute_output else None
-            drmsnorm_weight = None
+            raise Exception("Deleted path here")
         else:
             print("rmsnorm_weight")
             batch = dout.shape[0]
-            dy_rms = rearrange(dout, "b s h p -> (b s) (h p)")
-            dz = rearrange(dz, "b l d -> (b l) d").clone()
-            x_rms = rearrange(out, "b s h p -> (b s) (h p)")
-            z_rms = rearrange(z, "b s h p -> (b s) (h p)")
+            dy_rms = rearrange(dout, "b s h p -> (b s) (h p)") #dout
+            dz = rearrange(dz, "b l d -> (b l) d") #dz
+            x_rms = rearrange(out, "b s h p -> (b s) (h p)") #out
+            z_rms = rearrange(z, "b s h p -> (b s) (h p)") #z
             #torch.save(z, f"z_{dist.get_rank()}.pt") #Good
             #torch.save(out, f"out_{dist.get_rank()}.pt") #Good
             #torch.save(dz,f"dz_i_{dist.get_rank()}.pt") #Bad
@@ -1090,14 +1088,12 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
             #torch.save(rstd,f"rstd_{dist.get_rank()}.pt")
             #print(z.shape, out.shape, dist.get_rank())
             #dz = _like(dz) #.clone()
+            #FIXME - the dzxbcdt matrix is being corrupted due to the reindexing by dropped indices
             out1_recompute = rearrange(out1_recompute, "b s d -> (b s) d") if recompute_output else None
             dout, drmsnorm_weight, _, dz, *rest = _layer_norm_bwd(dy_rms, x_rms, rmsnorm_weight, None, ctx.rmsnorm_eps, None, rstd, z_rms, group_size=dim//ctx.ngroups, norm_before_gate=ctx.norm_before_gate, is_rms_norm=True, recompute_output=recompute_output, dz=dz, out=out1_recompute if recompute_output else None)
             print(f'{dz.shape = }')
             torch.save(dz,f"dz_{dist.get_rank()}.pt")
             torch.save(dout,f"dout_{dist.get_rank()}.pt")
-            #FIXME - the dzxbcdt matrix is being corrupted due to the reindexing by dropped indices
-            dzxbcdt[:,lb:,:dim] = rearrange(dz, "(b l) d -> b l d", b = batch) #Added for context parallel fix
-            dzxbcdt[:,:lb,:dim] = 0.0 #Added to test context parllel
             out_for_linear = out_recompute if recompute_output else None
             dout = rearrange(dout, "(b s) (h p) -> b s h p", b=batch, p=headdim)
             dx, ddt, dA, dB, dC, dD, _, ddt_bias, dinitial_states = _mamba_chunk_scan_combined_bwd(
