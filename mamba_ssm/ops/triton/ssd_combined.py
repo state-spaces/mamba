@@ -1056,6 +1056,7 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
         dzx0, dz, ddt_given = dzx0[:,lb:], dz[:,lb:], ddt_given[:,lb:] #This makes a copy of the memory...
         dxBC = torch.empty_like(xBC_conv) #xBC is memory from zxbcdt and has sequence in it whereas _conv is already removed padding
         dx, dB, dC = torch.split(dxBC, [dim, ctx.ngroups * dstate, ctx.ngroups * dstate], dim=-1)
+        dxBC = F.pad(dxBC, (0,0,lb,0), mode='constant', value=None)
         #Now, dx, dB, and dC will pass data into dxBC,
         # dzx0, dz, and ddt_given won't affect dzxbcdt,
         # dxBC_given will affect dzxbcdt
@@ -1117,7 +1118,7 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
         else:
             doutproj_weight, doutproj_bias = None, None
         dxBC_given = rearrange(dxBC_given, "b s d -> b d s")
-        #print(f"{dxBC_given.shape = }, {xBC.shape = }, {dxBC.shape = }")
+        print(f"{dxBC_given.shape = }, {xBC.shape = }, {dxBC.shape = }")
         dxBC_given, dweight, dbias, *_ = causal_conv1d_cuda.causal_conv1d_bwd(
             rearrange(xBC, "b s d -> b d s"), conv1d_weight, conv1d_bias,
             rearrange(dxBC, "b s d -> b d s"), seq_idx, None, None, dxBC_given, False, ctx.activation in ["silu", "swish"]
@@ -1125,6 +1126,9 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
         #dxBC_given, dweight, dbias = dxBC, None, None #Context parallel test
         #dzxbcdt[ :,:,2 * d_nonssm+ dim:2*d_nonssm+dim+ dim + 2 * ctx.ngroups * dstate] = dxBC
         dxBC_given = rearrange(dxBC_given, "b d s -> b s d")
+        torch.save(dxBC,f'dxBC_{dist.get_rank()}.pt')
+        torch.save(dxBC_given,f'dxBC_given_{dist.get_rank()}.pt')
+        torch.save(dzxbcdt,f'dzxbcdt_{dist.get_rank()}.pt')
         return dzxbcdt, dweight, dbias, ddt_bias, dA, dD, None, dinitial_states, None, None, None, None, drmsnorm_weight, None, doutproj_weight, doutproj_bias, None, None, None
 
 
