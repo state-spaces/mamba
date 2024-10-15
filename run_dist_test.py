@@ -4,11 +4,47 @@ from mamba_ssm import Mamba2
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+import torch.nn.functional as F
 #import torch.distributed.autograd as dist_autograd
-from einops import rearrange
+#from einops import rearrange
 if not dist.is_available():
     raise Exception("Distributed note abval")
 import argparse
+
+def send_and_receive_(x, receive_buffer, send_to_rank, receive_from_rank):
+    assert send_to_rank or receive_from_rank
+    ops = []
+    if send_to_rank:
+        ops.append(dist.P2POp(dist.isend, x, send_to_rank))
+    if receive_from_rank:
+        ops.append(dist.P2POp(dist.irecv, receive_buffer, receive_from_rank))
+
+    reqs = dist.batch_isend_irecv(ops)
+
+    for req in reqs:
+        req.wait()
+
+    dist.barrier()
+
+class SequenceParallelMixerLayer(torch.nn.Module):
+    def __init__(self, padding = 0):
+        super(SequenceParallelMixerLayer, self).__init__()
+        self.padding = padding
+    def forward(self, x):
+        #Prepends the last n_padding tokens from layer_n to layer_{n+1}
+        #These are mixed into subsequent tokens of layer n+1 by convolution, but their index is then discarded
+        # the convolution is causal, so the mixing only goes in one direction
+        rank, world_size = dist.get_rank(), dist.get_world_size()
+        send_to_rank = rank + 1 if rank < world_size - 1 else None
+        receive_from_rank = rank - 1 if rank > 0 else None
+        pre_tokens = x.split(dim=1, x.shape[1]-self.padding)
+        receive_buffer = torch.zeros_like(pre_tokens) #TODO this isn't used by rank=0
+        send_and_receive_(pre_tokens, receive_buffer, send_to_rank, receive_from_rank)
+        if rank > 0:
+            x = F.pad(x, (0, 0, self.padding, 0), 'constant', 0)
+            x[:,:self.padding] = receive_buffer
+        return x
+
 parser = argparse.ArgumentParser()
 # This is always passed in by default
 #parser.add_argument("--local_rank", type=int)
@@ -55,9 +91,14 @@ end = torch.cuda.Event(enable_timing=True)
 
 res_forward = list()
 res_backward = list()
-
-model = nn.Sequential([Mamba2(256) for _ in num_layers])
-padding = model[0].d_conv - 1  # Convolutional kernel size - 1
+layers = []
+for _ in range(num_layers):
+    mamba_layer = Mamba2(256)
+    padding = mamba_layer.d_conv - 1
+    layers.append(SequenceParallelMixerLayer(padding))
+    layers.append(mamba_layer)
+model = nn.Sequential(layers)
+print(model)
 
 for s in range(10,11):
     length = 2**s
@@ -71,7 +112,8 @@ for s in range(10,11):
     #sequence = rearrange(seq, 'i b (n j) k -> i n b j k', n = world_size)
     #sequence = [sequence[:,i,:,:].contiguous() for i in range(world_size)]
     #Split with padded repeats for 1d conv overlap
-    sequence = [seq[:, :, seq_per_gpu*r:seq_per_gpu*(r+1)+padding] for r in range(world_size)]
+    #sequence = [seq[:, :, seq_per_gpu*r:seq_per_gpu*(r+1)+padding] for r in range(world_size)]
+    sequence = [seq[:, :, seq_per_gpu * r:seq_per_gpu * (r + 1)] for r in range(world_size)] #Don't need padding with Mixer layer
     #with dist_autograd.context() as context_id:
     for i in range(iterations):
         #input_tensor = sequence[i,rank].cuda()
@@ -130,14 +172,3 @@ def gather(rank, tensor):
         return tensor_list
 
 #input_tensor = torch.zeros([batch,seq_per_gpu,256], device='cuda')
-
-class SequenceParallelMixerLayer(torch.nn.Module):
-    def __init__(self):
-        super(SequenceParallelMixerLayer, self).__init__()
-
-    def forward(self, x):
-        #Prepends the last n_padding tokens from layer_n to layer_{n+1}
-        #These are mixed into subsequent tokens of layer n+1 by convolution, but their index is then discarded
-        # the convolution is causal, so the mixing only goes in one direction
-
-        return AllGatherLayer.apply(x)
