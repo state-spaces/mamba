@@ -166,7 +166,7 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
             (in case batch is small).
         Returns: same shape as u
         """
-        print("Forward")
+        #print("Forward")
         seqlen_og = seqlen
         if seqlen is None:
             batch, seqlen, dim = u.shape
@@ -183,7 +183,7 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
                 out, _, _ = self.step(u, conv_state, ssm_state)
                 return out
 
-        print(f"{u.shape = }")
+        #print(f"{u.shape = }")
         zxbcdt = self.in_proj(u)  # (B, L, d_in_proj) or (B * L, d_in_proj)
         if seqlen_og is not None:
             zxbcdt = rearrange(zxbcdt, "(b l) d -> b l d", l=seqlen)
@@ -192,7 +192,7 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
         dt_limit_kwargs = {} if self.dt_limit == (0.0, float("inf")) else dict(dt_limit=self.dt_limit)
 
         if self.use_mem_eff_path and inference_params is None:
-            print('Using mem_eff_path combined conv1d/scan')
+            #print('Using mem_eff_path combined conv1d/scan')
             out = mamba_split_conv1d_scan_combined(
                 zxbcdt,
                 rearrange(self.conv1d.weight, "d 1 w -> d w"),
@@ -252,7 +252,7 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
                     seq_idx=seq_idx,
                 ).transpose(1, 2)
             x, B, C = torch.split(xBC, [self.d_ssm, self.ngroups * self.d_state, self.ngroups * self.d_state], dim=-1)
-            print('Running chunk_scan_combined')
+            #print('Running chunk_scan_combined')
             y = mamba_chunk_scan_combined(
                 rearrange(x, "b l (h p) -> b l h p", p=self.headdim),
                 dt,

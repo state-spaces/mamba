@@ -14,16 +14,15 @@ import argparse
 def send_and_receive_(x, receive_buffer, send_to_rank, receive_from_rank):
     assert send_to_rank or receive_from_rank
     ops = []
-    if send_to_rank:
+    if send_to_rank is not None:
         ops.append(dist.P2POp(dist.isend, x, send_to_rank))
-    if receive_from_rank:
+    if receive_from_rank is not None:
         ops.append(dist.P2POp(dist.irecv, receive_buffer, receive_from_rank))
 
     reqs = dist.batch_isend_irecv(ops)
 
     for req in reqs:
         req.wait()
-
     dist.barrier()
 
 class SequenceParallelMixerLayer(torch.nn.Module):
@@ -35,14 +34,22 @@ class SequenceParallelMixerLayer(torch.nn.Module):
         #These are mixed into subsequent tokens of layer n+1 by convolution, but their index is then discarded
         # the convolution is causal, so the mixing only goes in one direction
         rank, world_size = dist.get_rank(), dist.get_world_size()
+        if world_size == 1:
+            return x
+
         send_to_rank = rank + 1 if rank < world_size - 1 else None
         receive_from_rank = rank - 1 if rank > 0 else None
-        pre_tokens = x.split(dim=1, x.shape[1]-self.padding)
-        receive_buffer = torch.zeros_like(pre_tokens) #TODO this isn't used by rank=0
+        #print('dist', rank, send_to_rank, receive_from_rank)
+        #_, pre_tokens = x.split(x.shape[1]-self.padding, dim=1)
+        pre_tokens = x[:,-self.padding:].contiguous()
+        print('dist',rank,pre_tokens.requires_grad)
+        assert pre_tokens.shape[1] == self.padding
+        receive_buffer = torch.zeros_like(pre_tokens, requires_grad=True).contiguous() #TODO this isn't used by rank=0
         send_and_receive_(pre_tokens, receive_buffer, send_to_rank, receive_from_rank)
         if rank > 0:
             x = F.pad(x, (0, 0, self.padding, 0), 'constant', 0)
             x[:,:self.padding] = receive_buffer
+            print('dist',rank,'receive_buffer grad',receive_buffer.requires_grad)
         return x
 
 parser = argparse.ArgumentParser()
@@ -97,8 +104,9 @@ for _ in range(num_layers):
     padding = mamba_layer.d_conv - 1
     layers.append(SequenceParallelMixerLayer(padding))
     layers.append(mamba_layer)
-model = nn.Sequential(layers)
-print(model)
+model = nn.Sequential(*layers).cuda()
+if dist.get_rank() == 0:
+    print(model)
 
 for s in range(10,11):
     length = 2**s
@@ -107,7 +115,7 @@ for s in range(10,11):
     #seq = torch.cat([(torch.ones([batch,length,256],dtype = torch.float32)*x).cuda() for x in range(num_gpus)], dim=1)
     assert seq.shape[1]%num_gpus == 0
     seq_per_gpu = seq.shape[2]//num_gpus
-    print('running on ',dist.get_rank(), ' with ', seq_per_gpu)
+    #print('running on ',dist.get_rank(), ' with ', seq_per_gpu)
     #Equal split sequences - easy test
     #sequence = rearrange(seq, 'i b (n j) k -> i n b j k', n = world_size)
     #sequence = [sequence[:,i,:,:].contiguous() for i in range(world_size)]
@@ -117,7 +125,7 @@ for s in range(10,11):
     #with dist_autograd.context() as context_id:
     for i in range(iterations):
         #input_tensor = sequence[i,rank].cuda()
-        print(f"{sequence[rank].shape = }")
+        #print(f"{sequence[rank].shape = }")
         input_tensor = sequence[rank][i].cuda().contiguous()
         #with torch.autograd.profiler.profile(use_cuda=True) as prof:
         start.record()
@@ -128,9 +136,10 @@ for s in range(10,11):
         a = torch.cuda.memory_allocated(rank)
         t = start.elapsed_time(end)
         res_forward.append({'exp':s,'it':i,'res':r,'all':a,'time':t})
-        print("forward",rank,i, a/10**9, r/10**9, 'GB')
-        #print(rank,prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=3))
-        print("forward",rank,i,t, 'ms')
+        if rank == 0:
+            print("forward",rank,i, a/10**9, r/10**9, 'GB')
+            #print(rank,prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=3))
+            print("forward",rank,i,t, 'ms')
         model.zero_grad()
         start.record()
         #dist_autograd.backward(context_id, [output[:,-1,:].sum()]) #For RPC only
@@ -141,9 +150,10 @@ for s in range(10,11):
         a = torch.cuda.memory_allocated(rank)
         t = start.elapsed_time(end)
         res_backward.append({'exp':s,'it':i,'res':r,'all':a,'time':t})
-        print("backward",rank,i, a/10**9, r/10**9, 'GB')
-        #print(rank,prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=3))
-        print("backward",rank,i,t, 'ms')
+        if rank == 0:
+            print("backward",rank,i, a/10**9, r/10**9, 'GB')
+            #print(rank,prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=3))
+            print("backward",rank,i,t, 'ms')
         dist.barrier()
     torch.save(input_tensor,f'input_{rank}.pt')
     torch.save(output, f"output_{rank}.pt")

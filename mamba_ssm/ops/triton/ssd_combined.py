@@ -572,7 +572,7 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
     dx, ddt, dD_from_x = _chunk_scan_chunk_state_bwd_dx(x, dt, dA_cumsum, B, CB, dout, dstates, D=D, seq_idx=seq_idx, dx=dx)
 
     #torch.save(dx, f"dx_{dist.get_rank()}.pt")
-    torch.save(ddt,f"ddt_{dist.get_rank()}.pt")
+    #torch.save(ddt,f"ddt_{dist.get_rank()}.pt")
     #torch.save(dD_from_x,f"fdD_from_x_{dist.get_rank()}.pt")
 
 
