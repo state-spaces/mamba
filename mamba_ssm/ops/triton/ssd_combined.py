@@ -1048,13 +1048,19 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
         B = rearrange(B, "b l (g n) -> b l g n", g=ctx.ngroups)
         C = rearrange(C, "b l (g n) -> b l g n", g=ctx.ngroups)
 
+        torch.save(zxbcdt, f"zxbcdt_{dist.get_rank()}.pt")
         #Create empty output tensors for gradients
         #TODO where do these go in later functions?
         dzxbcdt = torch.empty_like(zxbcdt)
-        dzx0, dz, dxBC_given, ddt_given = torch.split(dzxbcdt, [2 * d_nonssm, dim, dim + 2 * ctx.ngroups * dstate, nheads], dim=-1)
-        dzx0, dz, ddt_given = dzx0[:,lb:], dz[:,lb:], ddt_given[:,lb:]
-        dxBC = torch.empty_like(xBC)
-        dx, dB, dC = torch.split(dxBC[:, lb:], [dim, ctx.ngroups * dstate, ctx.ngroups * dstate], dim=-1)
+        dzx0, dz, dxBC_given, ddt_given = torch.split(dzxbcdt, [2 * d_nonssm, dim, dim + 2 * ctx.ngroups * dstate, nheads], dim=-1) #This doesn't make a copy of the memory, it returns a view
+        dzx0, dz, ddt_given = dzx0[:,lb:], dz[:,lb:], ddt_given[:,lb:] #This makes a copy of the memory...
+        dxBC = torch.empty_like(xBC_conv) #xBC is memory from zxbcdt and has sequence in it whereas _conv is already removed padding
+        dx, dB, dC = torch.split(dxBC, [dim, ctx.ngroups * dstate, ctx.ngroups * dstate], dim=-1)
+        #Now, dx, dB, and dC will pass data into dxBC,
+        # dzx0, dz, and ddt_given won't affect dzxbcdt,
+        # dxBC_given will affect dzxbcdt
+        #dxBC = torch.empty_like(xBC)
+        #dx, dB, dC = torch.split(dxBC[:, lb:], [dim, ctx.ngroups * dstate, ctx.ngroups * dstate], dim=-1)
         z = rearrange(z, "b l (h p) -> b l h p", h=nheads)
         dx = rearrange(dx, "b l (h p) -> b l h p", h=nheads)
         dB = rearrange(dB, "b l (g n) -> b l g n", g=ctx.ngroups)
@@ -1073,10 +1079,10 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
         else:
             print("rmsnorm_weight")
             batch = dout.shape[0]
-            dy_rms = rearrange(dout, "b s h p -> (b s) (h p)") #dout
-            dz = rearrange(dz, "b l d -> (b l) d") #dz
-            x_rms = rearrange(out, "b s h p -> (b s) (h p)") #out
-            z_rms = rearrange(z, "b s h p -> (b s) (h p)") #z
+            dy_rms = rearrange(dout, "b s h p -> (b s) (h p)") #dout (input)
+            dz = rearrange(dz, "b l d -> (b l) d") #dz (copied)
+            x_rms = rearrange(out, "b s h p -> (b s) (h p)") #out (calculated)
+            z_rms = rearrange(z, "b s h p -> (b s) (h p)") #z (calculated)
             #torch.save(z, f"z_{dist.get_rank()}.pt") #Good
             #torch.save(out, f"out_{dist.get_rank()}.pt") #Good
             #torch.save(dz,f"dz_i_{dist.get_rank()}.pt") #Bad
@@ -1090,7 +1096,11 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
             #dz = _like(dz) #.clone()
             #FIXME - the dzxbcdt matrix is being corrupted due to the reindexing by dropped indices
             out1_recompute = rearrange(out1_recompute, "b s d -> (b s) d") if recompute_output else None
-            dout, drmsnorm_weight, _, dz, *rest = _layer_norm_bwd(dy_rms, x_rms, rmsnorm_weight, None, ctx.rmsnorm_eps, None, rstd, z_rms, group_size=dim//ctx.ngroups, norm_before_gate=ctx.norm_before_gate, is_rms_norm=True, recompute_output=recompute_output, dz=dz, out=out1_recompute if recompute_output else None)
+            dout, drmsnorm_weight, _, dz, *rest = _layer_norm_bwd(dy_rms, x_rms, rmsnorm_weight, None, ctx.rmsnorm_eps,
+                                                                  None, rstd, z_rms, group_size=dim//ctx.ngroups,
+                                                                  norm_before_gate=ctx.norm_before_gate, is_rms_norm=True,
+                                                                  recompute_output=recompute_output, dz=dz,
+                                                                  out=out1_recompute if recompute_output else None)
             print(f'{dz.shape = }')
             torch.save(dz,f"dz_{dist.get_rank()}.pt")
             torch.save(dout,f"dout_{dist.get_rank()}.pt")
