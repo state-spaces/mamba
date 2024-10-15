@@ -5,6 +5,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.autograd import Function
 #import torch.distributed.autograd as dist_autograd
 #from einops import rearrange
 if not dist.is_available():
@@ -25,11 +26,9 @@ def send_and_receive_(x, receive_buffer, send_to_rank, receive_from_rank):
         req.wait()
     dist.barrier()
 
-class SequenceParallelMixerLayer(torch.nn.Module):
-    def __init__(self, padding = 0):
-        super(SequenceParallelMixerLayer, self).__init__()
-        self.padding = padding
-    def forward(self, x):
+class SequenceParallelMixerFn(Function):
+    @staticmethod
+    def forward(ctx, x, padding):
         #Prepends the last n_padding tokens from layer_n to layer_{n+1}
         #These are mixed into subsequent tokens of layer n+1 by convolution, but their index is then discarded
         # the convolution is causal, so the mixing only goes in one direction
@@ -50,7 +49,33 @@ class SequenceParallelMixerLayer(torch.nn.Module):
             x = F.pad(x, (0, 0, self.padding, 0), 'constant', 0)
             x[:,:self.padding] = receive_buffer
             print('dist',rank,'receive_buffer grad',receive_buffer.requires_grad)
+        ctx.padding = padding
         return x
+
+    @staticmethod
+    def backward(ctx, grad_x):
+        rank, world_size = dist.get_rank(), dist.get_world_size()
+        print('grad_x', rank, grad_x.shape)
+        if world_size == 1:
+            return grad_x
+        send_to_rank = rank -1 if rank > 0 else None
+        receive_from_rank = rank + 1 if rank < world_size - 1 else None
+        pre_tokens_grad = x[:,:ctx.padding].contiguous()
+        assert pre_tokens_grad.shape[1] == ctx.padding
+        receive_buffer = torch.zeros_like(pre_tokens, requires_grad=True).contiguous() #TODO this isn't used by rank=0
+        send_and_receive_(pre_tokens, receive_buffer, send_to_rank, receive_from_rank)
+        if rank < world_size -1:
+            grad_x_out = grad_x.clone()
+            grad_x_out[:,-ctx.padding:] += receive_buffer
+        return grad_x_out
+
+class SequenceParallelMixerLayer(nn.Module):
+    def __init__(self, padding = 0):
+        super(SequenceParallelMixerLayer, self).__init__()
+        self.padding = padding
+    def forward(self,x):
+        return SequenceParallelMixerFn.apply(x, self.padding)
+
 
 parser = argparse.ArgumentParser()
 # This is always passed in by default
