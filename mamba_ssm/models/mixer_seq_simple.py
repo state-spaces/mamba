@@ -284,13 +284,18 @@ class MambaLMHeadModel(nn.Module, GenerationMixin):
         return CausalLMOutput(logits=lm_logits)
 
     @classmethod
-    def from_pretrained(cls, pretrained_model_name, device=None, dtype=None, **kwargs):
-        config_data = load_config_hf(pretrained_model_name)
+    # def from_pretrained(cls, pretrained_model_name, device=None, dtype=None, **kwargs):
+    #     config_data = load_config_hf(pretrained_model_name)
+    #     config = MambaConfig(**config_data)
+    #     model = cls(config, device=device, dtype=dtype, **kwargs)
+    #     model.load_state_dict(load_state_dict_hf(pretrained_model_name, device=device, dtype=dtype))
+    #     return model
+    def from_pretrained(cls, pretrained_model_name, device=None, dtype=None, cache_dir=None, **kwargs):
+        config_data = load_config_hf(pretrained_model_name, cache_dir=cache_dir)
         config = MambaConfig(**config_data)
         model = cls(config, device=device, dtype=dtype, **kwargs)
-        model.load_state_dict(load_state_dict_hf(pretrained_model_name, device=device, dtype=dtype))
+        model.load_state_dict(load_state_dict_hf(pretrained_model_name, device=device, dtype=dtype, cache_dir=cache_dir))
         return model
-
     def save_pretrained(self, save_directory):
         """
         Minimal implementation of save_pretrained for MambaLMHeadModel.
