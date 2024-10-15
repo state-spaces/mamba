@@ -3,6 +3,7 @@ import pandas as pd
 from mamba_ssm import Mamba2
 import torch
 import torch.distributed as dist
+import torch.nn as nn
 #import torch.distributed.autograd as dist_autograd
 from einops import rearrange
 if not dist.is_available():
@@ -17,10 +18,12 @@ parser.add_argument("--nproc_per_node", type=int)
 parser.add_argument("--random_seed", type=int)
 parser.add_argument("--batch_size", type=int)
 parser.add_argument("--iterations", type=int)
+parser.add_argument("--num_layers", type=int)
 args = parser.parse_args()
 print(args)
 torch.manual_seed(args.random_seed)
-num_gpus =  args.nproc_per_node
+num_gpus = args.nproc_per_node
+num_layers = args.num_layers
 batch = args.batch_size
 iterations = args.iterations
 mesh_1d = dist.device_mesh.init_device_mesh("cuda", mesh_shape=(num_gpus,))
@@ -53,7 +56,9 @@ end = torch.cuda.Event(enable_timing=True)
 res_forward = list()
 res_backward = list()
 
-layer = Mamba2(256).cuda()
+model = nn.Sequential([Mamba2(256) for _ in num_layers])
+padding = model[0].d_conv - 1  # Convolutional kernel size - 1
+
 for s in range(10,11):
     length = 2**s
     seq = torch.randn([iterations,batch,length*8,256],device='cpu')
@@ -66,46 +71,41 @@ for s in range(10,11):
     #sequence = rearrange(seq, 'i b (n j) k -> i n b j k', n = world_size)
     #sequence = [sequence[:,i,:,:].contiguous() for i in range(world_size)]
     #Split with padded repeats for 1d conv overlap
-    padding = layer.d_conv - 1 #Convolutional kernel size - 1
     sequence = [seq[:, :, seq_per_gpu*r:seq_per_gpu*(r+1)+padding] for r in range(world_size)]
     #with dist_autograd.context() as context_id:
-    if True:   
-        for i in range(iterations):
-            #input_tensor = sequence[i,rank].cuda()
-            print(f"{sequence[rank].shape = }") 
-            
-            
-            input_tensor = sequence[rank][i].cuda().contiguous()
-            #with torch.autograd.profiler.profile(use_cuda=True) as prof:
-            start.record()
-            output = layer(input_tensor)
-            end.record()
-            torch.cuda.synchronize()
-            r = torch.cuda.memory_reserved(rank)
-            a = torch.cuda.memory_allocated(rank)
-            t = start.elapsed_time(end)
-            res_forward.append({'exp':s,'it':i,'res':r,'all':a,'time':t})
-            print("forward",rank,i, a/10**9, r/10**9, 'GB')
-            #print(rank,prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=3))
-            print("forward",rank,i,t, 'ms')
-            if True: #rank == world_size-1: #world_size == 1:
-                layer.zero_grad()
-                start.record()
-                #dist_autograd.backward(context_id, [output[:,-1,:].sum()]) #For RPC only
-                output.sum().backward()
-                end.record()
-                torch.cuda.synchronize()
-                r = torch.cuda.memory_reserved(rank)
-                a = torch.cuda.memory_allocated(rank)
-                t = start.elapsed_time(end)
-                res_backward.append({'exp':s,'it':i,'res':r,'all':a,'time':t})
-                print("backward",rank,i, a/10**9, r/10**9, 'GB')
-                #print(rank,prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=3))
-                print("backward",rank,i,t, 'ms')
-            dist.barrier()
+    for i in range(iterations):
+        #input_tensor = sequence[i,rank].cuda()
+        print(f"{sequence[rank].shape = }")
+        input_tensor = sequence[rank][i].cuda().contiguous()
+        #with torch.autograd.profiler.profile(use_cuda=True) as prof:
+        start.record()
+        output = model(input_tensor)
+        end.record()
+        torch.cuda.synchronize()
+        r = torch.cuda.memory_reserved(rank)
+        a = torch.cuda.memory_allocated(rank)
+        t = start.elapsed_time(end)
+        res_forward.append({'exp':s,'it':i,'res':r,'all':a,'time':t})
+        print("forward",rank,i, a/10**9, r/10**9, 'GB')
+        #print(rank,prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=3))
+        print("forward",rank,i,t, 'ms')
+        model.zero_grad()
+        start.record()
+        #dist_autograd.backward(context_id, [output[:,-1,:].sum()]) #For RPC only
+        output.sum().backward()
+        end.record()
+        torch.cuda.synchronize()
+        r = torch.cuda.memory_reserved(rank)
+        a = torch.cuda.memory_allocated(rank)
+        t = start.elapsed_time(end)
+        res_backward.append({'exp':s,'it':i,'res':r,'all':a,'time':t})
+        print("backward",rank,i, a/10**9, r/10**9, 'GB')
+        #print(rank,prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=3))
+        print("backward",rank,i,t, 'ms')
+        dist.barrier()
     torch.save(input_tensor,f'input_{rank}.pt')
     torch.save(output, f"output_{rank}.pt")
-    torch.save({x[0]:x[1].grad for x in layer.named_parameters()}, f"grad_dict_{rank}.pt")
+    torch.save({x[0]:x[1].grad for x in model.named_parameters()}, f"grad_dict_{rank}.pt")
 pd.DataFrame(res_forward).to_csv(f'res_fw_{rank}.csv')
 pd.DataFrame(res_backward).to_csv(f'res_bw_{rank}.csv')
 dist.destroy_process_group()
@@ -130,3 +130,14 @@ def gather(rank, tensor):
         return tensor_list
 
 #input_tensor = torch.zeros([batch,seq_per_gpu,256], device='cuda')
+
+class SequenceParallelMixerLayer(torch.nn.Module):
+    def __init__(self):
+        super(SequenceParallelMixerLayer, self).__init__()
+
+    def forward(self, x):
+        #Prepends the last n_padding tokens from layer_n to layer_{n+1}
+        #These are mixed into subsequent tokens of layer n+1 by convolution, but their index is then discarded
+        # the convolution is causal, so the mixing only goes in one direction
+
+        return AllGatherLayer.apply(x)

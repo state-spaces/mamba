@@ -403,7 +403,7 @@ def _mamba_chunk_scan_combined_fwd(x, dt, A, B, C, chunk_size, D=None, z=None, d
     # states_tmp1 = rearrange(_state_passing_fwd(rearrange(states_tmp1, "... p n -> ... (p n)"), dA_cumsum_tmp1[:, :, :, -1], chunk_size=chunk_size), "... (p n) -> ... p n", n=dstate)
     CB = _bmm_chunk_fwd(C, B, chunk_size, seq_idx=seq_idx, output_dtype=torch.float32)
     out, out_x = _chunk_scan_fwd(CB, x, dt, dA_cumsum, C, states, D=D, z=z, seq_idx=seq_idx)
-    print(f"Forward sizes: {x.shape} {out.shape}")
+    #print(f"Forward sizes: {x.shape} {out.shape}")
     if cu_seqlens is None:
         return out, out_x, dt, dA_cumsum, states, final_states
     else:
@@ -417,7 +417,7 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
                                    dt_bias=None, initial_states=None, dfinal_states=None, seq_idx=None, dt_softplus=False,
                                    dt_limit=(0.0, float("inf")),
                                    dx=None, ddt=None, dB=None, dC=None, dz=None, recompute_output=False):
-    print('chunk_scan_combined_bwd')
+    #print('chunk_scan_combined_bwd')
     if dout.stride(-1) != 1:
         dout = dout.contiguous()
     batch, seqlen, nheads, headdim = x.shape
@@ -545,14 +545,14 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
         dist.barrier()
         # print('passing states sequentially multi-gpu')
         for rank1, rank2 in zip(range(world_size - 1,0,-1), range(world_size-2,-1,-1)):
-            print(f"{rank} - {rank1} - {rank2}")
+            #print(f"{rank} - {rank1} - {rank2}")
             if rank in [rank1, rank2]:
-                print(f"transfer {rank1}:{rank2}")
+                #print(f"transfer {rank1}:{rank2}")
                 if rank == rank2:
                     dinitial_states = torch.zeros_like(states[:, -1])
                 dfinal_states = _transfer(dinitial_states, rank1, rank2)
             if rank == rank2:
-                print(f"state passing Wbackward {rank2}")
+                #print(f"state passing Wbackward {rank2}")
                 states, dstates, dinitial_states, ddA_chunk_cumsum = _state_passing_bwd_wrap(states, dA_cumsum, dstates,
                                                                                              dfinal_states,
                                                                                              initial_states, seq_idx,
@@ -964,7 +964,7 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
                                                  conv1d_weight, conv1d_bias, seq_idx, None, None, activation in ["silu", "swish"]),
             "b d s -> b s d"
         )[:, lb:, :].contiguous()
-        print(f"{xBC_conv.shape = }, {seqlen = }, {lb = }")
+        #print(f"{xBC_conv.shape = }, {seqlen = }, {lb = }")
         #xBC_conv = xBC #.clone()
         x, B, C = torch.split(xBC_conv, [dim, ngroups * dstate, ngroups * dstate], dim=-1)
         x = rearrange(x, "b l (h p) -> b l h p", h=nheads)
@@ -1048,10 +1048,10 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
         B = rearrange(B, "b l (g n) -> b l g n", g=ctx.ngroups)
         C = rearrange(C, "b l (g n) -> b l g n", g=ctx.ngroups)
 
-        torch.save(zxbcdt, f"zxbcdt_{dist.get_rank()}.pt")
-        torch.save(xBC_conv, f"xBC_conv_{dist.get_rank()}.pt")
+        #torch.save(zxbcdt, f"zxbcdt_{dist.get_rank()}.pt")
+        #torch.save(xBC_conv, f"xBC_conv_{dist.get_rank()}.pt")
         #Create empty output tensors for gradients
-        #TODO where do these go in later functions?
+        #Notes added on whether the memory locations are preserved or not - this is useful for later optimization
         dzxbcdt = torch.empty_like(zxbcdt)
         dzx0, dz, dxBC_given, ddt_given = torch.split(dzxbcdt, [2 * d_nonssm, dim, dim + 2 * ctx.ngroups * dstate, nheads], dim=-1) #This doesn't make a copy of the memory, it returns a view
         dzx0, dz, ddt_given = dzx0[:,lb:], dz[:,lb:], ddt_given[:,lb:] #This makes a copy of the memory...
@@ -1077,9 +1077,9 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
 
         dout = rearrange(dout, "b s (h p) -> b s h p", p=headdim)
         if rmsnorm_weight is None:
-            raise Exception("Deleted path here")
+            raise Exception("Deleted path here") #This could be added back later but probably needs some testing
         else:
-            print("rmsnorm_weight")
+            #print("rmsnorm_weight")
             batch = dout.shape[0]
             dy_rms = rearrange(dout, "b s h p -> (b s) (h p)") #dout (input)
             dz = rearrange(dz, "b l d -> (b l) d") #dz (copied)
@@ -1095,25 +1095,25 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
             #torch.save(z_rms,f"z_rms_{dist.get_rank()}.pt")
             #torch.save(rstd,f"rstd_{dist.get_rank()}.pt")
             #print(z.shape, out.shape, dist.get_rank())
-            #dz = _like(dz) #.clone()
-            #FIXME - the dzxbcdt matrix is being corrupted due to the reindexing by dropped indices
+            #TODO - dz here doesn't directly write into xdzbcdt so needs to be copied later
             out1_recompute = rearrange(out1_recompute, "b s d -> (b s) d") if recompute_output else None
             dout, drmsnorm_weight, _, dz, *rest = _layer_norm_bwd(dy_rms, x_rms, rmsnorm_weight, None, ctx.rmsnorm_eps,
                                                                   None, rstd, z_rms, group_size=dim//ctx.ngroups,
                                                                   norm_before_gate=ctx.norm_before_gate, is_rms_norm=True,
                                                                   recompute_output=recompute_output, dz=dz,
                                                                   out=out1_recompute if recompute_output else None)
-            print(f'{dz.shape = }')
-            torch.save(dz,f"dz_{dist.get_rank()}.pt")
-            torch.save(dout,f"dout_{dist.get_rank()}.pt")
+            #print(f'{dz.shape = }')
+            #torch.save(dz,f"dz_{dist.get_rank()}.pt")
+            #torch.save(dout,f"dout_{dist.get_rank()}.pt")
             out_for_linear = out_recompute if recompute_output else None
             dout = rearrange(dout, "(b s) (h p) -> b s h p", b=batch, p=headdim)
             dx, ddt, dA, dB, dC, dD, _, ddt_bias, dinitial_states = _mamba_chunk_scan_combined_bwd(
                 dout, x, dt, A, B, C, out, ctx.chunk_size, D=D, z=None, dt_bias=dt_bias, initial_states=initial_states, dfinal_states=dfinal_states, seq_idx=seq_idx, dt_softplus=True, dt_limit=ctx.dt_limit, dx=dx, ddt=ddt_given, dB=dB, dC=dC
-            )
-            for k,v in {'dx':dx,'dA':dA,'dB':dB,'dC':dC,'dxBC_p':dxBC
-                    }.items():
-                torch.save(v,f'{k}_{dist.get_rank()}.pt')
+            )            #TODO - dx, dB, dC, and ddt here don't directly write into xdzbcdt so needs to be copied later
+
+            #for k,v in {'dx':dx,'dA':dA,'dB':dB,'dC':dC,'dxBC_p':dxBC
+            #        }.items():
+            #    torch.save(v,f'{k}_{dist.get_rank()}.pt')
             
 
         if outproj_weight is not None:
@@ -1122,20 +1122,26 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
         else:
             doutproj_weight, doutproj_bias = None, None
         dxBC_given = rearrange(dxBC_given, "b s d -> b d s")
+
+        #This line is added for context parallel since the prepended tokens are dropped out of the conv layer in the forward pass
         dxBC = F.pad(dxBC, (0,0,lb,0), mode='constant', value=0.0)
-        print(f"{dxBC_given.shape = }, {xBC.shape = }, {dxBC.shape = }")
+        #print(f"{dxBC_given.shape = }, {xBC.shape = }, {dxBC.shape = }")
+
         dxBC_given, dweight, dbias, *_ = causal_conv1d_cuda.causal_conv1d_bwd(
             rearrange(xBC, "b s d -> b d s"), conv1d_weight, conv1d_bias,
             rearrange(dxBC, "b s d -> b d s"), seq_idx, None, None, dxBC_given, False, ctx.activation in ["silu", "swish"]
         )
+
+        #These are added for context parallel (the coping into dzxbcdt)
         #dxBC_given, dweight, dbias = dxBC, None, None #Context parallel test
         #dzxbcdt[:,:,:2*d_nonssm] = F.pad(dzx0, (0,0,lb,0), mode='constant', value=0.0)
         dzxbcdt[ :, :, 2 * d_nonssm + dim + dim + 2 * ctx.ngroups * dstate:] = F.pad(ddt, (0,0,lb,0), mode='constant',value=0.0)
         dzxbcdt[ :,:, 2 * d_nonssm: dim] = F.pad(rearrange(dz, '(b l) d -> b l d', b = batch), (0,0,lb,0), mode='constant', value=0.0)
+
         dxBC_given = rearrange(dxBC_given, "b d s -> b s d")
-        torch.save(dxBC,f'dxBC_{dist.get_rank()}.pt')
-        torch.save(dxBC_given,f'dxBC_given_{dist.get_rank()}.pt')
-        torch.save(dzxbcdt,f'dzxbcdt_{dist.get_rank()}.pt')
+        #torch.save(dxBC,f'dxBC_{dist.get_rank()}.pt')
+        #torch.save(dxBC_given,f'dxBC_given_{dist.get_rank()}.pt')
+        #torch.save(dzxbcdt,f'dzxbcdt_{dist.get_rank()}.pt')
         return dzxbcdt, dweight, dbias, ddt_bias, dA, dD, None, dinitial_states, None, None, None, None, drmsnorm_weight, None, doutproj_weight, doutproj_bias, None, None, None
 
 
