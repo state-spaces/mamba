@@ -1049,6 +1049,7 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
         C = rearrange(C, "b l (g n) -> b l g n", g=ctx.ngroups)
 
         torch.save(zxbcdt, f"zxbcdt_{dist.get_rank()}.pt")
+        torch.save(xBC_conv, f"xBC_conv_{dist.get_rank()}.pt")
         #Create empty output tensors for gradients
         #TODO where do these go in later functions?
         dzxbcdt = torch.empty_like(zxbcdt)
@@ -1056,7 +1057,7 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
         dzx0, dz, ddt_given = dzx0[:,lb:], dz[:,lb:], ddt_given[:,lb:] #This makes a copy of the memory...
         dxBC = torch.empty_like(xBC_conv) #xBC is memory from zxbcdt and has sequence in it whereas _conv is already removed padding
         dx, dB, dC = torch.split(dxBC, [dim, ctx.ngroups * dstate, ctx.ngroups * dstate], dim=-1)
-        dxBC = F.pad(dxBC, (0,0,lb,0), mode='constant', value=None)
+        #dxBC = F.pad(dxBC, (0,0,lb,0), mode='constant', value=None)
         #Now, dx, dB, and dC will pass data into dxBC,
         # dzx0, dz, and ddt_given won't affect dzxbcdt,
         # dxBC_given will affect dzxbcdt
@@ -1110,7 +1111,10 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
             dx, ddt, dA, dB, dC, dD, _, ddt_bias, dinitial_states = _mamba_chunk_scan_combined_bwd(
                 dout, x, dt, A, B, C, out, ctx.chunk_size, D=D, z=None, dt_bias=dt_bias, initial_states=initial_states, dfinal_states=dfinal_states, seq_idx=seq_idx, dt_softplus=True, dt_limit=ctx.dt_limit, dx=dx, ddt=ddt_given, dB=dB, dC=dC
             )
-
+            for k,v in {'dx':dx,'dA':dA,'dB':dB,'dC':dC,'dxBC_p':dxBC
+                    }.items():
+                torch.save(v,f'{k}_{dist.get_rank()}.pt')
+            
 
         if outproj_weight is not None:
             doutproj_weight = torch.einsum("bso,bsd->od", dout_og, out_for_linear)
@@ -1118,13 +1122,16 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
         else:
             doutproj_weight, doutproj_bias = None, None
         dxBC_given = rearrange(dxBC_given, "b s d -> b d s")
+        dxBC = F.pad(dxBC, (0,0,lb,0), mode='constant', value=0.0)
         print(f"{dxBC_given.shape = }, {xBC.shape = }, {dxBC.shape = }")
         dxBC_given, dweight, dbias, *_ = causal_conv1d_cuda.causal_conv1d_bwd(
             rearrange(xBC, "b s d -> b d s"), conv1d_weight, conv1d_bias,
             rearrange(dxBC, "b s d -> b d s"), seq_idx, None, None, dxBC_given, False, ctx.activation in ["silu", "swish"]
         )
         #dxBC_given, dweight, dbias = dxBC, None, None #Context parallel test
-        #dzxbcdt[ :,:,2 * d_nonssm+ dim:2*d_nonssm+dim+ dim + 2 * ctx.ngroups * dstate] = dxBC
+        #dzxbcdt[:,:,:2*d_nonssm] = F.pad(dzx0, (0,0,lb,0), mode='constant', value=0.0)
+        dzxbcdt[ :, :, 2 * d_nonssm + dim + dim + 2 * ctx.ngroups * dstate:] = F.pad(ddt, (0,0,lb,0), mode='constant',value=0.0)
+        dzxbcdt[ :,:, 2 * d_nonssm: dim] = F.pad(rearrange(dz, '(b l) d -> b l d', b = batch), (0,0,lb,0), mode='constant', value=0.0)
         dxBC_given = rearrange(dxBC_given, "b d s -> b s d")
         torch.save(dxBC,f'dxBC_{dist.get_rank()}.pt')
         torch.save(dxBC_given,f'dxBC_given_{dist.get_rank()}.pt')
