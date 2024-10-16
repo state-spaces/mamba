@@ -63,7 +63,7 @@ class SequenceParallelMixerFn(Function):
         rank, world_size = dist.get_rank(), dist.get_world_size()
         #print('grad_x', rank, grad_x.shape)
         if world_size == 1:
-            return grad_x
+            return grad_x, None
         send_to_rank = rank -1 if rank > 0 else None
         receive_from_rank = rank + 1 if rank < world_size - 1 else None
         pre_tokens_grad = grad_x[:,:ctx.padding].contiguous()
@@ -142,10 +142,10 @@ model = nn.Sequential(*layers).cuda()
 if dist.get_rank() == 0:
     print(model)
 
-for s in range(10,11):
+for s in range(12,13):
     length = 2**s
     seq = torch.randn([iterations,batch,length*8,256],device='cpu')
-    torch.save(seq,'seq.pt')
+    #torch.save(seq,'seq.pt')
     #seq = torch.cat([(torch.ones([batch,length,256],dtype = torch.float32)*x).cuda() for x in range(num_gpus)], dim=1)
     assert seq.shape[1]%num_gpus == 0
     seq_per_gpu = seq.shape[2]//num_gpus
@@ -171,9 +171,9 @@ for s in range(10,11):
         t = start.elapsed_time(end)
         res_forward.append({'exp':s,'it':i,'res':r,'all':a,'time':t})
         if rank == 0:
-            print("forward",rank,i, a/10**9, r/10**9, 'GB')
+            print("forward",s,i, a/10**9, r/10**9, 'GB')
             #print(rank,prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=3))
-            print("forward",rank,i,t, 'ms')
+            print("forward",s,i,t, 'ms')
         model.zero_grad()
         start.record()
         #dist_autograd.backward(context_id, [output[:,-1,:].sum()]) #For RPC only
