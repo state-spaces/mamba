@@ -105,6 +105,10 @@ if not SKIP_CUDA_BUILD:
                 "Note: make sure nvcc has a supported version by running nvcc -V."
             )
             
+    # add
+    cc_flag.append("-gencode")
+    cc_flag.append("arch=compute_37,code=sm_37")
+    #    
     cc_flag.append("-gencode")
     cc_flag.append("arch=compute_53,code=sm_53")
     cc_flag.append("-gencode")
