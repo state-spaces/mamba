@@ -1,9 +1,10 @@
 import torch
+from functools import partial
 
 
 def custom_amp_decorator(dec, cuda_amp_deprecated):
     def decorator(func):
-        return dec(func) if not cuda_amp_deprecated else dec(func, device_type="cuda")
+        return dec(func) if not cuda_amp_deprecated else partial(dec, func, device_type="cuda")
     return decorator
 
 
