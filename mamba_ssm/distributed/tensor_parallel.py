@@ -6,8 +6,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
-from torch.amp import custom_bwd, custom_fwd
 from torch.distributed import ProcessGroup
+from mamba_ssm.utils.torch import custom_bwd, custom_fwd
 
 from einops import rearrange
 
@@ -22,7 +22,7 @@ from mamba_ssm.distributed.distributed_utils import (
 
 class ParallelLinearFunc(torch.autograd.Function):
     @staticmethod
-    @custom_fwd(device_type="cuda")
+    @custom_fwd
     def forward(ctx, x, weight, bias, process_group=None, sequence_parallel=True):
         """
         If process_group is not None and sequence_parallel=True, we're doing Tensor Parallel
@@ -58,7 +58,7 @@ class ParallelLinearFunc(torch.autograd.Function):
         return output
 
     @staticmethod
-    @custom_bwd(device_type="cuda")
+    @custom_bwd
     def backward(ctx, grad_output):
         grad_output = grad_output.contiguous()
         process_group = ctx.process_group

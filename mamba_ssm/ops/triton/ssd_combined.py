@@ -11,7 +11,7 @@ from packaging import version
 import torch
 import torch.nn.functional as F
 from torch import Tensor
-from torch.amp import custom_bwd, custom_fwd
+from mamba_ssm.utils.torch import custom_bwd, custom_fwd
 
 import triton
 import triton.language as tl
@@ -754,7 +754,7 @@ def mamba_conv1d_scan_ref(xBC, conv1d_weight, conv1d_bias, dt, A, chunk_size, D=
 class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
 
     @staticmethod
-    @custom_fwd(device_type="cuda")
+    @custom_fwd
     def forward(ctx, zxbcdt, conv1d_weight, conv1d_bias, dt_bias, A, D, chunk_size, initial_states=None, seq_idx=None, dt_limit=(0.0, float("inf")), return_final_states=False, activation="silu",
                 rmsnorm_weight=None, rmsnorm_eps=1e-6, outproj_weight=None, outproj_bias=None, headdim=None,
                 ngroups=1, norm_before_gate=True):
@@ -832,7 +832,7 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
         return out if not return_final_states else (out, final_states)
 
     @staticmethod
-    @custom_bwd(device_type="cuda")
+    @custom_bwd
     def backward(ctx, dout, *args):
         zxbcdt, conv1d_weight, conv1d_bias, out, A, D, dt_bias, initial_states, seq_idx, rmsnorm_weight, rstd, outproj_weight, outproj_bias = ctx.saved_tensors
         dfinal_states = args[0] if ctx.return_final_states else None
