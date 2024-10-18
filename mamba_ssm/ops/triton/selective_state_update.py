@@ -18,11 +18,12 @@ from mamba_ssm.ops.triton.softplus import softplus
 @triton.heuristics({"HAS_DT_BIAS": lambda args: args["dt_bias_ptr"] is not None})
 @triton.heuristics({"HAS_D": lambda args: args["D_ptr"] is not None})
 @triton.heuristics({"HAS_Z": lambda args: args["z_ptr"] is not None})
+@triton.heuristics({"HAS_STATE_BATCH_INDICES": lambda args: args["state_batch_indices_ptr"] is not None})
 @triton.heuristics({"BLOCK_SIZE_DSTATE": lambda args: triton.next_power_of_2(args["dstate"])})
 @triton.jit
 def _selective_scan_update_kernel(
     # Pointers to matrices
-    state_ptr, x_ptr, dt_ptr, dt_bias_ptr, A_ptr, B_ptr, C_ptr, D_ptr, z_ptr, out_ptr,
+    state_ptr, x_ptr, dt_ptr, dt_bias_ptr, A_ptr, B_ptr, C_ptr, D_ptr, z_ptr, out_ptr, state_batch_indices_ptr,
     # Matrix dimensions
     batch, nheads, dim, dstate, nheads_ngroups_ratio,
     # Strides
@@ -43,12 +44,20 @@ def _selective_scan_update_kernel(
     HAS_DT_BIAS: tl.constexpr,
     HAS_D: tl.constexpr,
     HAS_Z: tl.constexpr,
+    HAS_STATE_BATCH_INDICES: tl.constexpr,
     BLOCK_SIZE_DSTATE: tl.constexpr,
 ):
     pid_m = tl.program_id(axis=0)
     pid_b = tl.program_id(axis=1)
     pid_h = tl.program_id(axis=2)
-    state_ptr += pid_b * stride_state_batch + pid_h * stride_state_head
+
+    if HAS_STATE_BATCH_INDICES:
+        state_batch_indices_ptr += pid_b
+        state_batch_idx = tl.load(state_batch_indices_ptr)
+        state_ptr += state_batch_idx * stride_state_batch + pid_h * stride_state_head
+    else:
+        state_ptr += pid_b * stride_state_batch + pid_h * stride_state_head
+
     x_ptr += pid_b * stride_x_batch + pid_h * stride_x_head
     dt_ptr += pid_b * stride_dt_batch + pid_h * stride_dt_head
     if HAS_DT_BIAS:
@@ -118,7 +127,8 @@ def _selective_scan_update_kernel(
     tl.store(out_ptrs, out, mask=offs_m < dim)
 
 
-def selective_state_update(state, x, dt, A, B, C, D=None, z=None, dt_bias=None, dt_softplus=False):
+def selective_state_update(state, x, dt, A, B, C, D=None, z=None, dt_bias=None, dt_softplus=False,
+                           state_batch_indices=None):
     """
     Argument:
         state: (batch, dim, dstate) or (batch, nheads, dim, dstate)
@@ -152,7 +162,10 @@ def selective_state_update(state, x, dt, A, B, C, D=None, z=None, dt_bias=None, 
         z = z.unsqueeze(1)
     if dt_bias is not None and dt_bias.dim() == 1:
         dt_bias = dt_bias.unsqueeze(0)
-    batch, nheads, dim, dstate = state.shape
+    _, nheads, dim, dstate = state.shape
+    batch = x.shape[0]
+    if x.shape != (batch, nheads, dim):
+        print(f"{state.shape} {x.shape} {batch} {nheads} {dim}")
     assert x.shape == (batch, nheads, dim)
     assert dt.shape == x.shape
     assert A.shape == (nheads, dim, dstate)
@@ -166,6 +179,8 @@ def selective_state_update(state, x, dt, A, B, C, D=None, z=None, dt_bias=None, 
         assert z.shape == x.shape
     if dt_bias is not None:
         assert dt_bias.shape == (nheads, dim)
+    if state_batch_indices is not None:
+        assert state_batch_indices.shape == (batch,)
     out = torch.empty_like(x)
     grid = lambda META: (triton.cdiv(dim, META['BLOCK_SIZE_M']), batch, nheads)
     z_strides = ((z.stride(0), z.stride(1), z.stride(2)) if z is not None else (0, 0, 0))
@@ -179,7 +194,7 @@ def selective_state_update(state, x, dt, A, B, C, D=None, z=None, dt_bias=None, 
     tie_hdim = A.stride(-1) == 0 and A.stride(-2) == 0 and dt.stride(-1) == 0 and dt_bias.stride(-1) == 0
     with torch.cuda.device(x.device.index):
         _selective_scan_update_kernel[grid](
-            state, x, dt, dt_bias, A, B, C, D, z, out,
+            state, x, dt, dt_bias, A, B, C, D, z, out, state_batch_indices,
             batch, nheads, dim, dstate, nheads // ngroups,
             state.stride(0), state.stride(1), state.stride(2), state.stride(3),
             x.stride(0), x.stride(1), x.stride(2),
