@@ -120,11 +120,13 @@ def _chunk_scan_chunk_state_bwd_dx_kernel(
 
     dA_cs_last = tl.load(dA_cumsum_ptr + (chunk_size - 1) * stride_dA_cs_csize).to(tl.float32)
     if not HAS_SEQ_IDX:
-        scale = tl.exp(dA_cs_last - dA_cs_m)
+        # scale = tl.exp(dA_cs_last - dA_cs_m)
+        scale = tl.exp(tl.minimum((dA_cs_last - dA_cs_m), 0.0))
     else:
         seq_idx_m = tl.load(seq_idx_ptr + offs_m * stride_seq_idx_seqlen, mask=offs_m < chunk_size_limit, other=-1)
         seq_idx_last = tl.load(seq_idx_ptr + (chunk_size_limit - 1) * stride_seq_idx_seqlen)
-        scale = tl.where(seq_idx_m == seq_idx_last, tl.exp(dA_cs_last - dA_cs_m), 0.0)
+        # scale = tl.where(seq_idx_m == seq_idx_last, tl.exp(dA_cs_last - dA_cs_m), 0.0)
+        scale = tl.where(seq_idx_m == seq_idx_last, tl.exp(tl.minimum((dA_cs_last - dA_cs_m), 0.0)), 0.0)
     # Might be faster to just do 1 iteration with larger BLOCK_SIZE_K, up to block size 128
     # However, we're getting error with the Triton compiler 2.1.0 for that code path:
     # Unexpected mma -> mma layout conversion
@@ -170,7 +172,8 @@ def _chunk_scan_chunk_state_bwd_dx_kernel(
         cb = tl.load(cb_ptrs, mask=(offs_m[:, None] < chunk_size) & (offs_k[None, :] < K_MAX - k), other=0.0)
         dout = tl.load(dout_ptrs, mask=(offs_k[:, None] < K_MAX - k) & (offs_n[None, :] < hdim), other=0.0)
         dA_cs_k = tl.load(dA_cumsum_ptrs, mask=offs_k < K_MAX - k, other=0.0).to(tl.float32)
-        cb *= tl.exp(dA_cs_k[None, :] - dA_cs_m[:, None])
+        # cb *= tl.exp(dA_cs_k[None, :] - dA_cs_m[:, None])
+        cb *= tl.exp(tl.minimum((dA_cs_k[None, :] - dA_cs_m[:, None]), 0.0))
         # If we don't have the (k + offs_k[None, :] < K_MAX) mask, for indices outside this range,
         # we might have dA_cs_m = 0.0 and dA_cs_k very negative, and tl.exp will return inf.
         # Multiplying with cb, which is 0.0 outside the range, will make the result NaN.
