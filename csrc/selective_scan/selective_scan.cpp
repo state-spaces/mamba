@@ -2,9 +2,9 @@
  * Copyright (c) 2023, Tri Dao.
  ******************************************************************************/
 
-#include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
-#include <torch/extension.h>
+#include <c10/cuda/CUDAStream.h>
+#include <torch/python.h>
 #include <vector>
 
 #include "selective_scan.h"
@@ -323,7 +323,7 @@ selective_scan_fwd(const at::Tensor &u, const at::Tensor &delta,
 
     // Otherwise the kernel will be launched from cuda:0 device
     // Cast to char to avoid compiler warning about narrowing
-    at::cuda::CUDAGuard device_guard{(char)u.get_device()};
+    at::cuda::CUDAGuard device_guard{u.device()};
     auto stream = at::cuda::getCurrentCUDAStream().stream();
     DISPATCH_ITYPE_FLOAT_AND_HALF_AND_BF16(u.scalar_type(), "selective_scan_fwd", [&] {
         DISPATCH_WTYPE_FLOAT_AND_COMPLEX(A.scalar_type(), "selective_scan_fwd", [&] {
@@ -478,7 +478,7 @@ selective_scan_bwd(const at::Tensor &u, const at::Tensor &delta,
 
     // Otherwise the kernel will be launched from cuda:0 device
     // Cast to char to avoid compiler warning about narrowing
-    at::cuda::CUDAGuard device_guard{(char)u.get_device()};
+    at::cuda::CUDAGuard device_guard{u.device()};
     auto stream = at::cuda::getCurrentCUDAStream().stream();
     DISPATCH_ITYPE_FLOAT_AND_HALF_AND_BF16(u.scalar_type(), "selective_scan_bwd", [&] {
         DISPATCH_WTYPE_FLOAT_AND_COMPLEX(A.scalar_type(), "selective_scan_bwd", [&] {
