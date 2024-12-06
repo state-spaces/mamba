@@ -19,7 +19,6 @@ dependencies = [
     "torch",
     "ninja",
     "einops",
-    "triton",
     "transformers",
     "packaging",
     "setuptools>=61.0.0",

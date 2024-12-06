@@ -371,7 +371,7 @@ setup(
         "packaging",
         "ninja",
         "einops",
-        "triton",
+        # "triton",
         "transformers",
         # "causal_conv1d>=1.4.0",
     ],
