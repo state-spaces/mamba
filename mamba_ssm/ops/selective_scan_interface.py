@@ -13,8 +13,10 @@ except ImportError:
     causal_conv1d_fn = None
     causal_conv1d_cuda = None
 
+from mamba_ssm.ops.triton.layer_norm import _layer_norm_fwd
+
 import selective_scan_cuda
-from .triton.layer_norm import _layer_norm_fwd
+
 
 class SelectiveScanFn(torch.autograd.Function):
 
@@ -78,6 +80,7 @@ class SelectiveScanFn(torch.autograd.Function):
                 None,
                 None)
 
+
 def rms_norm_forward(
     x,
     weight,
@@ -96,6 +99,7 @@ def rms_norm_forward(
     )[0]
     # y (b l) d
     return y
+
 
 def selective_scan_fn(u, delta, A, B, C, D=None, z=None, delta_bias=None, delta_softplus=False,
                      return_last_state=False):
