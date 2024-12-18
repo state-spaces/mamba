@@ -156,8 +156,6 @@ def custom_selective_scan_bwd_cuda(
 ):
     if dout.stride(-1) != 1:
         dout = dout.contiguous()
-    B = B.contiguous()
-    C = C.contiguous()
 
     results = selective_scan_cuda.bwd(
         u, delta, A, B, C, D, z, delta_bias, dout, x, out, None, delta_softplus, False
