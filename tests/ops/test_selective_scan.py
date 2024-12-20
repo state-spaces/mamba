@@ -254,3 +254,28 @@ def test_mamba_inner_fn(is_variable_B, is_variable_C, seqlen, itype, wtype):
     #                       atol=atolw if not is_variable_C else atol)
     # assert torch.allclose(D.grad, D_ref.grad, rtol=rtolw, atol=atolw)
     # assert torch.allclose(delta_bias.grad, delta_bias_ref.grad, rtol=rtolw, atol=atolw)
+
+def test_selective_scan_opcheck():
+    from torch.library import opcheck
+    
+    device = "cuda"
+    # small inputs for opcheck
+    u = torch.randn(1, 2, 8, device=device, requires_grad=True)
+    delta = torch.randn(1, 2, 8, device=device, requires_grad=True)
+    A = torch.randn(2, 8, device=device, requires_grad=True)
+    B = torch.randn(1, 1, 8, 8, device=device, requires_grad=True)
+    C = torch.randn(1, 1, 8, 8, device=device, requires_grad=True)
+    D = torch.randn(2, device=device, requires_grad=True)
+    z = torch.randn(1, 2, 8, device=device, requires_grad=True)
+    delta_bias = torch.randn(2, device=device, requires_grad=True)
+    delta_softplus = False
+    return_last_state = False
+
+    # Run opcheck
+    result = opcheck(
+        torch.ops.custom_ops.selective_scan_fwd,
+        (u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state),
+        test_utils=("test_schema", "test_faketensor", "test_aot_dispatch_dynamic", "test_autograd_registration"),
+        raise_exception=True
+    )
+    print("Opcheck result:", result)
