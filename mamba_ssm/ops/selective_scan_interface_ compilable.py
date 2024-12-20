@@ -2,8 +2,7 @@ import torch
 from einops import rearrange
 from typing import Optional, Tuple
 
-from mamba_ssm.ops.selective_scan_interface import selective_scan_cuda
-
+import selective_scan_cuda
 
 @torch.library.custom_op(
     "custom_ops::selective_scan_fwd",
