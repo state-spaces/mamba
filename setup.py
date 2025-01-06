@@ -356,7 +356,7 @@ setup(
     url="https://github.com/state-spaces/mamba",
     classifiers=[
         "Programming Language :: Python :: 3",
-        "License :: OSI Approved :: BSD License",
+        "License :: OSI Approved :: Apache Software License",
         "Operating System :: Unix",
     ],
     ext_modules=ext_modules,
