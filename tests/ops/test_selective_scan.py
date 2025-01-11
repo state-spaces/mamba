@@ -1,29 +1,15 @@
 # Copyright (C) 2023, Tri Dao.
 
-from copy import deepcopy
-import pytest
+import math
+
 import torch
 import torch.nn.functional as F
-from einops import rearrange
-from typing import Optional
+import pytest
 
-from mamba_ssm.modules.ssd_minimal import (
-    ssd_minimal_discrete,
-    ssd_minimal_discrete_alt,
-    ssd_minimal_discrete_alt_naive,
-    ssd_minimal_no_chunking,
-)
-from mamba_ssm.ops.selective_scan_interface import (
-    mamba_inner_fn,
-    mamba_inner_ref,
-    selective_scan_fn,
-    selective_scan_ref,
-)
-from mamba_ssm.ops.triton.ssd_combined import (
-    mamba_chunk_scan_combined,
-    mamba_split_conv1d_scan_combined,
-)
-from mamba_ssm.modules.mamba2 import Mamba2
+from einops import rearrange
+
+from mamba_ssm.ops.selective_scan_interface import selective_scan_fn, selective_scan_ref
+from mamba_ssm.ops.selective_scan_interface import mamba_inner_fn, mamba_inner_ref
 
 
 # @pytest.mark.parametrize('wtype', [torch.float32, torch.complex64])
