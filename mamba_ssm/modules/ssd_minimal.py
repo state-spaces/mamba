@@ -36,8 +36,8 @@ def ssd_minimal_discrete(X, A, B, C, block_len, initial_states=None):
     Arguments:
         X: (batch, length, n_heads, d_head)
         A: (batch, length, n_heads)
-        B: (batch, length, n_groups, d_state)
-        C: (batch, length, n_groups, d_state)
+        B: (batch, length, n_heads, d_state)
+        C: (batch, length, n_heads, d_state)
     Return:
         Y: (batch, length, n_heads, d_head)
     """
@@ -52,12 +52,12 @@ def ssd_minimal_discrete(X, A, B, C, block_len, initial_states=None):
 
     # 1. Compute the output for each intra-chunk (diagonal blocks)
     L = torch.exp(segsum(A))
-    Y_diag = torch.einsum("bclgn,bcsgn,bhcls,bcshp->bclhp", C, B, L, X)
+    Y_diag  = torch.einsum("bclhn,bcshn,bhcls,bcshp->bclhp", C, B, L, X)
 
     # 2. Compute the state for each intra-chunk
     # (right term of low-rank factorization of off-diagonal blocks; B terms)
     decay_states = torch.exp((A_cumsum[:, :, :, -1:] - A_cumsum))
-    states = torch.einsum("bclgn,bhcl,bclhp->bcghpn", B, decay_states, X)
+    states = torch.einsum("bclhn,bhcl,bclhp->bchpn", B, decay_states, X)
 
     # 3. Compute the inter-chunk SSM recurrence; produces correct SSM states at chunk boundaries
     # (middle term of factorization of off-diag blocks; A terms)
@@ -65,13 +65,13 @@ def ssd_minimal_discrete(X, A, B, C, block_len, initial_states=None):
         initial_states = torch.zeros_like(states[:, :1])
     states = torch.cat([initial_states, states], dim=1)
     decay_chunk = torch.exp(segsum(F.pad(A_cumsum[:, :, :, -1], (1, 0))))
-    new_states = torch.einsum("bhzc,bcghpn->bzghpn", decay_chunk, states)
+    new_states = torch.einsum("bhzc,bchpn->bzhpn", decay_chunk, states)
     states, final_state = new_states[:, :-1], new_states[:, -1]
 
     # 4. Compute state -> output conversion per chunk
     # (left term of low-rank factorization of off-diagonal blocks; C terms)
     state_decay_out = torch.exp(A_cumsum)
-    Y_off = torch.einsum("bclgn,bcghpn,bhcl->bclhp", C, states, state_decay_out)
+    Y_off = torch.einsum('bclhn,bchpn,bhcl->bclhp', C, states, state_decay_out)
 
     # Add output of intra-chunk and inter-chunk terms (diagonal and off-diagonal blocks)
     Y = rearrange(Y_diag+Y_off, "b c l h p -> b (c l) h p")
