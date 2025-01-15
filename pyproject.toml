@@ -17,6 +17,7 @@ classifiers = [
 ]
 dependencies = [
     "torch",
+    "triton",
     "ninja",
     "einops",
     "transformers",
