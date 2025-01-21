@@ -1,4 +1,4 @@
-# Copyright (c) 2024, Tri Dao.
+# Copyright (c) 2025, Tri Dao.
 # The TensorParallel linear modules are inspired by https://github.com/NVIDIA/apex/blob/master/apex/transformer/tensor_parallel/layers.py
 from typing import Optional
 

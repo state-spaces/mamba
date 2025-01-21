@@ -184,10 +184,20 @@ if not SKIP_CUDA_BUILD:
         cc_flag.append("arch=compute_80,code=sm_80")
         cc_flag.append("-gencode")
         cc_flag.append("arch=compute_87,code=sm_87")
-
+        cc_flag.append("-gencode")
+        cc_flag.append("arch=compute_89,code=sm_89")
         if bare_metal_version >= Version("11.8"):
             cc_flag.append("-gencode")
             cc_flag.append("arch=compute_90,code=sm_90")
+            cc_flag.append("-gencode")
+            cc_flag.append("arch=compute_90a,code=sm_90a")
+        if bare_metal_version >= Version("12.7"):
+            cc_flag.append("-gencode")
+            cc_flag.append("arch=compute_100,code=sm_100")  # B100
+            cc_flag.append("-gencode")
+            cc_flag.append("arch=compute_101,code=sm_101")  # Thor
+            cc_flag.append("-gencode")
+            cc_flag.append("arch=compute_120,code=sm_100")  # RTX50
 
 
     # HACK: The compiler flag -D_GLIBCXX_USE_CXX11_ABI is set to be the same as

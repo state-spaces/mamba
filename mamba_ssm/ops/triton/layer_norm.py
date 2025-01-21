@@ -1,4 +1,4 @@
-# Copyright (c) 2024, Tri Dao.
+# Copyright (c) 2025, Tri Dao.
 # Implement dropout + residual + layer_norm / rms_norm.
 
 # Based on the Triton LayerNorm tutorial: https://triton-lang.org/main/getting-started/tutorials/05-layer-norm.html

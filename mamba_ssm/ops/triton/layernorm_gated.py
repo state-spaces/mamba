@@ -1,4 +1,4 @@
-# Copyright (c) 2024, Tri Dao.
+# Copyright (c) 2025, Tri Dao.
 # Based on the Triton LayerNorm tutorial: https://triton-lang.org/main/getting-started/tutorials/05-layer-norm.html
 # For the backward pass, we keep weight_grad and bias_grad in registers and accumulate.
 # This backward pass is faster for dimensions up to 8k, but after that it's much slower due to register spilling.

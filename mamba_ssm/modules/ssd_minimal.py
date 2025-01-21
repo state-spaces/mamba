@@ -1,4 +1,4 @@
-# Copyright (c) 2024, Albert Gu and Tri Dao.
+# Copyright (c) 2025, Albert Gu and Tri Dao.
 """Minimal implementation of SSD.
 
 This is the same as Listing 1 from the paper.
