@@ -197,7 +197,9 @@ if not SKIP_CUDA_BUILD:
             cc_flag.append("-gencode")
             cc_flag.append("arch=compute_101,code=sm_101")  # Thor
             cc_flag.append("-gencode")
-            cc_flag.append("arch=compute_120,code=sm_100")  # RTX50
+            cc_flag.append("arch=compute_120,code=sm_120")  # RTX50
+            cc_flag.append("-gencode")
+            cc_flag.append("arch=compute_120a,code=sm_120a") 
 
 
     # HACK: The compiler flag -D_GLIBCXX_USE_CXX11_ABI is set to be the same as
