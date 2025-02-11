@@ -207,6 +207,7 @@ if not SKIP_CUDA_BUILD:
                 "-U__CUDA_NO_HALF_OPERATORS__",
                 "-U__CUDA_NO_HALF_CONVERSIONS__",
                 "-fgpu-flush-denormals-to-zero",
+                "-DWIN32_LEAN_AND_MEAN",
             ]
             + cc_flag,
         }
