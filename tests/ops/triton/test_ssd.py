@@ -118,6 +118,7 @@ class TestMambaChunkScanCombined:
     max_splits = 4
 
     def _get_xdtABC(self, requires_grad: bool = False, batch_size: int = 1):
+        # Follow the init used in ssd_minimal.py::test_correctness
         x = torch.randn(
             batch_size,
             self.seqlen,
