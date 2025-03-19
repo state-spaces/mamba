@@ -67,13 +67,13 @@ def _chunk_scan_fwd_kernel(
     BLOCK_SIZE_DSTATE: tl.constexpr,
     IS_TRITON_22: tl.constexpr,
 ):
-    pid_bc = tl.program_id(axis=1)
+    pid_bc = tl.program_id(axis=1).to(tl.int64)
     pid_c = pid_bc // batch
     pid_b = pid_bc - pid_c * batch
-    pid_h = tl.program_id(axis=2)
+    pid_h = tl.program_id(axis=2).to(tl.int64)
     num_pid_n = tl.cdiv(hdim, BLOCK_SIZE_N)
-    pid_m = tl.program_id(axis=0) // num_pid_n
-    pid_n = tl.program_id(axis=0) % num_pid_n
+    pid_m = tl.program_id(axis=0).to(tl.int64) // num_pid_n
+    pid_n = tl.program_id(axis=0).to(tl.int64) % num_pid_n
     cb_ptr += pid_b * stride_cb_batch + pid_c * stride_cb_chunk + (pid_h // nheads_ngroups_ratio) * stride_cb_head
     x_ptr += pid_b * stride_x_batch + pid_c * chunk_size * stride_x_seqlen + pid_h * stride_x_head
     dt_ptr += pid_b * stride_dt_batch + pid_c * stride_dt_chunk + pid_h * stride_dt_head
