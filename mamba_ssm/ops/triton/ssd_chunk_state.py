@@ -141,7 +141,7 @@ def _chunk_cumsum_bwd_kernel(
         dt += dt_bias[:, None]
     if DT_SOFTPLUS:
         dt_presoftplus = dt
-        dt = tl.where(dt <= 20.0, softplus(dt), ddt)
+        dt = tl.where(dt <= 20.0, softplus(dt), dt)
     clamp_mask = (dt < dt_min) | (dt > dt_max)
     # As of Triton 2.2.0, tl.clamp is not available yet
     # dt = tl.clamp(dt, dt_min, dt_max)
