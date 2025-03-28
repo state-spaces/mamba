@@ -1,3 +1,6 @@
 [submodule "3rdparty/lm-evaluation-harness"]
 	path = 3rdparty/lm-evaluation-harness
 	url = https://github.com/EleutherAI/lm-evaluation-harness/
+[submodule "dtest"]
+	path = dtest
+	url = git@github.com:garrett361/dtest

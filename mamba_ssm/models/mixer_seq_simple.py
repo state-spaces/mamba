@@ -7,8 +7,10 @@ import os
 import copy
 
 from collections import namedtuple
+from typing import Optional
 
 import torch
+from torch.distributed.device_mesh import DeviceMesh
 import torch.nn as nn
 
 from mamba_ssm.models.config_mamba import MambaConfig
@@ -16,6 +18,7 @@ from mamba_ssm.modules.mamba_simple import Mamba
 from mamba_ssm.modules.mamba2 import Mamba2
 from mamba_ssm.modules.mha import MHA
 from mamba_ssm.modules.mlp import GatedMLP
+from mamba_ssm.modules.moe import MoE
 from mamba_ssm.modules.block import Block
 from mamba_ssm.utils.generation import GenerationMixin
 from mamba_ssm.utils.hf import load_config_hf, load_state_dict_hf
@@ -32,11 +35,14 @@ def create_block(
     ssm_cfg=None,
     attn_layer_idx=None,
     attn_cfg=None,
+    moe_layer_idx=None,
+    moe_cfg=None,
     norm_epsilon=1e-5,
     rms_norm=False,
     residual_in_fp32=False,
     fused_add_norm=False,
     layer_idx=None,
+    ep_mesh: Optional[DeviceMesh] = None,
     device=None,
     dtype=None,
 ):
@@ -44,20 +50,26 @@ def create_block(
         ssm_cfg = {}
     if attn_layer_idx is None:
         attn_layer_idx = []
+    if moe_layer_idx is None:
+        moe_layer_idx = []
     if attn_cfg is None:
         attn_cfg = {}
+    if moe_cfg is None:
+        moe_cfg = {}
     factory_kwargs = {"device": device, "dtype": dtype}
     if layer_idx not in attn_layer_idx:
         # Create a copy of the config to modify
         ssm_cfg = copy.deepcopy(ssm_cfg) if ssm_cfg is not None else {}
         ssm_layer = ssm_cfg.pop("layer", "Mamba1")
         if ssm_layer not in ["Mamba1", "Mamba2"]:
-            raise ValueError(f"Invalid ssm_layer: {ssm_layer}, only support Mamba1 and Mamba2")
+            raise ValueError(
+                f"Invalid ssm_layer: {ssm_layer}, only support Mamba1 and Mamba2"
+            )
         mixer_cls = partial(
             Mamba2 if ssm_layer == "Mamba2" else Mamba,
             layer_idx=layer_idx,
             **ssm_cfg,
-            **factory_kwargs
+            **factory_kwargs,
         )
     else:
         mixer_cls = partial(MHA, layer_idx=layer_idx, **attn_cfg, **factory_kwargs)
@@ -66,9 +78,20 @@ def create_block(
     )
     if d_intermediate == 0:
         mlp_cls = nn.Identity
+    elif layer_idx in moe_layer_idx:
+        mlp_cls = partial(
+            MoE,
+            hidden_features=d_intermediate,
+            ep_mesh=ep_mesh,
+            **moe_cfg,
+            **factory_kwargs,
+        )
     else:
         mlp_cls = partial(
-            GatedMLP, hidden_features=d_intermediate, out_features=d_model, **factory_kwargs
+            GatedMLP,
+            hidden_features=d_intermediate,
+            out_features=d_model,
+            **factory_kwargs,
         )
     block = Block(
         d_model,
@@ -90,6 +113,7 @@ def _init_weights(
     rescale_prenorm_residual=True,
     n_residuals_per_layer=1,  # Change to 2 if we have MLP
 ):
+    #TODO: @goon - MoE weights.
     if isinstance(module, nn.Linear):
         if module.bias is not None:
             if not getattr(module.bias, "_no_reinit", False):
@@ -125,11 +149,14 @@ class MixerModel(nn.Module):
         ssm_cfg=None,
         attn_layer_idx=None,
         attn_cfg=None,
+        moe_layer_idx=None,
+        moe_cfg=None,
         norm_epsilon: float = 1e-5,
         rms_norm: bool = False,
         initializer_cfg=None,
         fused_add_norm=False,
         residual_in_fp32=False,
+        ep_mesh: Optional[DeviceMesh] = None,
         device=None,
         dtype=None,
     ) -> None:
@@ -149,23 +176,26 @@ class MixerModel(nn.Module):
             if layer_norm_fn is None or rms_norm_fn is None:
                 raise ImportError("Failed to import Triton LayerNorm / RMSNorm kernels")
 
-        self.layers = nn.ModuleList(
-            [
-                create_block(
+        self.layers = nn.ModuleDict(
+            {
+                str(i): create_block(
                     d_model,
                     d_intermediate=d_intermediate,
                     ssm_cfg=ssm_cfg,
                     attn_layer_idx=attn_layer_idx,
                     attn_cfg=attn_cfg,
+                    moe_layer_idx=moe_layer_idx,
+                    moe_cfg=moe_cfg,
                     norm_epsilon=norm_epsilon,
                     rms_norm=rms_norm,
                     residual_in_fp32=residual_in_fp32,
                     fused_add_norm=fused_add_norm,
                     layer_idx=i,
+                    ep_mesh=ep_mesh,
                     **factory_kwargs,
                 )
                 for i in range(n_layer)
-            ]
+            }
         )
 
         self.norm_f = (nn.LayerNorm if not rms_norm else RMSNorm)(
@@ -184,13 +214,14 @@ class MixerModel(nn.Module):
     def allocate_inference_cache(self, batch_size, max_seqlen, dtype=None, **kwargs):
         return {
             i: layer.allocate_inference_cache(batch_size, max_seqlen, dtype=dtype, **kwargs)
-            for i, layer in enumerate(self.layers)
+            for i, layer in self.layers.items()
         }
 
     def forward(self, input_ids, inference_params=None, **mixer_kwargs):
         hidden_states = self.embedding(input_ids)
         residual = None
-        for layer in self.layers:
+        for layer_idx in sorted(self.layers):
+            layer = self.layers[layer_idx]
             hidden_states, residual = layer(
                 hidden_states, residual, inference_params=inference_params, **mixer_kwargs
             )
@@ -218,6 +249,7 @@ class MambaLMHeadModel(nn.Module, GenerationMixin):
         self,
         config: MambaConfig,
         initializer_cfg=None,
+        ep_mesh: Optional[DeviceMesh]=None,
         device=None,
         dtype=None,
     ) -> None:
@@ -229,6 +261,8 @@ class MambaLMHeadModel(nn.Module, GenerationMixin):
         ssm_cfg = config.ssm_cfg
         attn_layer_idx = config.attn_layer_idx
         attn_cfg = config.attn_cfg
+        moe_layer_idx = config.moe_layer_idx
+        moe_cfg = config.moe_cfg
         rms_norm = config.rms_norm
         residual_in_fp32 = config.residual_in_fp32
         fused_add_norm = config.fused_add_norm
@@ -246,10 +280,13 @@ class MambaLMHeadModel(nn.Module, GenerationMixin):
             ssm_cfg=ssm_cfg,
             attn_layer_idx=attn_layer_idx,
             attn_cfg=attn_cfg,
+            moe_layer_idx=moe_layer_idx,
+            moe_cfg=moe_cfg,
             rms_norm=rms_norm,
             initializer_cfg=initializer_cfg,
             fused_add_norm=fused_add_norm,
             residual_in_fp32=residual_in_fp32,
+            ep_mesh=ep_mesh,
             **factory_kwargs,
         )
         self.lm_head = nn.Linear(d_model, vocab_size, bias=False, **factory_kwargs)
