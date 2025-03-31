@@ -914,7 +914,10 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
             rearrange_and_update_stride(xBC, "b s d -> b d s"), conv1d_weight, conv1d_bias,
             rearrange(dxBC, "b s d -> b d s"), seq_idx, None, None, rearrange_and_update_stride(dxBC_given), False, ctx.activation in ["silu", "swish"]
         )
-        dxBC_given.copy_(dxBC_given_update)
+        if dxBC_given.stride() != dxBC_given_update.stride():
+            dxBC_given.copy_(dxBC_given_update)
+        else:
+            dxBC_given = dxBC_given_update
         dxBC_given = rearrange(dxBC_given, "b d s -> b s d")
         return dzxbcdt, dweight, dbias, ddt_bias, dA, dD, None, dinitial_states, None, None, None, None, drmsnorm_weight, None, doutproj_weight, doutproj_bias, None, None, None
 
