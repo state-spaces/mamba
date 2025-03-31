@@ -47,6 +47,13 @@ def init_to_zero(names):
     return lambda nargs: [nargs[name].zero_() for name in names if nargs[name] is not None]
 
 
+def rearrange_and_update_stride(tensor, pattern=None, dim=2):
+    # ensure tensor.stride(dim) is a multiple of eight after rearranging according to pattern,
+    # if not call contiguous(), rearrange only if pattern is not None
+    tensor_rearranged = rearrange(tensor, pattern) if pattern is not None else tensor
+    return tensor_rearranged.contiguous() if tensor_rearranged.stride(dim) % 8 != 0 else tensor_rearranged
+
+
 @triton.autotune(
     configs=[
         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64}, num_stages=3, num_warps=8, pre_hook=init_to_zero(["ddt_ptr"])),
@@ -779,7 +786,7 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
         zx0, z, xBC, dt = torch.split(zxbcdt, [2 * d_nonssm, dim, dim + ngroups * dstate * 2, nheads], dim=-1)
         seq_idx = seq_idx.contiguous() if seq_idx is not None else None
         xBC_conv = rearrange(
-            causal_conv1d_cuda.causal_conv1d_fwd(rearrange(xBC, "b s d -> b d s").contiguous(),
+            causal_conv1d_cuda.causal_conv1d_fwd(rearrange_and_update_stride(xBC, "b s d -> b d s"),
                                                  conv1d_weight, conv1d_bias, seq_idx, None, None, activation in ["silu", "swish"]),
             "b d s -> b s d"
         )
@@ -853,7 +860,7 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
         zx0, z, xBC, dt = torch.split(zxbcdt, [2 * d_nonssm, dim, dim + 2 * ctx.ngroups * dstate, nheads], dim=-1)
         # Recompute x, B, C
         xBC_conv = rearrange(
-            causal_conv1d_cuda.causal_conv1d_fwd(rearrange(xBC, "b s d -> b d s").contiguous(),
+            causal_conv1d_cuda.causal_conv1d_fwd(rearrange_and_update_stride(xBC, "b s d -> b d s"),
                                                  conv1d_weight, conv1d_bias, seq_idx, None, None, ctx.activation in ["silu", "swish"]),
             "b d s -> b s d"
         )
@@ -903,11 +910,11 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
         else:
             doutproj_weight, doutproj_bias = None, None
         dxBC_given = rearrange(dxBC_given, "b s d -> b d s")
-        dxBC_given_contiguous, dweight, dbias, *_ = causal_conv1d_cuda.causal_conv1d_bwd(
-            rearrange(xBC, "b s d -> b d s").contiguous(), conv1d_weight, conv1d_bias,
-            rearrange(dxBC, "b s d -> b d s").contiguous(), seq_idx, None, None, dxBC_given.contiguous(), False, ctx.activation in ["silu", "swish"]
+        dxBC_given_update, dweight, dbias, *_ = causal_conv1d_cuda.causal_conv1d_bwd(
+            rearrange_and_update_stride(xBC, "b s d -> b d s"), conv1d_weight, conv1d_bias,
+            rearrange(dxBC, "b s d -> b d s"), seq_idx, None, None, rearrange_and_update_stride(dxBC_given), False, ctx.activation in ["silu", "swish"]
         )
-        dxBC_given.copy_(dxBC_given_contiguous)
+        dxBC_given.copy_(dxBC_given_update)
         dxBC_given = rearrange(dxBC_given, "b d s -> b s d")
         return dzxbcdt, dweight, dbias, ddt_bias, dA, dD, None, dinitial_states, None, None, None, None, drmsnorm_weight, None, doutproj_weight, doutproj_bias, None, None, None
 
