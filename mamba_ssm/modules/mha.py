@@ -180,7 +180,8 @@ class MHA(nn.Module):
             ).transpose(1, 2)
         else:
             batch = q.shape[0]
-            kv_cache = inference_params.key_value_memory_dict[self.layer_idx][:batch]
+            kv_cache, _ = inference_params.key_value_memory_dict[self.layer_idx]
+            kv_cache = kv_cache[:batch]
             cache_seqlens = (
                 inference_params.lengths_per_sample[:batch]
                 if inference_params.lengths_per_sample is not None
