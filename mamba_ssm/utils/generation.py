@@ -132,6 +132,7 @@ def decode(
     vocab_size=None,
     cg=False,
     enable_timing=False,
+    output_scores=False,
     streamer: Optional[TextStreamer] = None
 ):
     """Decoding, either greedy or with top-k or top-p sampling.
@@ -218,13 +219,15 @@ def decode(
     scores, sequences = [], [input_ids]
     sequences_cat = input_ids
     while not should_stop(sequences[-1], inference_params):
-        scores.append(get_logits(sequences[-1], inference_params))
+        logits = get_logits(sequences[-1], inference_params)
+        if output_scores:
+            scores.append(logits.clone())
         inference_params.seqlen_offset += sequences[-1].shape[1]
         if repetition_penalty == 1.0:
-            sampled_tokens = sample_tokens(scores[-1], inference_params)
+            sampled_tokens = sample_tokens(logits, inference_params)
         else:
             logits = modify_logit_for_repetition_penalty(
-                scores[-1].clone(), sequences_cat, repetition_penalty
+                logits, sequences_cat, repetition_penalty
             )
             sampled_tokens = sample_tokens(logits, inference_params)
             sequences_cat = torch.cat([sequences_cat, sampled_tokens], dim=1)
@@ -258,7 +261,7 @@ class GenerationMixin:
         **kwargs,
     ):
         output = decode(
-            input_ids, self, max_length, top_k=top_k, top_p=top_p, min_p = min_p, temperature=temperature, **kwargs
+            input_ids, self, max_length, top_k=top_k, top_p=top_p, min_p = min_p, temperature=temperature, output_scores=output_scores, **kwargs
         )
         if not output_scores:
             output.scores = None

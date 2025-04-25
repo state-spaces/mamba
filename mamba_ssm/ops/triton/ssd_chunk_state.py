@@ -68,7 +68,7 @@ def _chunk_cumsum_fwd_kernel(
         dt_bias = tl.load(dt_bias_ptr + offs_h * stride_dt_bias_head, mask=offs_h < nheads, other=0.0).to(tl.float32)
         dt += dt_bias[:, None]
     if DT_SOFTPLUS:
-        dt = softplus(dt)
+        dt = tl.where(dt <= 20.0, softplus(dt), dt)
     # As of Triton 2.2.0, tl.clamp is not available yet
     # dt = tl.clamp(dt, dt_min, dt_max)
     dt = tl.minimum(tl.maximum(dt, dt_min), dt_max)
@@ -141,7 +141,7 @@ def _chunk_cumsum_bwd_kernel(
         dt += dt_bias[:, None]
     if DT_SOFTPLUS:
         dt_presoftplus = dt
-        dt = softplus(dt)
+        dt = tl.where(dt <= 20.0, softplus(dt), dt)
     clamp_mask = (dt < dt_min) | (dt > dt_max)
     # As of Triton 2.2.0, tl.clamp is not available yet
     # dt = tl.clamp(dt, dt_min, dt_max)
@@ -229,9 +229,11 @@ def _chunk_state_fwd_kernel(
             seq_idx_k = tl.load(seq_idx_ptrs, mask=offs_k < chunk_size_limit - k, other=-1)
         dt_k = tl.load(dt_ptrs, mask=offs_k < chunk_size_limit - k, other=0.0).to(tl.float32)
         if not HAS_SEQ_IDX:
-            scale = tl.exp((dA_cs_last - dA_cs_k)) * dt_k
+            # scale = tl.exp((dA_cs_last - dA_cs_k)) * dt_k
+            scale = tl.exp(tl.minimum((dA_cs_last - dA_cs_k), 0.0)) * dt_k
         else:
-            scale = tl.where(seq_idx_k == seq_idx_last, tl.exp((dA_cs_last - dA_cs_k)) * dt_k, 0.0)
+            # scale = tl.where(seq_idx_k == seq_idx_last, tl.exp((dA_cs_last - dA_cs_k)) * dt_k, 0.0)
+            scale = tl.where(seq_idx_k == seq_idx_last, tl.exp(tl.minimum((dA_cs_last - dA_cs_k), 0.0)) * dt_k, 0.0)
         b *= scale[:, None]
         b = b.to(x_ptr.dtype.element_ty)
         acc += tl.dot(x, b)
@@ -332,7 +334,8 @@ def _chunk_state_bwd_dx_kernel(
     dA_cumsum_ptrs = dA_cumsum_ptr + offs_m * stride_dA_cs_csize
     dA_cs_m = tl.load(dA_cumsum_ptrs, mask=offs_m < chunk_size, other=0.0).to(tl.float32)
     dt_m = tl.load(dt_ptrs, mask=offs_m < chunk_size, other=0.0).to(tl.float32)
-    acc *= tl.exp(dA_cs_last - dA_cs_m)[:, None]
+    # acc *= tl.exp(dA_cs_last - dA_cs_m)[:, None]
+    acc *= tl.exp(tl.minimum((dA_cs_last - dA_cs_m), 0.0))[:, None]
 
     x_ptrs = x_ptr + (offs_m[:, None] * stride_x_seqlen + offs_n[None, :] * stride_x_hdim)
     x = tl.load(x_ptrs, mask=(offs_m[:, None] < chunk_size_limit) & (offs_n[None, :] < hdim), other=0.0).to(tl.float32)
@@ -434,9 +437,11 @@ def _chunk_state_bwd_db_kernel(
         dA_cs_m = tl.load(dA_cumsum_ptrs, mask=offs_m < chunk_size, other=0.0).to(tl.float32)
         dt_m = tl.load(dt_ptrs, mask=offs_m < chunk_size, other=0.0).to(tl.float32)
         if not HAS_SEQ_IDX:
-            scale = tl.exp(dA_cs_last - dA_cs_m)
+            # scale = tl.exp(dA_cs_last - dA_cs_m)
+            scale = tl.exp(tl.minimum((dA_cs_last - dA_cs_m), 0.0))
         else:
-            scale = tl.where(seq_idx_m == seq_idx_last, tl.exp(dA_cs_last - dA_cs_m), 0.0)
+            # scale = tl.where(seq_idx_m == seq_idx_last, tl.exp(dA_cs_last - dA_cs_m), 0.0)
+            scale = tl.where(seq_idx_m == seq_idx_last, tl.minimum((dA_cs_last - dA_cs_m), 0.0), 0.0)
         db *= (scale * dt_m)[:, None]
         if HAS_DDA_CS:
             # This is the gradient wrt (dA_cs_last - dA_cs_m), i.e. the exclusive reverse cumsum
@@ -549,11 +554,13 @@ def _chunk_state_bwd_ddAcs_stable_kernel(
     dA_cs_m = tl.load(dA_cumsum_ptr + offs_m * stride_dA_cs_csize, mask=offs_m < chunk_size, other=0.0).to(tl.float32)
     dA_cs_last = tl.load(dA_cumsum_ptr + (chunk_size - 1) * stride_dA_cs_csize).to(tl.float32)
     if not HAS_SEQ_IDX:
-        scale = tl.exp(dA_cs_last - dA_cs_m)
+        # scale = tl.exp(dA_cs_last - dA_cs_m)
+        scale = tl.exp(tl.minimum((dA_cs_last - dA_cs_m), 0.0))
     else:
         seq_idx_m = tl.load(seq_idx_ptr + offs_m * stride_seq_idx_seqlen, mask=offs_m < chunk_size_limit, other=-1)
         seq_idx_last = tl.load(seq_idx_ptr + (chunk_size_limit - 1) * stride_seq_idx_seqlen)
-        scale = tl.where(seq_idx_m == seq_idx_last, tl.exp(dA_cs_last - dA_cs_m), 0.0)
+        # scale = tl.where(seq_idx_m == seq_idx_last, tl.exp(dA_cs_last - dA_cs_m), 0.0)
+        scale = tl.where(seq_idx_m == seq_idx_last, tl.exp(tl.minimum((dA_cs_last - dA_cs_m), 0.0)), 0.0)
     acc *= scale[:, None]
 
     x_ptrs = x_ptr + (offs_m[:, None] * stride_x_seqlen + offs_n[None, :] * stride_x_hdim)
@@ -634,8 +641,10 @@ def _chunk_state_varlen_kernel(
         b = tl.load(b_ptrs, mask=(offs_k[:, None] < chunk_size_limit - k) & (offs_n[None, :] < dstate) & (offs_k[:, None] >= start_idx_cur - k), other=0.0).to(tl.float32)
         dA_cs_k = tl.load(dA_cumsum_ptrs, mask=offs_k < chunk_size_limit - k, other=0.0).to(tl.float32)
         dt_k = tl.load(dt_ptrs, mask=offs_k < chunk_size_limit - k, other=0.0).to(tl.float32)
+        # scale = tl.where((offs_k >= start_idx_cur - k) & (offs_k < chunk_size_limit - k),
+        #                  tl.exp((dA_cs_last - dA_cs_k)) * dt_k, 0.0)
         scale = tl.where((offs_k >= start_idx_cur - k) & (offs_k < chunk_size_limit - k),
-                         tl.exp((dA_cs_last - dA_cs_k)) * dt_k, 0.0)
+                         tl.exp(tl.minimum((dA_cs_last - dA_cs_k), 0.0)) * dt_k, 0.0)
         b *= scale[:, None]
         b = b.to(x_ptr.dtype.element_ty)
         acc += tl.dot(x, b)

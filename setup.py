@@ -277,10 +277,10 @@ def get_wheel_url():
         # We're using the CUDA version used to build torch, not the one currently installed
         # _, cuda_version_raw = get_cuda_bare_metal_version(CUDA_HOME)
         torch_cuda_version = parse(torch.version.cuda)
-        # For CUDA 11, we only compile for CUDA 11.8, and for CUDA 12 we only compile for CUDA 12.2
+        # For CUDA 11, we only compile for CUDA 11.8, and for CUDA 12 we only compile for CUDA 12.3
         # to save CI time. Minor versions should be compatible.
-        torch_cuda_version = parse("11.8") if torch_cuda_version.major == 11 else parse("12.2")
-        cuda_version = f"{torch_cuda_version.major}{torch_cuda_version.minor}"
+        torch_cuda_version = parse("11.8") if torch_cuda_version.major == 11 else parse("12.3")
+        cuda_version = f"{torch_cuda_version.major}"
 
     gpu_compute_version = hip_ver if HIP_BUILD else cuda_version
     cuda_or_hip = "hip" if HIP_BUILD else "cu"
@@ -348,13 +348,31 @@ setup(
             "mamba_ssm.egg-info",
         )
     ),
+    author="Tri Dao, Albert Gu",
+    author_email="tri@tridao.me, agu@cs.cmu.edu",
+    description="Mamba state-space model",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    
+    url="https://github.com/state-spaces/mamba",
+    classifiers=[
+        "Programming Language :: Python :: 3",
+        "License :: OSI Approved :: Apache Software License",
+        "Operating System :: Unix",
+    ],
     ext_modules=ext_modules,
     cmdclass={"bdist_wheel": CachedWheelsCommand, "build_ext": BuildExtension}
     if ext_modules
     else {
         "bdist_wheel": CachedWheelsCommand,
-    }
+    },
+    python_requires=">=3.9",
+    install_requires=[
+        "torch",
+        "packaging",
+        "ninja",
+        "einops",
+        "triton",
+        "transformers",
+        # "causal_conv1d>=1.4.0",
+    ],
 )

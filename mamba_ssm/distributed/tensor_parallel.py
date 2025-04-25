@@ -6,8 +6,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
-from torch.cuda.amp import custom_bwd, custom_fwd
 from torch.distributed import ProcessGroup
+from mamba_ssm.utils.torch import custom_bwd, custom_fwd
 
 from einops import rearrange
 
