@@ -1,4 +1,4 @@
-# Copyright (c) 2024, Tri Dao, Albert Gu.
+# Copyright (c) 2025, Tri Dao, Albert Gu.
 from typing import Optional
 
 import torch
