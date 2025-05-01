@@ -198,9 +198,15 @@ if not SKIP_CUDA_BUILD and not IS_ROCM:
         if bare_metal_version >= Version("12.8") and "100" in cuda_archs():
             cc_flag.append("-gencode")
             cc_flag.append("arch=compute_100,code=sm_100")
+        if bare_metal_version >= Version("12.8") and "101" in cuda_archs():
+            cc_flag.append("-gencode")
+            cc_flag.append("arch=compute_101,code=sm_101")
         if bare_metal_version >= Version("12.8") and "120" in cuda_archs():
             cc_flag.append("-gencode")
             cc_flag.append("arch=compute_120,code=sm_120")
+        if bare_metal_version >= Version("13.0") and "110" in cuda_archs():
+            cc_flag.append("-gencode")
+            cc_flag.append("arch=compute_110,code=sm_110")
 
     # HACK: The compiler flag -D_GLIBCXX_USE_CXX11_ABI is set to be the same as
     # torch._C._GLIBCXX_USE_CXX11_ABI
