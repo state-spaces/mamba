@@ -142,6 +142,9 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
         : reinterpret_cast<scan_t *>(params.x_ptr) + (batch_id * params.dim + dim_id) * (params.n_chunks) * params.dstate;
     float dD_val = 0;
     float ddelta_bias_val = 0;
+    
+    const int cu_seqlens_size = params.cu_seqlens_size;
+    const long *cu_seqlens = reinterpret_cast<long *>(params.cu_seqlens_ptr);
 
     constexpr int kChunkSize = kNThreads * kNItems;
     u += (params.n_chunks - 1) * kChunkSize;
@@ -250,8 +253,26 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
             if constexpr (!kIsComplex) {
                 #pragma unroll
                 for (int i = 0; i < kNItems; ++i) {
-                    const float delta_a_exp = exp2f(delta_vals[i] * A_scaled);
+                    float delta_a_exp = exp2f(delta_vals[i] * A_scaled);
+
+                    // Reset A bar for cumulative sequences (Real)
+                    int left = 1;
+                    int right = cu_seqlens_size - 2;
+                    int idx = threadIdx.x * kNItems + i + chunk * kChunkSize;
+                    while (left <= right) {
+                        int mid = (left + right) >> 1;
+                        if (cu_seqlens[mid] == idx) {
+                            delta_a_exp = 0.f;
+                            break;
+                        } else if (cu_seqlens[mid] < idx) {
+                            left = mid + 1;
+                        } else {
+                            right = mid - 1;
+                        }
+                    }
+
                     thread_data[i] = make_float2(delta_a_exp, !kIsVariableB ? delta_vals[i] * float(u_vals[i]) : delta_vals[i] * float(u_vals[i]) * B_vals[i]);
+
                     if (i == 0) {
                         smem_delta_a[threadIdx.x == 0 ? state_idx + (chunk % 2) * MAX_DSTATE : threadIdx.x + 2 * MAX_DSTATE] = delta_a_exp;
                     } else {
@@ -338,6 +359,24 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
                 for (int i = 0; i < kNItems; ++i) {
                     // Pytorch's implementation of complex exp (which calls thrust) is very slow
                     complex_t delta_a_exp = cexp2f(delta_vals[i] * A_scaled);
+
+                    // Reset A bar for cumulative sequences (Complex)
+                    int left = 1;
+                    int right = cu_seqlens_size - 2;
+                    int idx = threadIdx.x * kNItems + i + chunk * kChunkSize;
+                    while (left <= right) {
+                        int mid = (left + right) >> 1;
+                        if (cu_seqlens[mid] == idx) {
+                            delta_a_exp.real_ = 0.f;
+                            delta_a_exp.imag_ = 0.f;
+                            break;
+                        } else if (cu_seqlens[mid] < idx) {
+                            left = mid + 1;
+                        } else {
+                            right = mid - 1;
+                        }
+                    }
+
                     weight_t B_delta_u_val = !kIsVariableB ? delta_vals[i] * float(u_vals[i]) : B_vals[i] * delta_vals[i] * float(u_vals[i]);
                     thread_data[i] = make_float4(delta_a_exp.real_, delta_a_exp.imag_, B_delta_u_val.real_, B_delta_u_val.imag_);
                     if (i == 0) {
