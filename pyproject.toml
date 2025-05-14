@@ -1,47 +1,55 @@
-[project]
-name = "mamba_ssm"
-description = "Mamba state-space model"
-readme = "README.md"
-authors = [
-    { name = "Tri Dao", email = "tri@tridao.me" },
-    { name = "Albert Gu", email = "agu@cs.cmu.edu" }
-]
-requires-python = ">= 3.9"
-dynamic = ["version"]
-license = { file = "LICENSE" }  # Include a LICENSE file in your repo
-keywords = ["cuda", "pytorch", "state-space model"]
-classifiers = [
-    "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: Apache Software License",
-    "Operating System :: Unix"
-]
-dependencies = [
-    "torch",
-    "triton",
-    "ninja",
-    "einops",
-    "transformers",
-    "packaging",
-    "setuptools>=61.0.0",
-]
-[project.urls]
-Repository = "https://github.com/state-spaces/mamba"
-
-[project.optional-dependencies]
-causal-conv1d = [
-    "causal-conv1d>=1.2.0"
-]
-dev = [
-    "pytest"
-]
-
-
 [build-system]
 requires = [
-    "setuptools>=61.0.0",
+    "setuptools>=61.0",
     "wheel",
-    "torch",
-    "packaging",
-    "ninja",
+    "torch>=2.4.0",
+    "packaging"
 ]
 build-backend = "setuptools.build_meta"
+
+[project]
+name = "mamba_ssm"
+dynamic = ["version"]
+description = "Efficient implementation of selective state space models (Mamba)"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "Albert Gu", email = "albertgu@stanford.edu"},
+    {name = "Tri Dao", email = "trid@cs.stanford.edu"}
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "torch>=2.4.0",
+    "numpy>=1.24.2",
+    "einops",
+    "packaging",
+    "transformers>=4.51.3",
+    "causal_conv1d",
+    "ninja",
+    "triton-windows; platform_system=='Windows'",
+    "triton; platform_system!='Windows'"
+]
+
+[project.urls]
+"Homepage" = "https://github.com/state-spaces/mamba"
+"Bug Tracker" = "https://github.com/state-spaces/mamba/issues"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.dynamic]
+version = {attr = "mamba_ssm.__version__"}
+
+[tool.setuptools.packages.find]
+include = ["mamba_ssm*"]
