@@ -368,12 +368,11 @@ setup(
     },
     python_requires=">=3.9",
     install_requires=[
-        "torch",
+        "torch>=2.4.0",
         "packaging",
         "ninja",
         "einops",
         "triton",
-        "transformers",
-        # "causal_conv1d>=1.4.0",
+        "transformers>=4.51.3"
     ],
 )
