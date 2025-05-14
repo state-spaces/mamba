@@ -372,7 +372,9 @@ setup(
         "packaging",
         "ninja",
         "einops",
-        "triton",
         "transformers>=4.51.3"
     ],
+    extras_require={'win32': ['triton-windows'],
+                    'linux': ['triton']
+                    }
 )
