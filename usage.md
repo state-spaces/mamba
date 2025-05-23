@@ -14,6 +14,8 @@ PR or email us. We'd very much like to hear from you!
 
 - [AI21 Jamba (398B)](https://www.ai21.com/blog/announcing-jamba-model-family/)
 
+- [TII Falcon-H1 (34B)](https://falconllm.tii.ae/falcon-h1.html)
+
 - [IBM Bamba (9B)](https://research.ibm.com/blog/bamba-ssm-transformer-model)
 
 - [Mistral's Codestral (7B)](https://mistral.ai/news/codestral-mamba)
