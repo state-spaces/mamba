@@ -116,12 +116,22 @@ class Mamba(nn.Module):
 
         self.out_proj = nn.Linear(self.d_inner, self.d_model, bias=bias, **factory_kwargs)
 
-    def forward(self, hidden_states, inference_params=None):
+    def forward(self, hidden_states, cu_seqlens=None, seq_idx=None, inference_params=None):
         """
         hidden_states: (B, L, D)
+        cu_seqlens: (Optional) cumulative sum of the sequence lengths, starting from 0 and end with L, and must already be sorted.
         Returns: same shape as hidden_states
         """
         batch, seqlen, dim = hidden_states.shape
+
+        if cu_seqlens is not None:
+            assert batch == 1 and cu_seqlens.ndimension() == 1, "varlen mamba1 is only supported with B=1"
+            # compute seq_idx if not provided
+            if seq_idx is None:
+                seq_idx = torch.cat([torch.full((s,), i, dtype=torch.int32, device=cu_seqlens.device) 
+                        for i, s in enumerate(cu_seqlens[1:]-cu_seqlens[:-1])], dim=0).unsqueeze(0)
+        else:
+            seq_idx = None
 
         conv_state, ssm_state = None, None
         if inference_params is not None:
@@ -157,6 +167,8 @@ class Mamba(nn.Module):
                 self.D.float(),
                 delta_bias=self.dt_proj.bias.float(),
                 delta_softplus=True,
+                cu_seqlens=cu_seqlens,
+                seq_idx=seq_idx,
             )
         else:
             x, z = xz.chunk(2, dim=1)
@@ -166,13 +178,23 @@ class Mamba(nn.Module):
                 # Instead F.pad will pad with zeros if seqlen < self.d_conv, and truncate otherwise.
                 conv_state.copy_(F.pad(x, (self.d_conv - x.shape[-1], 0)))  # Update state (B D W)
             if causal_conv1d_fn is None:
-                x = self.act(self.conv1d(x)[..., :seqlen])
+                if cu_seqlens is not None:
+                    # naive pure python implementation of varlen causal_conv1d
+                    for i, s in enumerate(cu_seqlens[1:-1]):
+                        x = torch.cat((x[..., :s + i*(self.d_conv - 1)], torch.zeros_like(x[..., :(self.d_conv - 1)]), x[..., s + i*(self.d_conv - 1):]), dim=2)
+                    mask = torch.cat([torch.cat((torch.full((s,), True, dtype=torch.bool, device=x.device), 
+                                                 torch.full((self.d_conv - 1,), False, dtype=torch.bool, device=x.device)), dim=0) 
+                                      for s in (cu_seqlens[1:] - cu_seqlens[:-1])], dim=0)
+                    x = self.act(self.conv1d(x)[:, :, mask])
+                else:
+                    x = self.act(self.conv1d(x)[..., :seqlen])
             else:
                 assert self.activation in ["silu", "swish"]
                 x = causal_conv1d_fn(
-                    x=x,
+                    x=x.transpose(1,2).contiguous().transpose(1,2) if cu_seqlens is not None else x,
                     weight=rearrange(self.conv1d.weight, "d 1 w -> d w"),
                     bias=self.conv1d.bias,
+                    seq_idx=seq_idx,
                     activation=self.activation,
                 )
 
@@ -197,6 +219,7 @@ class Mamba(nn.Module):
                 delta_bias=self.dt_proj.bias.float(),
                 delta_softplus=True,
                 return_last_state=ssm_state is not None,
+                cu_seqlens=cu_seqlens,
             )
             if ssm_state is not None:
                 y, last_state = y
