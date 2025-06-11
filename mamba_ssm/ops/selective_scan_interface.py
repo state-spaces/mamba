@@ -8,10 +8,12 @@ from einops import rearrange, repeat
 
 try:
     from causal_conv1d import causal_conv1d_fn
-    import causal_conv1d_cuda
+    from causal_conv1d.cpp_functions import causal_conv1d_fwd_function, causal_conv1d_bwd_function, causal_conv1d_update_function
 except ImportError:
     causal_conv1d_fn = None
-    causal_conv1d_cuda = None
+    causal_conv1d_fwd_function = None
+    causal_conv1d_bwd_function = None
+    causal_conv1d_update_function = None
 
 from mamba_ssm.ops.triton.layer_norm import _layer_norm_fwd
 
@@ -195,7 +197,7 @@ class MambaInnerFn(torch.autograd.Function):
         """
              xz: (batch, dim, seqlen)
         """
-        assert causal_conv1d_cuda is not None, "causal_conv1d_cuda is not available. Please install causal-conv1d."
+        assert causal_conv1d_fwd_function is not None, "causal_conv1d_cuda is not available. Please install causal-conv1d."
         assert checkpoint_lvl in [0, 1]
 
         L = xz.shape[-1]
@@ -212,7 +214,7 @@ class MambaInnerFn(torch.autograd.Function):
         conv1d_weight = rearrange(conv1d_weight, "d 1 w -> d w")
         x, z = xz.chunk(2, dim=1)
         conv1d_bias = conv1d_bias.contiguous() if conv1d_bias is not None else None 
-        conv1d_out = causal_conv1d_cuda.causal_conv1d_fwd(
+        conv1d_out = causal_conv1d_fwd_function(
             x.transpose(1,2).contiguous().transpose(1,2) if cu_seqlens is not None else x, 
             conv1d_weight, 
             conv1d_bias, 
@@ -304,7 +306,7 @@ class MambaInnerFn(torch.autograd.Function):
     @custom_bwd
     def backward(ctx, dout):
         # dout: (batch, seqlen, dim)
-        assert causal_conv1d_cuda is not None, "causal_conv1d_cuda is not available. Please install causal-conv1d."
+        assert causal_conv1d_fwd_function is not None, "causal_conv1d_cuda is not available. Please install causal-conv1d."
         (xz, conv1d_weight, conv1d_bias, x_dbl, x_proj_weight, delta_proj_weight, out_proj_weight,
          conv1d_out, delta, A, B, C, D, delta_bias, scan_intermediates, b_rms_weight, c_rms_weight, dt_rms_weight, out, cu_seqlens, seq_idx) = ctx.saved_tensors
         L = xz.shape[-1]
@@ -314,7 +316,7 @@ class MambaInnerFn(torch.autograd.Function):
         if dout.stride(-1) != 1:
             dout = dout.contiguous()
         if ctx.checkpoint_lvl == 1:
-            conv1d_out = causal_conv1d_cuda.causal_conv1d_fwd(
+            conv1d_out = causal_conv1d_fwd_function(
                 x.transpose(1,2).contiguous().transpose(1,2) if cu_seqlens is not None else x, 
                 conv1d_weight, 
                 conv1d_bias, 
@@ -389,7 +391,7 @@ class MambaInnerFn(torch.autograd.Function):
         dconv1d_out = rearrange(dconv1d_out, "d (b l) -> b d l", b=x.shape[0], l=x.shape[-1])
         # The kernel supports passing in a pre-allocated dx (e.g., in case we want to fuse the
         # backward of conv1d with the backward of chunk).
-        dx, dconv1d_weight, dconv1d_bias, *_ = causal_conv1d_cuda.causal_conv1d_bwd(
+        dx, dconv1d_weight, dconv1d_bias, *_ = causal_conv1d_bwd_function(
             x.transpose(1,2).contiguous().transpose(1,2) if cu_seqlens is not None else x, 
             conv1d_weight, 
             conv1d_bias, 
