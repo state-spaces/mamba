@@ -170,8 +170,8 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
         __syncthreads();
         load_input<Ktraits>(u, u_vals, smem_load, params.seqlen - chunk * kChunkSize);
         u -= kChunkSize;
-        __syncthreads();
         if constexpr (kIsVarLen) {
+            __syncthreads();
             load_pos_ids<Ktraits>(pos_ids, pos_ids_vals, smem_load_pos_ids, params.seqlen - chunk * kChunkSize);
             pos_ids -= kChunkSize;
         }

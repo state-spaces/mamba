@@ -161,8 +161,10 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
             load_input<Ktraits>(u + r * params.u_d_stride, u_vals[r], smem_load, params.seqlen - chunk * kChunkSize);
             if constexpr (!kDirectIO) { __syncthreads(); }
             load_input<Ktraits>(delta + r * params.delta_d_stride, delta_vals_load[r], smem_load, params.seqlen - chunk * kChunkSize);
-            if constexpr (!kDirectIOPos) { __syncthreads(); }
-            if constexpr (kIsVarLen) { load_pos_ids<Ktraits>(pos_ids + r * params.delta_d_stride, pos_ids_vals[r], smem_load_pos_ids, params.seqlen - chunk * kChunkSize); }
+            if constexpr (kIsVarLen) {
+                if constexpr (!kDirectIOPos) { __syncthreads(); }
+                load_pos_ids<Ktraits>(pos_ids + r * params.delta_d_stride, pos_ids_vals[r], smem_load_pos_ids, params.seqlen - chunk * kChunkSize); 
+            }
         }
         u += kChunkSize;
         delta += kChunkSize;
