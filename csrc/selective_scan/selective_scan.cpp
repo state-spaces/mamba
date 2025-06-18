@@ -80,8 +80,7 @@ void set_ssm_params_fwd(SSMParamsBase &params,
                         void* x_ptr,
                         bool has_z,
                         bool delta_softplus,
-                        void* cu_seqlens_ptr,
-                        const int cu_seqlens_size) {
+                        void* pos_ids_ptr) {
 
     // Reset the parameters
     memset(&params, 0, sizeof(params));
@@ -111,9 +110,7 @@ void set_ssm_params_fwd(SSMParamsBase &params,
     params.x_ptr = x_ptr;
     params.z_ptr = has_z ? z.data_ptr() : nullptr;
     params.out_z_ptr = has_z ? out_z.data_ptr() : nullptr;
-
-    params.cu_seqlens_ptr = cu_seqlens_ptr;
-    params.cu_seqlens_size = cu_seqlens_size;
+    params.pos_ids_ptr = pos_ids_ptr;
 
     // All stride are in elements, not bytes.
     params.A_d_stride = A.stride(0);
@@ -180,8 +177,7 @@ void set_ssm_params_bwd(SSMParamsBwd &params,
                         bool has_z,
                         bool delta_softplus,
                         bool recompute_out_z,
-                        void* cu_seqlens_ptr,
-                        const int cu_seqlens_size) {
+                        void* pos_ids_ptr) {
     // Pass in "dout" instead of "out", we're not gonna use "out" unless we have z
     set_ssm_params_fwd(params, batch, dim, seqlen, dstate, n_groups, n_chunks, is_variable_B, is_variable_C,
                        u, delta, A, B, C, has_z ? out : dout,
@@ -189,7 +185,7 @@ void set_ssm_params_bwd(SSMParamsBwd &params,
                        // If not recompute_out_z, pass dout instead of out_z.
                        // This won't be used by the bwd kernel
                        recompute_out_z ? out_z : dout,
-                       D_ptr, delta_bias_ptr, x_ptr, has_z, delta_softplus, cu_seqlens_ptr, cu_seqlens_size);
+                       D_ptr, delta_bias_ptr, x_ptr, has_z, delta_softplus, pos_ids_ptr);
     if (!recompute_out_z) { params.out_z_ptr = nullptr; }
 
     // Set the pointers and strides.
@@ -238,7 +234,7 @@ selective_scan_fwd(const at::Tensor &u, const at::Tensor &delta,
                   const c10::optional<at::Tensor> &z_,
                   const c10::optional<at::Tensor> &delta_bias_,
                   bool delta_softplus,
-                  const c10::optional<at::Tensor> &cu_seqlens_) {
+                  const c10::optional<at::Tensor> &pos_ids_) {
     auto input_type = u.scalar_type();
     auto weight_type = A.scalar_type();
     TORCH_CHECK(input_type == at::ScalarType::Float || input_type == at::ScalarType::Half || input_type == at::ScalarType::BFloat16);
@@ -302,6 +298,14 @@ selective_scan_fwd(const at::Tensor &u, const at::Tensor &delta,
         CHECK_SHAPE(delta_bias, dim);
     }
 
+    if (pos_ids_.has_value()) {
+        auto pos_ids = pos_ids_.value();
+        TORCH_CHECK(pos_ids.scalar_type() == at::ScalarType::Int);
+        TORCH_CHECK(pos_ids.is_cuda());
+        CHECK_SHAPE(pos_ids, batch_size, seqlen);
+        TORCH_CHECK(batch_size == 1)
+    }
+
     at::Tensor z, out_z;
     const bool has_z = z_.has_value();
     if (has_z) {
@@ -329,8 +333,7 @@ selective_scan_fwd(const at::Tensor &u, const at::Tensor &delta,
                        x.data_ptr(),
                        has_z,
                        delta_softplus,
-                       cu_seqlens_.has_value() ? cu_seqlens_.value().data_ptr() : nullptr,
-                       cu_seqlens_.has_value() ? cu_seqlens_.value().size(0) : 0);
+                       pos_ids_.has_value() ? pos_ids_.value().data_ptr() : nullptr);
 
     // Otherwise the kernel will be launched from cuda:0 device
     // Cast to char to avoid compiler warning about narrowing
@@ -358,7 +361,7 @@ selective_scan_bwd(const at::Tensor &u, const at::Tensor &delta,
                   c10::optional<at::Tensor> &dz_,
                   bool delta_softplus,
                   bool recompute_out_z,
-                  const c10::optional<at::Tensor> &cu_seqlens_) {
+                  const c10::optional<at::Tensor> &pos_ids_) {
     auto input_type = u.scalar_type();
     auto weight_type = A.scalar_type();
     TORCH_CHECK(input_type == at::ScalarType::Float || input_type == at::ScalarType::Half || input_type == at::ScalarType::BFloat16);
@@ -426,6 +429,14 @@ selective_scan_bwd(const at::Tensor &u, const at::Tensor &delta,
         CHECK_SHAPE(delta_bias, dim);
     }
 
+    if (pos_ids_.has_value()) {
+        auto pos_ids = pos_ids_.value();
+        TORCH_CHECK(pos_ids.scalar_type() == at::ScalarType::Int);
+        TORCH_CHECK(pos_ids.is_cuda());
+        CHECK_SHAPE(pos_ids, batch_size, seqlen);
+        TORCH_CHECK(batch_size == 1)
+    }
+
     at::Tensor z, out, dz, out_z;
     const bool has_z = z_.has_value();
     if (has_z) {
@@ -487,8 +498,7 @@ selective_scan_bwd(const at::Tensor &u, const at::Tensor &delta,
                        D_.has_value() ? dD.data_ptr() : nullptr,
                        delta_bias_.has_value() ? ddelta_bias.data_ptr() : nullptr,
                        has_z, delta_softplus, recompute_out_z,
-                       cu_seqlens_.has_value() ? cu_seqlens_.value().data_ptr() : nullptr,
-                       cu_seqlens_.has_value() ? cu_seqlens_.value().size(0) : 0);
+                       pos_ids_.has_value() ? pos_ids_.value().data_ptr() : nullptr);
 
     // Otherwise the kernel will be launched from cuda:0 device
     // Cast to char to avoid compiler warning about narrowing

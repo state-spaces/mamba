@@ -24,7 +24,7 @@ class SelectiveScanFn(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, u, delta, A, B, C, D=None, z=None, delta_bias=None, delta_softplus=False,
-                return_last_state=False, cu_seqlens=None):
+                return_last_state=False, cu_seqlens=None, position_ids = None):
         if u.stride(-1) != 1:
             u = u.contiguous()
         if delta.stride(-1) != 1:
@@ -43,26 +43,26 @@ class SelectiveScanFn(torch.autograd.Function):
         if C.dim() == 3:
             C = rearrange(C, "b dstate l -> b 1 dstate l")
             ctx.squeeze_C = True
-        out, x, *rest = selective_scan_cuda.fwd(u, delta, A, B, C, D, z, delta_bias, delta_softplus, cu_seqlens)
+        out, x, *rest = selective_scan_cuda.fwd(u, delta, A, B, C, D, z, delta_bias, delta_softplus, position_ids)
         ctx.delta_softplus = delta_softplus
         ctx.has_z = z is not None
         last_state = x[:, :, -1, 1::2]  # (batch, dim, dstate)
         if not ctx.has_z:
-            ctx.save_for_backward(u, delta, A, B, C, D, delta_bias, x, cu_seqlens)
+            ctx.save_for_backward(u, delta, A, B, C, D, delta_bias, x, cu_seqlens, position_ids)
             return out if not return_last_state else (out, last_state)
         else:
-            ctx.save_for_backward(u, delta, A, B, C, D, z, delta_bias, x, out, cu_seqlens)
+            ctx.save_for_backward(u, delta, A, B, C, D, z, delta_bias, x, out, cu_seqlens, position_ids)
             out_z = rest[0]
             return out_z if not return_last_state else (out_z, last_state)
 
     @staticmethod
     def backward(ctx, dout, *args):
         if not ctx.has_z:
-            u, delta, A, B, C, D, delta_bias, x, cu_seqlens = ctx.saved_tensors
+            u, delta, A, B, C, D, delta_bias, x, cu_seqlens, position_ids = ctx.saved_tensors
             z = None
             out = None
         else:
-            u, delta, A, B, C, D, z, delta_bias, x, out, cu_seqlens = ctx.saved_tensors
+            u, delta, A, B, C, D, z, delta_bias, x, out, cu_seqlens, position_ids = ctx.saved_tensors
         if dout.stride(-1) != 1:
             dout = dout.contiguous()
         # The kernel supports passing in a pre-allocated dz (e.g., in case we want to fuse the
@@ -71,7 +71,7 @@ class SelectiveScanFn(torch.autograd.Function):
         du, ddelta, dA, dB, dC, dD, ddelta_bias, *rest = selective_scan_cuda.bwd(
             u, delta, A, B, C, D, z, delta_bias, dout, x, out, None, ctx.delta_softplus,
             False,  # option to recompute out_z, not used here
-            cu_seqlens
+            position_ids
         )
         dz = rest[0] if ctx.has_z else None
         dB = dB.squeeze(1) if getattr(ctx, "squeeze_B", False) else dB
@@ -80,6 +80,7 @@ class SelectiveScanFn(torch.autograd.Function):
                 dD if D is not None else None,
                 dz,
                 ddelta_bias if delta_bias is not None else None,
+                None,
                 None,
                 None,
                 None)
@@ -106,16 +107,16 @@ def rms_norm_forward(
 
 
 def selective_scan_fn(u, delta, A, B, C, D=None, z=None, delta_bias=None, delta_softplus=False,
-                     return_last_state=False, cu_seqlens=None):
+                     return_last_state=False, cu_seqlens=None, position_ids=None):
     """if return_last_state is True, returns (out, last_state)
     last_state has shape (batch, dim, dstate). Note that the gradient of the last state is
     not considered in the backward pass.
     """
-    return SelectiveScanFn.apply(u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state, cu_seqlens)
+    return SelectiveScanFn.apply(u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state, cu_seqlens, position_ids)
 
 
 def selective_scan_ref(u, delta, A, B, C, D=None, z=None, delta_bias=None, delta_softplus=False,
-                      return_last_state=False, cu_seqlens=None):
+                      return_last_state=False, cu_seqlens=None, position_ids=None):
     """
     u: r(B D L)
     delta: r(B D L)
@@ -193,7 +194,7 @@ class MambaInnerFn(torch.autograd.Function):
     def forward(ctx, xz, conv1d_weight, conv1d_bias, x_proj_weight, delta_proj_weight,
                 out_proj_weight, out_proj_bias,
                 A, B=None, C=None, D=None, delta_bias=None, B_proj_bias=None,
-                C_proj_bias=None, delta_softplus=True, checkpoint_lvl=1, b_rms_weight=None, c_rms_weight= None, dt_rms_weight= None, b_c_dt_rms_eps=1e-6, cu_seqlens=None, seq_idx=None):
+                C_proj_bias=None, delta_softplus=True, checkpoint_lvl=1, b_rms_weight=None, c_rms_weight= None, dt_rms_weight= None, b_c_dt_rms_eps=1e-6, cu_seqlens=None, seq_idx=None, position_ids=None):
         """
              xz: (batch, dim, seqlen)
         """
@@ -286,7 +287,7 @@ class MambaInnerFn(torch.autograd.Function):
             z, 
             delta_bias, 
             delta_softplus, 
-            cu_seqlens
+            position_ids,
         )
         ctx.delta_softplus = delta_softplus
         ctx.out_proj_bias_is_None = out_proj_bias is None
@@ -299,7 +300,7 @@ class MambaInnerFn(torch.autograd.Function):
             conv1d_out, delta = None, None
         ctx.save_for_backward(xz, conv1d_weight, conv1d_bias, x_dbl, x_proj_weight,
                               delta_proj_weight, out_proj_weight, conv1d_out, delta,
-                              A, B, C, D, delta_bias, scan_intermediates, b_rms_weight, c_rms_weight, dt_rms_weight, out, cu_seqlens, seq_idx)
+                              A, B, C, D, delta_bias, scan_intermediates, b_rms_weight, c_rms_weight, dt_rms_weight, out, cu_seqlens, seq_idx, position_ids)
         return F.linear(rearrange(out_z, "b d l -> b l d"), out_proj_weight, out_proj_bias)
 
     @staticmethod
@@ -308,7 +309,7 @@ class MambaInnerFn(torch.autograd.Function):
         # dout: (batch, seqlen, dim)
         assert causal_conv1d_fwd_function is not None, "causal_conv1d_cuda is not available. Please install causal-conv1d."
         (xz, conv1d_weight, conv1d_bias, x_dbl, x_proj_weight, delta_proj_weight, out_proj_weight,
-         conv1d_out, delta, A, B, C, D, delta_bias, scan_intermediates, b_rms_weight, c_rms_weight, dt_rms_weight, out, cu_seqlens, seq_idx) = ctx.saved_tensors
+         conv1d_out, delta, A, B, C, D, delta_bias, scan_intermediates, b_rms_weight, c_rms_weight, dt_rms_weight, out, cu_seqlens, seq_idx, position_ids) = ctx.saved_tensors
         L = xz.shape[-1]
         delta_rank = delta_proj_weight.shape[1]
         d_state = A.shape[-1] * (1 if not A.is_complex() else 2)
@@ -358,7 +359,7 @@ class MambaInnerFn(torch.autograd.Function):
             conv1d_out, delta, A, B, C, D, z, delta_bias, dout_y, scan_intermediates, out, dz,
             ctx.delta_softplus,
             True,  # option to recompute out_z
-            cu_seqlens
+            position_ids
         )
         dout_proj_weight = torch.einsum("eB,dB->ed", dout, rearrange(out_z, "b d l -> d (b l)"))
         dout_proj_bias = dout.sum(dim=(0, 1)) if not ctx.out_proj_bias_is_None else None
@@ -410,25 +411,25 @@ class MambaInnerFn(torch.autograd.Function):
                 dA, dB, dC, dD,
                 ddelta_bias if delta_bias is not None else None,
                 # 6-None are delta_softplus, checkpoint_lvl, b_rms_weight, c_rms_weight, dt_rms_weight, b_c_dt_rms_eps
-                dB_proj_bias, dC_proj_bias, None, None, None, None, None, None, None, None)
+                dB_proj_bias, dC_proj_bias, None, None, None, None, None, None, None, None, None)
 
 
 def mamba_inner_fn(
     xz, conv1d_weight, conv1d_bias, x_proj_weight, delta_proj_weight,
     out_proj_weight, out_proj_bias,
     A, B=None, C=None, D=None, delta_bias=None, B_proj_bias=None,
-    C_proj_bias=None, delta_softplus=True, checkpoint_lvl=1, b_rms_weight= None, c_rms_weight= None, dt_rms_weight= None, b_c_dt_rms_eps=1e-6, cu_seqlens=None, seq_idx=None
+    C_proj_bias=None, delta_softplus=True, checkpoint_lvl=1, b_rms_weight= None, c_rms_weight= None, dt_rms_weight= None, b_c_dt_rms_eps=1e-6, cu_seqlens=None, seq_idx=None, position_ids=None
 ):
     return MambaInnerFn.apply(xz, conv1d_weight, conv1d_bias, x_proj_weight, delta_proj_weight,
                               out_proj_weight, out_proj_bias,
-                              A, B, C, D, delta_bias, B_proj_bias, C_proj_bias, delta_softplus, checkpoint_lvl, b_rms_weight, c_rms_weight, dt_rms_weight, b_c_dt_rms_eps, cu_seqlens, seq_idx)
+                              A, B, C, D, delta_bias, B_proj_bias, C_proj_bias, delta_softplus, checkpoint_lvl, b_rms_weight, c_rms_weight, dt_rms_weight, b_c_dt_rms_eps, cu_seqlens, seq_idx, position_ids)
 
 
 def mamba_inner_ref(
     xz, conv1d_weight, conv1d_bias, x_proj_weight, delta_proj_weight,
     out_proj_weight, out_proj_bias,
     A, B=None, C=None, D=None, delta_bias=None, B_proj_bias=None,
-    C_proj_bias=None, delta_softplus=True, cu_seqlens=None, seq_idx=None,
+    C_proj_bias=None, delta_softplus=True, cu_seqlens=None, seq_idx=None, position_ids=None
 ):
     assert causal_conv1d_fn is not None, "causal_conv1d_fn is not available. Please install causal-conv1d."
     L = xz.shape[-1]
@@ -466,5 +467,5 @@ def mamba_inner_ref(
             C = rearrange(C, "(b l) dstate -> b dstate l", l=L).contiguous()
         else:
             C = rearrange(C, "(b l) (dstate two) -> b dstate (l two)", l=L, two=2).contiguous()
-    y = selective_scan_fn(x, delta, A, B, C, D, z=z, delta_bias=delta_bias, delta_softplus=True, cu_seqlens=cu_seqlens)
+    y = selective_scan_fn(x, delta, A, B, C, D, z=z, delta_bias=delta_bias, delta_softplus=True, position_ids=position_ids)
     return F.linear(rearrange(y, "b d l -> b l d"), out_proj_weight, out_proj_bias)

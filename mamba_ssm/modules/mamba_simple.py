@@ -116,7 +116,7 @@ class Mamba(nn.Module):
 
         self.out_proj = nn.Linear(self.d_inner, self.d_model, bias=bias, **factory_kwargs)
 
-    def forward(self, hidden_states, cu_seqlens=None, seq_idx=None, inference_params=None):
+    def forward(self, hidden_states, cu_seqlens=None, seq_idx=None, position_ids=None, inference_params=None):
         """
         hidden_states: (B, L, D)
         cu_seqlens: (Optional) cumulative sum of the sequence lengths, starting from 0 and end with L, and must already be sorted.
@@ -125,13 +125,20 @@ class Mamba(nn.Module):
         batch, seqlen, dim = hidden_states.shape
 
         if cu_seqlens is not None:
+            # Sanity Check
             assert batch == 1 and cu_seqlens.ndimension() == 1, "varlen mamba1 is only supported with B=1"
-            # compute seq_idx if not provided
+            # Warning: 
+            # 1) For testing, seq_idx and position_ids can be computed on-the-fly but would harm performance
+            # 2) For production, please betther prepare them in dataloader
             if seq_idx is None:
                 seq_idx = torch.cat([torch.full((s,), i, dtype=torch.int32, device=cu_seqlens.device) 
                         for i, s in enumerate(cu_seqlens[1:]-cu_seqlens[:-1])], dim=0).unsqueeze(0)
+            if position_ids is None:
+                position_ids = (torch.arange((cu_seqlens[1:] - cu_seqlens[:-1]).sum(), device=cu_seqlens.device) 
+                                - torch.repeat_interleave(cu_seqlens[:-1], (cu_seqlens[1:] - cu_seqlens[:-1]))).to(torch.int32).unsqueeze(0)
         else:
             seq_idx = None
+            position_ids = None
 
         conv_state, ssm_state = None, None
         if inference_params is not None:
@@ -169,6 +176,7 @@ class Mamba(nn.Module):
                 delta_softplus=True,
                 cu_seqlens=cu_seqlens,
                 seq_idx=seq_idx,
+                position_ids=position_ids,
             )
         else:
             x, z = xz.chunk(2, dim=1)
