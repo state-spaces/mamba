@@ -284,11 +284,21 @@ class MambaLMHeadModel(nn.Module, GenerationMixin):
         return CausalLMOutput(logits=lm_logits)
 
     @classmethod
-    def from_pretrained(cls, pretrained_model_name, device=None, dtype=None, **kwargs):
-        config_data = load_config_hf(pretrained_model_name)
-        config = MambaConfig(**config_data)
-        model = cls(config, device=device, dtype=dtype, **kwargs)
-        model.load_state_dict(load_state_dict_hf(pretrained_model_name, device=device, dtype=dtype))
+    def from_pretrained(cls, pretrained_model_name, device=None, dtype=None, on_hf=True, **kwargs):
+        if on_hf:
+            config_data = load_config_hf(pretrained_model_name)
+            config = MambaConfig(**config_data)
+            model = cls(config, device=device, dtype=dtype, **kwargs)
+            model.load_state_dict(load_state_dict_hf(pretrained_model_name, device=device, dtype=dtype))
+        else:
+            # otherwise, load the state dict from the pretrained model file
+            model_path = os.path.join(pretrained_model_name, 'pytorch_model.bin')
+            config_path = os.path.join(pretrained_model_name, 'config.json')
+            with open(config_path, 'r') as f:
+                config_data = json.load(f)
+            config = MambaConfig(**config_data)
+            model = cls(config, device=device, dtype=dtype, **kwargs)
+            model.load_state_dict(torch.load(model_path, map_location=device))
         return model
 
     def save_pretrained(self, save_directory):
