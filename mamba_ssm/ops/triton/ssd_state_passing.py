@@ -3,14 +3,13 @@
 """We want triton==2.1.0 or 2.2.0 for this
 """
 
-import math
 import torch
 import torch.nn.functional as F
 
 import triton
 import triton.language as tl
 
-from einops import rearrange, repeat
+from einops import rearrange
 
 
 @triton.autotune(

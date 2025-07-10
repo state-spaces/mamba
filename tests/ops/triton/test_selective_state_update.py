@@ -1,12 +1,10 @@
 # Copyright (C) 2023, Tri Dao.
 
-import math
 
 import torch
-import torch.nn.functional as F
 import pytest
 
-from einops import rearrange, repeat
+from einops import repeat
 
 from mamba_ssm.ops.triton.selective_state_update import selective_state_update, selective_state_update_ref
 

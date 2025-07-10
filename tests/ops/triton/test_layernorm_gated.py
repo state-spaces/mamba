@@ -1,11 +1,10 @@
-import math
 
 import torch
 import torch.nn.functional as F
 
 import pytest
 
-from einops import rearrange, repeat
+from einops import rearrange
 
 from mamba_ssm.ops.triton.layernorm_gated import layernorm_fn, rms_norm_ref
 

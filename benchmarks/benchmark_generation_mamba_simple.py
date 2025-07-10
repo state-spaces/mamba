@@ -2,12 +2,9 @@
 
 import argparse
 import time
-import json
 
 import torch
-import torch.nn.functional as F
 
-from einops import rearrange
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
 

@@ -1,5 +1,4 @@
 import torch
-from functools import partial
 from typing import Callable
 
 def custom_amp_decorator(dec: Callable, cuda_amp_deprecated: bool):

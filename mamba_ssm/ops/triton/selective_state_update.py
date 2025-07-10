@@ -3,7 +3,6 @@
 """We want triton==2.1.0 or triton==2.2.0 or triton==2.3.0 for this
 """
 
-import math
 import torch
 import torch.nn.functional as F
 
