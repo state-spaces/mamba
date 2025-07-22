@@ -10,8 +10,17 @@ from einops import rearrange
 
 from mamba_ssm.ops.selective_scan_interface import selective_scan_fn, selective_scan_ref
 from mamba_ssm.ops.selective_scan_interface import mamba_inner_fn, mamba_inner_ref
+from mamba_ssm.ops.selective_scan_interface_compilable import selective_scan_fn_custom_op
 
-
+@pytest.mark.parametrize(
+    "op_impl",
+    [
+        selective_scan_fn,
+        selective_scan_fn_custom_op,
+        torch.compile(selective_scan_fn_custom_op),
+    ],
+    ids=["original", "custom", "compiled"],
+)
 # @pytest.mark.parametrize('wtype', [torch.float32, torch.complex64])
 @pytest.mark.parametrize('wtype', [torch.float32])
 # @pytest.mark.parametrize('itype', [torch.float32, torch.float16, torch.bfloat16])
@@ -35,7 +44,7 @@ from mamba_ssm.ops.selective_scan_interface import mamba_inner_fn, mamba_inner_r
 @pytest.mark.parametrize("is_variable_C", [True])
 # @pytest.mark.parametrize("is_variable_B", [False, True])
 @pytest.mark.parametrize("is_variable_B", [True])
-def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D, has_z, has_delta_bias,
+def test_selective_scan(op_impl, is_variable_B, is_variable_C, varBC_groups, has_D, has_z, has_delta_bias,
                         delta_softplus, return_last_state, seqlen, itype, wtype):
     if varBC_groups > 1 and (not is_variable_B or not is_variable_C):
         pytest.skip()  # This config is not applicable
@@ -92,7 +101,7 @@ def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D, has_z
     u_ref = u.detach().clone().requires_grad_()
     delta_ref = delta.detach().clone().requires_grad_()
     delta_bias_ref = delta_bias.detach().clone().requires_grad_() if delta_bias is not None else None
-    out, *rest = selective_scan_fn(
+    out, *rest = op_impl(
         u, delta, A, B, C, D, z=z,
         delta_bias=delta_bias, delta_softplus=delta_softplus,
         return_last_state=return_last_state
@@ -245,3 +254,34 @@ def test_mamba_inner_fn(is_variable_B, is_variable_C, seqlen, itype, wtype):
     #                       atol=atolw if not is_variable_C else atol)
     # assert torch.allclose(D.grad, D_ref.grad, rtol=rtolw, atol=atolw)
     # assert torch.allclose(delta_bias.grad, delta_bias_ref.grad, rtol=rtolw, atol=atolw)
+
+def test_selective_scan_opcheck():
+    from torch.library import opcheck
+
+    device = "cuda"
+    # small inputs for opcheck
+    u = torch.randn(1, 2, 8, device=device, requires_grad=True)
+    delta = torch.randn(1, 2, 8, device=device, requires_grad=True)
+    A = torch.randn(2, 8, device=device, requires_grad=True)
+    B = torch.randn(1, 1, 8, 8, device=device, requires_grad=True)
+    C = torch.randn(1, 1, 8, 8, device=device, requires_grad=True)
+    D = torch.randn(2, device=device, requires_grad=True)
+    z = torch.randn(1, 2, 8, device=device, requires_grad=True)
+    delta_bias = torch.randn(2, device=device, requires_grad=True)
+    delta_softplus = False
+    return_last_state = False
+
+    # Run opcheck
+    result = opcheck(
+        torch.ops.custom_ops.selective_scan_fwd,
+        (u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state),
+        test_utils=(
+            "test_schema",
+            "test_faketensor",
+            "test_aot_dispatch_static",
+            "test_aot_dispatch_dynamic",
+            "test_autograd_registration",
+        ),
+        raise_exception=True,
+    )
+    print("Opcheck result:", result)
