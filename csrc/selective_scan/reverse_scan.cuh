@@ -96,12 +96,10 @@ struct WarpReverseScan {
 
     /// Whether the logical warp size and the PTX warp size coincide
 
-    // In hipcub, warp_threads is defined as HIPCUB_DEVICE_WARP_THREADS ::rocprim::device_warp_size()
-    // While in cub, it's defined as a macro that takes a redundant unused argument.
     #ifndef USE_ROCM
         #define WARP_THREADS CUB_WARP_THREADS(0)
     #else
-        #define WARP_THREADS HIPCUB_DEVICE_WARP_THREADS
+        #define WARP_THREADS rocprim::arch::wavefront::max_size()
     #endif
     static constexpr bool IS_ARCH_WARP = (LOGICAL_WARP_THREADS == WARP_THREADS);
     /// The number of warp scan steps
