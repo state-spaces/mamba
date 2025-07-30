@@ -102,7 +102,7 @@ struct WarpReverseScan {
         #if ROCM_MAJOR_VERSION >= 7
             #define WARP_THREADS rocprim::arch::wavefront::max_size()
         #else
-            #define WARP_THREADS HIPCUB_WARP_THREAD
+            #define WARP_THREADS HIPCUB_WARP_THREADS
         #endif
     #endif
     static constexpr bool IS_ARCH_WARP = (LOGICAL_WARP_THREADS == WARP_THREADS);
