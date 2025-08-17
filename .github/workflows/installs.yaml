@@ -1,8 +1,31 @@
-name: pip install test - multiple versions
+name: "Test pip install - multiple versions"
 on:
   workflow_dispatch:
+    inputs:
+      python:
+        description: "Python version to use"
+        required: false
+        type: string
+        default: "3.11.13"
+permissions:
+  id-token: write
+  contents: read
 jobs:
-  placeholder:
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo "Placeholder workflow"
+  installs:
+    name: Test mamba_ssm==${{ matrix.mamba_version }}
+    strategy:
+      matrix:
+        include:
+          # All versions support PyTorch 2.4, use AMI's PyTorch 2.4.1
+          - { "mamba_version": "2.2.0" }
+          - { "mamba_version": "2.2.1" }
+          - { "mamba_version": "2.2.2" }
+          - { "mamba_version": "2.2.3post2" }
+          - { "mamba_version": "2.2.4" }
+          - { "mamba_version": "2.2.5" }
+      fail-fast: false
+    uses: ./.github/workflows/install.yaml
+    secrets: inherit
+    with:
+      mamba_version: ${{ matrix.mamba_version }}
+      python: ${{ inputs.python }}
