@@ -1,0 +1,54 @@
+name: "Test pip install"
+on:
+  workflow_dispatch:
+    inputs:
+      mamba_version:
+        description: "Mamba version to test"
+        required: true
+        type: string
+        default: "2.2.5"
+      python:
+        description: "Python version to use"
+        required: false
+        type: string
+        default: "3.11.13"
+  workflow_call:
+    inputs:
+      mamba_version:
+        description: "Mamba version to test"
+        required: true
+        type: string
+      python:
+        description: "Python version to use"
+        required: false
+        type: string
+        default: "3.11.13"
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  ec2:
+    uses: Open-Athena/ec2-gha/.github/workflows/runner.yml@v2
+    secrets: inherit
+    with:
+      ec2_instance_type: g4dn.xlarge
+      ec2_image_id: ami-0aee7b90d684e107d  # Deep Learning OSS Nvidia Driver AMI GPU PyTorch 2.4.1 (Ubuntu 22.04) 20250623
+      instance_name: "$repo/$name==${{ inputs.mamba_version }} (#$run_number)"
+  install:
+    name: Test mamba_ssm==${{ inputs.mamba_version }}
+    needs: ec2
+    runs-on: ${{ needs.ec2.outputs.id }}
+    steps:
+      - name: Setup Python environment
+        run: |
+          # Set up environment for GitHub Actions to use conda env
+          echo "/opt/conda/envs/pytorch/bin" >> $GITHUB_PATH
+          echo "CONDA_DEFAULT_ENV=pytorch" >> $GITHUB_ENV
+      - name: Install and test mamba_ssm==${{ inputs.mamba_version }}
+        run: |
+          # Install mamba_ssm without build isolation to use existing torch from conda env
+          # No need to reinstall torch since it's already in the conda environment
+          pip install -v --no-build-isolation mamba_ssm==${{ inputs.mamba_version }}
+      - name: Verify mamba_ssm installation
+        run: |
+          python -c 'import mamba_ssm; print(f"mamba_ssm {mamba_ssm.__version__} installed successfully")'

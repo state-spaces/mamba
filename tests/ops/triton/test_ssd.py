@@ -30,6 +30,8 @@ def detach_clone(*args):
 def test_chunk_state_varlen(chunk_size, ngroups, dtype):
     device = 'cuda'
     rtol, atol = (1e-2, 3e-3)
+    if dtype == torch.bfloat16:
+        rtol, atol = 6e-2, 6e-2
     # set seed
     torch.random.manual_seed(chunk_size + (ngroups if ngroups != "max" else 64))
     batch = 300

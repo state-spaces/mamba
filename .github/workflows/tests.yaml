@@ -1,0 +1,26 @@
+name: GPU tests on multiple instance types
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  test-g5:
+    name: Test on g5.2xlarge (A10G)
+    uses: ./.github/workflows/test.yaml
+    with:
+      instance_type: g5.2xlarge
+    secrets: inherit
+
+  test-g6:
+    name: Test on g6.2xlarge (L4)
+    uses: ./.github/workflows/test.yaml
+    with:
+      instance_type: g6.2xlarge
+    secrets: inherit

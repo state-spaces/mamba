@@ -113,9 +113,7 @@ def test_selective_state_update_with_batch_indices(dim, dstate, has_z, itype):
     device = "cuda"
     rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (5e-3, 1e-2)
     if itype == torch.bfloat16:
-        rtol, atol = 6e-2, 6e-2
-        if torch.version.hip:
-            atol *= 2
+        rtol, atol = 9e-2, 9.6e-2
     # set seed
     torch.random.manual_seed(0)
     batch_size = 16

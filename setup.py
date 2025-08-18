@@ -172,25 +172,39 @@ if not SKIP_CUDA_BUILD:
                     "Note: make sure nvcc has a supported version by running nvcc -V."
                 )
 
-        cc_flag.append("-gencode")
-        cc_flag.append("arch=compute_53,code=sm_53")
-        cc_flag.append("-gencode")
-        cc_flag.append("arch=compute_62,code=sm_62")
-        cc_flag.append("-gencode")
-        cc_flag.append("arch=compute_70,code=sm_70")
-        cc_flag.append("-gencode")
-        cc_flag.append("arch=compute_72,code=sm_72")
-        cc_flag.append("-gencode")
-        cc_flag.append("arch=compute_80,code=sm_80")
-        cc_flag.append("-gencode")
-        cc_flag.append("arch=compute_87,code=sm_87")
+        # Check for TORCH_CUDA_ARCH_LIST environment variable (for CI/testing)
+        # Format: "7.5" or "7.5;8.6" or "7.5 8.6"
+        cuda_arch_list = os.getenv("TORCH_CUDA_ARCH_LIST", "").replace(";", " ").split()
 
-        if bare_metal_version >= Version("11.8"):
+        if cuda_arch_list:
+            # Use only the specified architectures
+            print(f"Building for specific CUDA architectures: {cuda_arch_list}")
+            for arch in cuda_arch_list:
+                arch_num = arch.replace(".", "")
+                cc_flag.append("-gencode")
+                cc_flag.append(f"arch=compute_{arch_num},code=sm_{arch_num}")
+        else:
+            # Default: build for all supported architectures
+            print("Building for all supported CUDA architectures (set TORCH_CUDA_ARCH_LIST to override)")
             cc_flag.append("-gencode")
-            cc_flag.append("arch=compute_90,code=sm_90")
-        if bare_metal_version >= Version("12.8"):
+            cc_flag.append("arch=compute_53,code=sm_53")
             cc_flag.append("-gencode")
-            cc_flag.append("arch=compute_100,code=sm_100")
+            cc_flag.append("arch=compute_62,code=sm_62")
+            cc_flag.append("-gencode")
+            cc_flag.append("arch=compute_70,code=sm_70")
+            cc_flag.append("-gencode")
+            cc_flag.append("arch=compute_72,code=sm_72")
+            cc_flag.append("-gencode")
+            cc_flag.append("arch=compute_80,code=sm_80")
+            cc_flag.append("-gencode")
+            cc_flag.append("arch=compute_87,code=sm_87")
+
+            if bare_metal_version >= Version("11.8"):
+                cc_flag.append("-gencode")
+                cc_flag.append("arch=compute_90,code=sm_90")
+            if bare_metal_version >= Version("12.8"):
+                cc_flag.append("-gencode")
+                cc_flag.append("arch=compute_100,code=sm_100")
 
 
     # HACK: The compiler flag -D_GLIBCXX_USE_CXX11_ABI is set to be the same as
