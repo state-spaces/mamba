@@ -1,0 +1,73 @@
+name: GPU tests
+on:
+  workflow_dispatch:
+    inputs:
+      instance_type:
+        description: 'EC2 instance type'
+        required: false
+        type: choice
+        default: 'g6.2xlarge'
+        options:
+          - g5.xlarge    #  4 vCPUs, 16GB RAM, A10G GPU, ≈$1.11/hr
+          - g5.2xlarge   #  8 vCPUs, 32GB RAM, A10G GPU, ≈$1.33/hr
+          - g5.4xlarge   # 16 vCPUs, 64GB RAM, A10G GPU, ≈$1.79/hr
+          - g6.xlarge    #  4 vCPUs, 16GB RAM,   L4 GPU, ≈$0.89/hr
+          - g6.2xlarge   #  8 vCPUs, 32GB RAM,   L4 GPU, ≈$1.08/hr
+          - g6.4xlarge   # 16 vCPUs, 64GB RAM,   L4 GPU, ≈$1.46/hr
+  workflow_call:
+    inputs:
+      instance_type:
+        description: 'EC2 instance type'
+        required: true
+        type: string
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  ec2:
+    name: Start EC2 runner
+    uses: Open-Athena/ec2-gha/.github/workflows/runner.yml@v2
+    with:
+      ec2_instance_type: ${{ inputs.instance_type || 'g6.2xlarge' }}
+      ec2_image_id: ami-0aee7b90d684e107d # Deep Learning OSS Nvidia Driver AMI GPU PyTorch 2.4.1 (Ubuntu 22.04) 20250623
+    secrets:
+      GH_SA_TOKEN: ${{ secrets.GH_SA_TOKEN }}
+  test:
+    name: GPU tests
+    needs: ec2
+    runs-on: ${{ needs.ec2.outputs.id }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Python environment
+        run: |
+          # Use the DLAMI's pre-installed PyTorch conda environment
+          echo "/opt/conda/envs/pytorch/bin" >> $GITHUB_PATH
+          echo "CONDA_DEFAULT_ENV=pytorch" >> $GITHUB_ENV
+      - name: Check GPU
+        run: nvidia-smi
+      - name: Install mamba-ssm and test dependencies
+        run: |
+          # Use all available CPUs for compilation (we're only building for 1 GPU arch)
+          export MAX_JOBS=$(nproc)
+
+          INSTANCE_TYPE="${{ inputs.instance_type || 'g6.2xlarge' }}"
+
+          # Set CUDA architecture based on GPU type
+          # TORCH_CUDA_ARCH_LIST tells PyTorch which specific architecture to compile for
+          if [[ "$INSTANCE_TYPE" == g5.* ]]; then
+            export TORCH_CUDA_ARCH_LIST="8.6"  # A10G GPU
+            export CUDA_VISIBLE_DEVICES=0
+            export NVCC_GENCODE="-gencode arch=compute_86,code=sm_86"
+          elif [[ "$INSTANCE_TYPE" == g6.* ]]; then
+            export TORCH_CUDA_ARCH_LIST="8.9"  # L4 GPU (Ada Lovelace)
+            export CUDA_VISIBLE_DEVICES=0
+            export NVCC_GENCODE="-gencode arch=compute_89,code=sm_89"
+          fi
+
+          echo "Building with MAX_JOBS=$MAX_JOBS for $INSTANCE_TYPE"
+
+          # Install mamba-ssm with causal-conv1d and dev dependencies
+          # Note: causal-conv1d will download pre-built wheels when available
+          pip install -v --no-build-isolation -e .[causal-conv1d,dev]
+      - name: Run tests
+        run: pytest -vs --maxfail=10 tests/
