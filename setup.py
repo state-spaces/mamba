@@ -195,7 +195,13 @@ if not SKIP_CUDA_BUILD:
             cc_flag.append("arch=compute_100,code=sm_100")
             cc_flag.append("-gencode")
             cc_flag.append("arch=compute_120,code=sm_120")
-
+        if bare_metal_version >= Version("13.0"):
+            cc_flag.append("-gencode")
+            cc_flag.append("arch=compute_103,code=sm_103")
+            cc_flag.append("-gencode")
+            cc_flag.append("arch=compute_110,code=sm_110")
+            cc_flag.append("-gencode")
+            cc_flag.append("arch=compute_121,code=sm_121")
 
     # HACK: The compiler flag -D_GLIBCXX_USE_CXX11_ABI is set to be the same as
     # torch._C._GLIBCXX_USE_CXX11_ABI
