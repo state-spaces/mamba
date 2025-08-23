@@ -175,9 +175,9 @@ class DiffBlockPaper(nn.Module):
         slot = inference_params.key_value_memory_dict.get(self.layer_idx, None)
         if isinstance(slot, tuple) and len(slot) == 2:
             c1, c2 = slot
-            with DiffBlock._SwapCache(inference_params, self.layer_idx, c1):
+            with DiffBlockPaper._SwapCache(inference_params, self.layer_idx, c1):
                 y1 = self.mixer1(x, inference_params=inference_params, **mixer_kwargs)
-            with DiffBlock._SwapCache(inference_params, self.layer_idx, c2):
+            with DiffBlockPaper._SwapCache(inference_params, self.layer_idx, c2):
                 y2 = self.mixer2(x, inference_params=inference_params, **mixer_kwargs)
         else:
             y1 = self.mixer1(x, inference_params=inference_params, **mixer_kwargs)
@@ -273,7 +273,7 @@ class DiffBlockPaper(nn.Module):
         use_postscale: bool = False,
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
-    ) -> "DiffBlock":
+    ) -> "DiffBlockPaper":
         """Build a DiffBlock from a vanilla Block and copy weights into both mixers."""
         src_mixer = getattr(block, "mixer", None)
         src_mlp   = getattr(block, "mlp", None)
