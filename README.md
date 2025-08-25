@@ -19,23 +19,27 @@ We also provide training code, evaluation code, and model checkpoints to reprodu
 # Setup
 ## Clone Project
 ```
-git clone https://github.com/nadavsc/Diff-Mamba.git
-cd Diff-Mamba
+git clone https://github.com/maxmelichov/DiffMamba # This version us using mamba-ssm==2.2.4
+cd DiffMamba
 ```
 
 ## Create Environment
-To set up our environment, please run:
+Use a virtual environment (recommended). Create and activate one, then upgrade pip:
 ```
-conda env create -f environment.yml
-conda activate diffmamba
+python3 -m venv .venv
+# How to activate
+source .venv/bin/activate
+python -m pip install --upgrade pip
 ```
-Note: this should include all the necessary packages to run all the training and evaluation scripts. Nonetheless, make sure the additional requirements are satisfied:
+If you already have an active virtual environment, you can skip these steps.
 
 
 Mamba Installation:
 ```
-pip install causal-conv1d==1.5.0
-pip install mamba-ssm==2.2.4
+pip install causal-conv1d==1.5.0.post8 
+pip install flash-attn==2.7.4.post1
+# make sure you are in the right Directory (you should be in DiffMamba)
+pip install .
 ```
 
 ## Additional Requirements - Language Modeling
