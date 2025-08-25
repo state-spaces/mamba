@@ -12,12 +12,11 @@ license = { file = "LICENSE" }  # Include a LICENSE file in your repo
 keywords = ["cuda", "pytorch", "state-space model"]
 classifiers = [
     "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: Apache Software License",
+    "License :: OSI Approved :: BSD License",
     "Operating System :: Unix"
 ]
 dependencies = [
     "torch",
-    "triton",
     "ninja",
     "einops",
     "transformers",

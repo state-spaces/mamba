@@ -7,7 +7,7 @@ import torch.nn.functional as F
 import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-from mamba_ssm.ops.triton.layer_norm import RMSNorm, layer_norm_fn
+from DiffMamba.mamba_ssm.ops.triton.layer_norm import RMSNorm, layer_norm_fn
 
 
 class Block(nn.Module):

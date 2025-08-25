@@ -132,8 +132,7 @@ def _chunk_scan_fwd_kernel(
         dA_cs_k = tl.load(dA_cumsum_ptrs, mask=offs_k < chunk_size - k, other=0.0).to(tl.float32)
         # If there's seq_idx, we already set cb[i, j] = 0 for seq_idx[i] != seq_idx[j].
         # So we don't need masking wrt seq_idx here.
-        # cb *= tl.exp((dA_cs_m[:, None] - dA_cs_k[None, :]))
-        cb *= tl.exp(tl.minimum((dA_cs_m[:, None] - dA_cs_k[None, :]), 0.0))
+        cb *= tl.exp((dA_cs_m[:, None] - dA_cs_k[None, :]))
         dt_k = tl.load(dt_ptrs, mask=offs_k < chunk_size - k, other=0.0).to(tl.float32)
         cb *= dt_k
         if IS_CAUSAL:
@@ -680,8 +679,7 @@ def _chunk_scan_bwd_dx_kernel(
         cb = tl.load(cb_ptrs, mask=(offs_m[:, None] < chunk_size) & (offs_k[None, :] < K_MAX - k), other=0.0)
         dout = tl.load(dout_ptrs, mask=(offs_k[:, None] < K_MAX - k) & (offs_n[None, :] < hdim), other=0.0)
         dA_cs_k = tl.load(dA_cumsum_ptrs, mask=offs_k < K_MAX - k, other=0.0).to(tl.float32)
-        # cb *= tl.exp(dA_cs_k[None, :] - dA_cs_m[:, None])
-        cb *= tl.exp(tl.minimum((dA_cs_k[None, :] - dA_cs_m[:, None]), 0.0))
+        cb *= tl.exp(dA_cs_k[None, :] - dA_cs_m[:, None])
         # If we don't have the (k + offs_k[None, :] < K_MAX) mask, for indices outside this range,
         # we might have dA_cs_m = 0.0 and dA_cs_k very negative, and tl.exp will return inf.
         # Multiplying with cb, which is 0.0 outside the range, will make the result NaN.
@@ -818,8 +816,7 @@ def _chunk_scan_bwd_dcb_kernel(
         dcb *= dt_n
         dA_cs_m = tl.load(dA_cumsum_ptr + offs_m * stride_dA_cs_csize, mask=offs_m < chunk_size_limit, other=0.0).to(tl.float32)
         dA_cs_n = tl.load(dA_cumsum_ptr + offs_n * stride_dA_cs_csize, mask=offs_n < chunk_size_limit, other=0.0).to(tl.float32)
-        # dcb *= tl.exp(dA_cs_m[:, None] - dA_cs_n[None, :])
-        dcb *= tl.exp(tl.minimum((dA_cs_m[:, None] - dA_cs_n[None, :]), 0.0))
+        dcb *= tl.exp(dA_cs_m[:, None] - dA_cs_n[None, :])
         if HAS_DDA_CS:
             tl.static_assert(not HAS_SEQ_IDX, "HAS_SEQ_IDX not supported with HAS_DDA_CS yet")
             ddA_cs = dcb * cb
@@ -1011,8 +1008,7 @@ def _chunk_scan_bwd_ddAcs_stable_kernel_old(
     acc *= dt_n
     dA_cs_m = tl.load(dA_cumsum_ptr + offs_m * stride_dA_cs_csize, mask=offs_m < chunk_size, other=0.0).to(tl.float32)
     dA_cs_n = tl.load(dA_cumsum_ptr + offs_n * stride_dA_cs_csize, mask=offs_n < chunk_size, other=0.0).to(tl.float32)
-    # acc *= tl.exp(dA_cs_m[:, None] - dA_cs_n[None, :])
-    acc *= tl.exp(tl.minimum((dA_cs_m[:, None] - dA_cs_n[None, :]), 0.0))
+    acc *= tl.exp(dA_cs_m[:, None] - dA_cs_n[None, :])
     mask = offs_m[:, None] >= offs_n[None, :] + 1
     acc = tl.where(mask, acc, 0.0)
     acc = tl.cumsum(acc, axis=1)
@@ -1138,8 +1134,7 @@ def _chunk_scan_bwd_ddAcs_stable_kernel(
         cb = tl.load(cb_ptrs, mask=(offs_m[:, None] < chunk_size) & (offs_n[None, :] < chunk_size - start_n), other=0.0).to(tl.float32)
         acc *= cb
         dA_cs_n = tl.load(dA_cumsum_ptr + (start_n + offs_n) * stride_dA_cs_csize, mask=offs_n < chunk_size - start_n, other=0.0).to(tl.float32)
-        # acc *= tl.exp(dA_cs_m[:, None] - dA_cs_n[None, :])
-        acc *= tl.exp(tl.minimum((dA_cs_m[:, None] - dA_cs_n[None, :]), 0.0))
+        acc *= tl.exp(dA_cs_m[:, None] - dA_cs_n[None, :])
         mask = offs_m[:, None] >= start_n + offs_n[None, :] + 1
         acc = tl.where(mask, acc, 0.0)
         rowsum_new = rowsum + tl.sum(acc, axis=1)
