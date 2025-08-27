@@ -55,10 +55,10 @@ jobs:
 
       - name: Set CUDA and PyTorch versions
         run: |
-          echo "MATRIX_CUDA_VERSION=$(echo ${{ matrix.cuda-version }} | awk -F \. {'print $1 $2'})" >> $GITHUB_ENV
-          echo "MATRIX_TORCH_VERSION=$(echo ${{ matrix.torch-version }} | awk -F \. {'print $1 "." $2'})" >> $GITHUB_ENV
-          echo "WHEEL_CUDA_VERSION=$(echo ${{ matrix.cuda-version }} | awk -F \. {'print $1'})" >> $GITHUB_ENV
-          echo "MATRIX_PYTHON_VERSION=$(echo ${{ matrix.python-version }} | awk -F \. {'print $1 $2'})" >> $GITHUB_ENV
+          echo "MATRIX_CUDA_VERSION=$(echo ${{ input.cuda-version }} | awk -F \. {'print $1 $2'})" >> $GITHUB_ENV
+          echo "MATRIX_TORCH_VERSION=$(echo ${{ input.torch-version }} | awk -F \. {'print $1 "." $2'})" >> $GITHUB_ENV
+          echo "WHEEL_CUDA_VERSION=$(echo ${{ input.cuda-version }} | awk -F \. {'print $1'})" >> $GITHUB_ENV
+          echo "MATRIX_PYTHON_VERSION=$(echo ${{ input.python-version }} | awk -F \. {'print $1 $2'})" >> $GITHUB_ENV
 
       - name: Free up disk space
         if: ${{ runner.os == 'Linux' }}
@@ -87,7 +87,7 @@ jobs:
           method: "network"
           sub-packages: '["nvcc"]'
 
-      - name: Install PyTorch ${{ matrix.torch-version }}+cu${{ matrix.cuda-version }}
+      - name: Install PyTorch ${{ input.torch-version }}+cu${{ input.cuda-version }}
         run: |
           pip install --upgrade pip
           # For some reason torch 2.2.0 on python 3.12 errors saying no setuptools
@@ -103,15 +103,15 @@ jobs:
             maxv = {'2.4': 124, '2.5': 124, '2.6': 126, '2.7': 128}[env['MATRIX_TORCH_VERSION']]; \
             print(minv if int(env['MATRIX_CUDA_VERSION']) < 120 else maxv)" \
           )
-          if [[ ${{ matrix.torch-version }} == *"dev"* ]]; then
-            # pip install --no-cache-dir --pre torch==${{ matrix.torch-version }} --index-url https://download.pytorch.org/whl/nightly/cu${TORCH_CUDA_VERSION}
+          if [[ ${{ input.torch-version }} == *"dev"* ]]; then
+            # pip install --no-cache-dir --pre torch==${{ input.torch-version }} --index-url https://download.pytorch.org/whl/nightly/cu${TORCH_CUDA_VERSION}
             # Can't use --no-deps because we need cudnn etc.
             # Hard-coding this version of pytorch-triton for torch 2.6.0.dev20241001
             pip install jinja2
             pip install https://download.pytorch.org/whl/nightly/pytorch_triton-3.1.0%2Bcf34004b8a-cp${MATRIX_PYTHON_VERSION}-cp${MATRIX_PYTHON_VERSION}-linux_x86_64.whl
-            pip install --no-cache-dir --pre https://download.pytorch.org/whl/nightly/cu${TORCH_CUDA_VERSION}/torch-${{ matrix.torch-version }}%2Bcu${TORCH_CUDA_VERSION}-cp${MATRIX_PYTHON_VERSION}-cp${MATRIX_PYTHON_VERSION}-linux_x86_64.whl
+            pip install --no-cache-dir --pre https://download.pytorch.org/whl/nightly/cu${TORCH_CUDA_VERSION}/torch-${{ input.torch-version }}%2Bcu${TORCH_CUDA_VERSION}-cp${MATRIX_PYTHON_VERSION}-cp${MATRIX_PYTHON_VERSION}-linux_x86_64.whl
           else
-            pip install --no-cache-dir torch==${{ matrix.torch-version }} --index-url https://download.pytorch.org/whl/cu${TORCH_CUDA_VERSION}
+            pip install --no-cache-dir torch==${{ input.torch-version }} --index-url https://download.pytorch.org/whl/cu${TORCH_CUDA_VERSION}
           fi
           nvcc --version
           python --version
@@ -159,14 +159,14 @@ jobs:
           # Limit MAX_JOBS otherwise the github runner goes OOM
           export MAX_JOBS=2 
           export MAMBA_FORCE_BUILD="TRUE" 
-          export MAMBA_FORCE_CXX11_ABI=${{ matrix.cxx11_abi}} 
+          export MAMBA_FORCE_CXX11_ABI=${{ input.cxx11_abi}} 
 
           # 5h timeout since GH allows max 6h and we want some buffer
           EXIT_CODE=0
           timeout 5h python setup.py bdist_wheel --dist-dir=dist || EXIT_CODE=$?
 
           if [ $EXIT_CODE -eq 0 ]; then
-            tmpname=cu${WHEEL_CUDA_VERSION}torch${MATRIX_TORCH_VERSION}cxx11abi${{ matrix.cxx11_abi }}
+            tmpname=cu${WHEEL_CUDA_VERSION}torch${MATRIX_TORCH_VERSION}cxx11abi${{ input.cxx11_abi }}
             wheel_name=$(ls dist/*whl | xargs -n 1 basename | sed "s/-/+$tmpname-/2")
             ls dist/*whl |xargs -I {} mv {} dist/${wheel_name}
             echo "wheel_name=${wheel_name}" >> $GITHUB_ENV
