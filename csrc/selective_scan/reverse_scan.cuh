@@ -129,7 +129,7 @@ struct WarpReverseScan {
     /// Constructor
     explicit __device__ __forceinline__
     WarpReverseScan()
-        : lane_id(cub::LaneId())
+        : lane_id(threadIdx.x & 0x1f)
         , warp_id(IS_ARCH_WARP ? 0 : (lane_id / LOGICAL_WARP_THREADS))
         , member_mask(cub::WarpMask<LOGICAL_WARP_THREADS>(warp_id))
     {
@@ -332,7 +332,7 @@ struct BlockReverseScan {
             // Place thread partial into shared memory raking grid
             T *placement_ptr = BlockRakingLayout::PlacementPtr(temp_storage.raking_grid, linear_tid);
             detail::uninitialized_copy(placement_ptr, input);
-            cub::CTA_SYNC();
+            __syncthreads();
             // Reduce parallelism down to just raking threads
             if (linear_tid < RAKING_THREADS) {
                 WarpReverseScan warp_scan;
@@ -350,7 +350,7 @@ struct BlockReverseScan {
                 // Exclusive raking downsweep scan
                 ExclusiveDownsweep(scan_op, downsweep_postfix);
             }
-            cub::CTA_SYNC();
+            __syncthreads();
             // Grab thread postfix from shared memory
             exclusive_output = *placement_ptr;
 
@@ -382,7 +382,7 @@ struct BlockReverseScan {
             //     }
             // }
 
-            // cub::CTA_SYNC();
+            // __syncthreads();
 
             // // Incorporate thread block postfix into outputs
             // T block_postfix = temp_storage.block_postfix;
