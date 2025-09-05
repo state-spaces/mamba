@@ -116,6 +116,7 @@ class DiffBlockPaper(nn.Module):
         residual_in_fp32: bool = False,
         layer_idx: int = 0,
         use_postscale: bool = False,     # optional extra scaling by (1 - lambda_init)
+        lambda_init: Optional[float] = None,
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
     ) -> None:
@@ -167,20 +168,46 @@ class DiffBlockPaper(nn.Module):
                     self.ip.key_value_memory_dict[self.idx] = self.orig
 
     def _run_mixers(self, x: Tensor, inference_params=None, **mixer_kwargs) -> Tuple[Tensor, Tensor]:
+        # No caching provided: straightforward parallel calls
         if inference_params is None:
             y1 = self.mixer1(x, inference_params=None, **mixer_kwargs)
             y2 = self.mixer2(x, inference_params=None, **mixer_kwargs)
             return y1, y2
 
+        # Shared cache stored at key = self.layer_idx. Ensure it exists, update shared once via mixer1,
+        # then run mixer2 against a temporary cloned view to avoid a double persistent update.
         slot = inference_params.key_value_memory_dict.get(self.layer_idx, None)
-        if isinstance(slot, tuple) and len(slot) == 2:
-            c1, c2 = slot
-            with DiffBlockPaper._SwapCache(inference_params, self.layer_idx, c1):
-                y1 = self.mixer1(x, inference_params=inference_params, **mixer_kwargs)
-            with DiffBlockPaper._SwapCache(inference_params, self.layer_idx, c2):
+        if slot is None:
+            # Proactively allocate a shared cache so both mixers see the same initial states
+            try:
+                bs = x.shape[0]
+                max_seqlen = getattr(inference_params, "max_seqlen", None)
+                dtype = x.dtype
+                if max_seqlen is not None:
+                    inference_params.key_value_memory_dict[self.layer_idx] = self.allocate_inference_cache(bs, max_seqlen, dtype=dtype)
+                    slot = inference_params.key_value_memory_dict.get(self.layer_idx, None)
+            except Exception:
+                # Fallback: let mixer1 lazily allocate on its own
+                slot = None
+
+        def _clone_slot(s):
+            if torch.is_tensor(s):
+                return s.clone()
+            if isinstance(s, (tuple, list)):
+                typ = type(s)
+                return typ(_clone_slot(t) for t in s)
+            if isinstance(s, dict):
+                return {k: _clone_slot(v) for k, v in s.items()}
+            return s
+
+        # Clone original states BEFORE running mixer1 so both branches see the same pre-update states
+        tmp_view = _clone_slot(slot) if slot is not None else None
+
+        y1 = self.mixer1(x, inference_params=inference_params, **mixer_kwargs)
+        if tmp_view is not None:
+            with DiffBlockPaper._SwapCache(inference_params, self.layer_idx, tmp_view):
                 y2 = self.mixer2(x, inference_params=inference_params, **mixer_kwargs)
         else:
-            y1 = self.mixer1(x, inference_params=inference_params, **mixer_kwargs)
             y2 = self.mixer2(x, inference_params=inference_params, **mixer_kwargs)
         return y1, y2
 
@@ -254,11 +281,10 @@ class DiffBlockPaper(nn.Module):
         return hidden_states, residual
 
     def allocate_inference_cache(self, batch_size, max_seqlen, dtype=None, **kwargs):
-        cache1 = getattr(self.mixer1, "allocate_inference_cache", None)
-        cache2 = getattr(self.mixer2, "allocate_inference_cache", None)
-        c1 = cache1(batch_size, max_seqlen, dtype=dtype, **kwargs) if callable(cache1) else None
-        c2 = cache2(batch_size, max_seqlen, dtype=dtype, **kwargs) if callable(cache2) else None
-        return (c1, c2)
+        # Share a single cache object between both mixers
+        cache_fn = getattr(self.mixer1, "allocate_inference_cache", None)
+        shared = cache_fn(batch_size, max_seqlen, dtype=dtype, **kwargs) if callable(cache_fn) else None
+        return shared
 
     @classmethod
     def from_pretrained_block(
@@ -269,7 +295,7 @@ class DiffBlockPaper(nn.Module):
         norm_cls: Optional[Callable[[int], nn.Module]] = None,
         fused_add_norm: Optional[bool] = None,
         residual_in_fp32: Optional[bool] = None,
-        lambda_init: float = 0.1,
+        lambda_init: Optional[float] = None,
         use_postscale: bool = False,
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
@@ -286,8 +312,16 @@ class DiffBlockPaper(nn.Module):
         fused_add_norm    = fused_add_norm    if fused_add_norm    is not None else getattr(block, "fused_add_norm", False)
         residual_in_fp32  = residual_in_fp32  if residual_in_fp32  is not None else getattr(block, "residual_in_fp32", False)
 
+        # Try to infer dimension robustly if block doesn't have d_model
+        dim = getattr(block, "d_model", None)
+        if dim is None:
+            if hasattr(block, "norm") and hasattr(block.norm, "weight"):
+                dim = block.norm.weight.shape[0]
+            else:
+                raise ValueError("Cannot infer dim from the provided block")
+
         newb = cls(
-            dim=block.d_model,
+            dim=dim,
             mixer_cls1=mixer_cls,
             mixer_cls2=mixer_cls,
             mlp_cls=mlp_cls,
@@ -304,10 +338,8 @@ class DiffBlockPaper(nn.Module):
         # copy prenorm
         if src_norm is not None:
             newb.norm.load_state_dict(src_norm.state_dict(), strict=False)
-            # seed post norms with same stats
-            newb.post_mamba_norm1.load_state_dict(newb.norm.state_dict(), strict=False)
-            newb.post_mamba_norm2.load_state_dict(newb.norm.state_dict(), strict=False)
-            newb.post_sub_norm.load_state_dict(newb.norm.state_dict(), strict=False)
+            # seed sublayer norm with same stats
+            newb.subln.load_state_dict(newb.norm.state_dict(), strict=False)
 
         # copy mixer weights into both mixers
         if src_mixer is not None:
