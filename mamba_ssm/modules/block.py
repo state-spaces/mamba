@@ -174,41 +174,45 @@ class DiffBlockPaper(nn.Module):
             y2 = self.mixer2(x, inference_params=None, **mixer_kwargs)
             return y1, y2
 
-        # Shared cache stored at key = self.layer_idx. Ensure it exists, update shared once via mixer1,
-        # then run mixer2 against a temporary cloned view to avoid a double persistent update.
-        slot = inference_params.key_value_memory_dict.get(self.layer_idx, None)
-        if slot is None:
-            # Proactively allocate a shared cache so both mixers see the same initial states
+        # Ensure persistent, SEPARATE cache slots for each branch
+        ip = inference_params
+        main_key = self.layer_idx
+        # Use a hidden negative key for branch 2 to avoid collisions with real layer indices
+        branch2_key = -(self.layer_idx + 1)
+
+        # Ensure branch 1 cache exists at main_key
+        slot1 = ip.key_value_memory_dict.get(main_key, None)
+        if slot1 is None:
             try:
                 bs = x.shape[0]
-                max_seqlen = getattr(inference_params, "max_seqlen", None)
+                max_seqlen = getattr(ip, "max_seqlen", None)
                 dtype = x.dtype
                 if max_seqlen is not None:
-                    inference_params.key_value_memory_dict[self.layer_idx] = self.allocate_inference_cache(bs, max_seqlen, dtype=dtype)
-                    slot = inference_params.key_value_memory_dict.get(self.layer_idx, None)
+                    ip.key_value_memory_dict[main_key] = self.mixer1.allocate_inference_cache(bs, max_seqlen, dtype=dtype)
+                    slot1 = ip.key_value_memory_dict.get(main_key, None)
             except Exception:
-                # Fallback: let mixer1 lazily allocate on its own
-                slot = None
+                slot1 = None
 
-        def _clone_slot(s):
-            if torch.is_tensor(s):
-                return s.clone()
-            if isinstance(s, (tuple, list)):
-                typ = type(s)
-                return typ(_clone_slot(t) for t in s)
-            if isinstance(s, dict):
-                return {k: _clone_slot(v) for k, v in s.items()}
-            return s
+        # Ensure branch 2 cache exists at branch2_key
+        slot2 = ip.key_value_memory_dict.get(branch2_key, None)
+        if slot2 is None:
+            try:
+                bs = x.shape[0]
+                max_seqlen = getattr(ip, "max_seqlen", None)
+                dtype = x.dtype
+                if max_seqlen is not None:
+                    ip.key_value_memory_dict[branch2_key] = self.mixer2.allocate_inference_cache(bs, max_seqlen, dtype=dtype)
+                    slot2 = ip.key_value_memory_dict.get(branch2_key, None)
+            except Exception:
+                slot2 = None
 
-        # Clone original states BEFORE running mixer1 so both branches see the same pre-update states
-        tmp_view = _clone_slot(slot) if slot is not None else None
-
-        y1 = self.mixer1(x, inference_params=inference_params, **mixer_kwargs)
-        if tmp_view is not None:
-            with DiffBlockPaper._SwapCache(inference_params, self.layer_idx, tmp_view):
-                y2 = self.mixer2(x, inference_params=inference_params, **mixer_kwargs)
+        # Run branches against their own caches; swap branch2 into the main key during its call
+        y1 = self.mixer1(x, inference_params=ip, **mixer_kwargs)
+        if slot2 is not None:
+            with DiffBlockPaper._SwapCache(ip, main_key, slot2):
+                y2 = self.mixer2(x, inference_params=ip, **mixer_kwargs)
         else:
-            y2 = self.mixer2(x, inference_params=inference_params, **mixer_kwargs)
+            y2 = self.mixer2(x, inference_params=ip, **mixer_kwargs)
         return y1, y2
 
     @staticmethod
