@@ -189,8 +189,12 @@ jobs:
 
       - name: Test wheels
         run: |
+          cat <<'EOF' > test.sh
           pip install dist/*.whl
           python -c "import mamba_ssm; print(mamba_ssm.__version__)"
+          EOF
+
+          docker exec test_container_${{ github.run_id }} bash /workspace/test.sh
 
       - name: Log Built Wheels
         run: |
