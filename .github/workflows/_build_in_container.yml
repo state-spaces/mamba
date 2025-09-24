@@ -83,8 +83,8 @@ jobs:
           CXX11_ABI: ${{ inputs.cxx11_abi }}
         run: |
           EXIT_CODE=$(docker exec \
-            -e WHEEL_CUDA_VERSION=$WHEEL_CUDA_VERSION \
-            -e MATRIX_TORCH_VERSION=$MATRIX_TORCH_VERSION \
+            -e WHEEL_CUDA_VERSION=${{ env.WHEEL_CUDA_VERSION }} \
+            -e MATRIX_TORCH_VERSION=${{ env.MATRIX_TORCH_VERSION }} \
             -e CXX11_ABI=$CXX11_ABI \
             test_container_${{ github.run_id }} bash /workspace/build-scripts/.github/scripts/build.sh | tail -n 1)
 
