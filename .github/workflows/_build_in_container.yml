@@ -48,11 +48,16 @@ jobs:
       - name: Restore /var/lib/docker/
         run: sudo sh -c "mv ${GITHUB_WORKSPACE}/docker/* /var/lib/docker"
 
-      - name: Checkout
+      - name: Checkout source
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.release-version }}
           submodules: recursive
+
+      - name: Checkout build scripts
+        uses: actions/checkout@v4
+        with:
+          path: build-scripts/
 
       - name: Build
         run: |
@@ -81,10 +86,10 @@ jobs:
             -e WHEEL_CUDA_VERSION \
             -e MATRIX_TORCH_VERSION \
             -e CXX11_ABI \
-            test_container_${{ github.run_id }} bash /workspace/.github/scripts/build.sh | tail -n 1)
+            test_container_${{ github.run_id }} bash /workspace/build-scripts/.github/scripts/build.sh | tail -n 1)
 
       - name: Test wheels
-        run: docker exec test_container_${{ github.run_id }} bash /workspace/.github/scripts/test.sh
+        run: docker exec test_container_${{ github.run_id }} bash /workspace/build-scripts/.github/scripts/test.sh
 
       - name: Log Built Wheels
         run: |
