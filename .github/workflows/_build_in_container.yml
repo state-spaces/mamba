@@ -11,7 +11,6 @@ on:
         description: "Container image"
         required: true
         type: string
-        default: ""
 
 defaults:
   run:
@@ -20,7 +19,7 @@ defaults:
 jobs:
   build-wheel:
     runs-on: ${{ inputs.runs-on }}
-    name: Build wheel (${{ inputs.release-version }}-${{ inputs.python-version }}-${{ inputs.cuda-version }}-${{ inputs.torch-version }}-${{ inputs.cxx11_abi }})
+    name: Build wheel (${{ inputs.container-image }})
     steps:
       - name: Move /var/lib/docker/
         run: sudo mv /var/lib/docker/ "${GITHUB_WORKSPACE}/docker"
@@ -76,13 +75,7 @@ jobs:
             test_container_${{ github.run_id }} bash /workspace/.github/scripts/build.sh | tail -n 1)
 
       - name: Test wheels
-        run: |
-          cat <<'EOF' > test.sh
-          pip install dist/*.whl
-          python -c "import mamba_ssm; print(mamba_ssm.__version__)"
-          EOF
-
-          docker exec test_container_${{ github.run_id }} bash /workspace/test.sh
+        run: docker exec test_container_${{ github.run_id }} bash /workspace/.github/scripts/test.sh
 
       - name: Log Built Wheels
         run: |

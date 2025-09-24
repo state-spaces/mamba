@@ -42,34 +42,11 @@ jobs:
     runs-on: ${{ inputs.runs-on }}
     name: Build wheel (${{ inputs.release-version }}-${{ inputs.python-version }}-${{ inputs.cuda-version }}-${{ inputs.torch-version }}-${{ inputs.cxx11_abi }})
     steps:
-      - name: Move /var/lib/docker/
-        run: sudo mv /var/lib/docker/ "${GITHUB_WORKSPACE}/docker"
-
-      - name: Maximize build space
-        uses: easimon/maximize-build-space@master
-        with:
-          root-reserve-mb: 5120
-          temp-reserve-mb: 32
-          swap-size-mb: 10240
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
-          build-mount-path: '/var/lib/docker/'
-
-      - name: Restore /var/lib/docker/
-        run: sudo sh -c "mv ${GITHUB_WORKSPACE}/docker/* /var/lib/docker"
-
       - name: Checkout
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.release-version }}
           submodules: recursive
-
-      - name: Build
-        run: |
-          echo "Free space:"
-          df -h
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -77,7 +54,6 @@ jobs:
           python-version: ${{ inputs.python-version }}
 
       - name: Set CUDA and PyTorch versions
-        if: ${{ inputs.ngc-pytorch-container == '' }}
         run: |
           echo "MATRIX_CUDA_VERSION=$(echo ${{ inputs.cuda-version }} | awk -F \. {'print $1 $2'})" >> $GITHUB_ENV
           echo "MATRIX_TORCH_VERSION=$(echo ${{ inputs.torch-version }} | awk -F \. {'print $1 "." $2'})" >> $GITHUB_ENV
@@ -93,12 +69,14 @@ jobs:
           sudo rm -rf /opt/ghc
           sudo rm -rf /opt/hostedtoolcache/CodeQL
 
-      - name: Start container
-        run: |
-          docker run -d --rm --name test_container_${{ github.run_id }} --shm-size=64g --workdir /workspace --volume $(pwd):/workspace ${{ inputs.ngc-pytorch-container }} bash -c "sleep $(( 6 * 60 * 60 ))"
+      - name: Set up swap space
+        if: runner.os == 'Linux'
+        uses: pierotofy/set-swap-space@v1.0
+        with:
+          swap-size-gb: 10
 
       - name: Install CUDA ${{ inputs.cuda-version }}
-        if: ${{ inputs.cuda-version != 'cpu' && inputs.ngc-pytorch-container == '' }}
+        if: ${{ inputs.cuda-version != 'cpu' }}
         uses: Jimver/cuda-toolkit@v0.2.26
         id: cuda-toolkit
         with:
@@ -110,7 +88,6 @@ jobs:
           sub-packages: '["nvcc"]'
 
       - name: Install PyTorch ${{ inputs.torch-version }}+cu${{ inputs.cuda-version }}
-        if: ${{ inputs.ngc-pytorch-container == '' }}
         run: |
           pip install --upgrade pip
           # For some reason torch 2.2.0 on python 3.12 errors saying no setuptools
@@ -156,13 +133,7 @@ jobs:
           exit $EXIT_CODE
 
       - name: Test wheels
-        run: |
-          cat <<'EOF' > test.sh
-          pip install dist/*.whl
-          python -c "import mamba_ssm; print(mamba_ssm.__version__)"
-          EOF
-
-          docker exec test_container_${{ github.run_id }} bash /workspace/test.sh
+        run: bash /workspace/test.sh
 
       - name: Log Built Wheels
         run: |

@@ -12,7 +12,7 @@ on:
         description: "Container image"
         required: true
         type: string
-        default: ""
+        default: "nvcr.io/nvidia/pytorch:25.06-py3"
 
   push:
 
