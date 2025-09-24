@@ -53,9 +53,9 @@ jobs:
       - name: Maximize build space
         uses: easimon/maximize-build-space@master
         with:
-          root-reserve-mb: 512
+          root-reserve-mb: 5120
           temp-reserve-mb: 32
-          swap-size-mb: 32
+          swap-size-mb: 10240
           remove-dotnet: 'true'
           remove-android: 'true'
           remove-haskell: 'true'
@@ -100,7 +100,7 @@ jobs:
 
       - name: Start container
         run: |
-          docker run --rm --name test_container_${{ github.run_id }} --shm-size=64g --workdir /workspace --volume $(pwd):/workspace ${{ inputs.ngc-pytorch-container }} bash -c "sleep $(( 6 * 60 * 60 ))"
+          docker run -d --rm --name test_container_${{ github.run_id }} --shm-size=64g --workdir /workspace --volume $(pwd):/workspace ${{ inputs.ngc-pytorch-container }} bash -c "sleep $(( 6 * 60 * 60 ))"
 
       - name: Install CUDA ${{ inputs.cuda-version }}
         if: ${{ inputs.cuda-version != 'cpu' && inputs.ngc-pytorch-container == '' }}
