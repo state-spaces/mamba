@@ -74,7 +74,7 @@ jobs:
             --workdir /workspace \
             --volume $(pwd):/workspace \
             --volume $GITHUB_ENV:$GITHUB_ENV \
-            -e $GITHUB_ENV \
+            -e GITHUB_ENV=$GITHUB_ENV \
             ${{ inputs.container-image }} bash -c "sleep $(( 6 * 60 * 60 ))"
 
       - name: Build wheel
