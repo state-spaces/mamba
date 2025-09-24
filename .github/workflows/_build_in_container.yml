@@ -1,0 +1,100 @@
+name: ~Build wheel template
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: "The runner to use for the build"
+        required: true
+        type: string
+      container-image:
+        description: "Container image"
+        required: true
+        type: string
+        default: ""
+
+defaults:
+  run:
+    shell: bash -x -e -u -o pipefail {0}
+
+jobs:
+  build-wheel:
+    runs-on: ${{ inputs.runs-on }}
+    name: Build wheel (${{ inputs.release-version }}-${{ inputs.python-version }}-${{ inputs.cuda-version }}-${{ inputs.torch-version }}-${{ inputs.cxx11_abi }})
+    steps:
+      - name: Move /var/lib/docker/
+        run: sudo mv /var/lib/docker/ "${GITHUB_WORKSPACE}/docker"
+
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 5120
+          temp-reserve-mb: 32
+          swap-size-mb: 10240
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          build-mount-path: '/var/lib/docker/'
+
+      - name: Restore /var/lib/docker/
+        run: sudo sh -c "mv ${GITHUB_WORKSPACE}/docker/* /var/lib/docker"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release-version }}
+          submodules: recursive
+
+      - name: Build
+        run: |
+          echo "Free space:"
+          df -h
+  
+      - name: Start container
+        run: |
+          docker run -d --rm --name test_container_${{ github.run_id }} --shm-size=64g --workdir /workspace --volume $(pwd):/workspace ${{ inputs.ngc-pytorch-container }} bash -c "sleep $(( 6 * 60 * 60 ))"
+
+      - name: Build wheel
+        id: build_wheel
+        env: 
+          CXX11_ABI: ${{ inputs.cxx11_abi }}
+        run: |
+          EXIT_CODE=$(docker exec \
+            -e WHEEL_CUDA_VERSION \
+            -e MATRIX_TORCH_VERSION \
+            -e CXX11_ABI \
+            test_container_${{ github.run_id }} bash /workspace/.github/scripts/build.sh | tail -n 1)
+
+      - name: Test wheels
+        run: |
+          cat <<'EOF' > test.sh
+          pip install dist/*.whl
+          python -c "import mamba_ssm; print(mamba_ssm.__version__)"
+          EOF
+
+          docker exec test_container_${{ github.run_id }} bash /workspace/test.sh
+
+      - name: Log Built Wheels
+        run: |
+          ls dist
+
+      - name: Get Release with tag
+        id: get_current_release
+        uses: joutvhu/get-release@v1
+        with:
+          tag_name: ${{ inputs.release-version }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Release Asset
+        id: upload_release_asset
+        if: inputs.upload-to-release
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.get_current_release.outputs.upload_url }}
+          asset_path: ./dist/${{env.wheel_name}}
+          asset_name: ${{env.wheel_name}}
+          asset_content_type: application/*

@@ -1,0 +1,24 @@
+name: Build wheels in a container
+
+on:
+  workflow_dispatch:
+    inputs:
+      runs-on:
+        description: "The runner to use for the build"
+        required: true
+        type: string
+        default: ubuntu-22.04
+      container-image:
+        description: "Container image"
+        required: true
+        type: string
+        default: ""
+
+  push:
+
+jobs:
+  build-wheels:
+    uses: ./.github/workflows/_build_in_container.yml
+    with:
+      runs-on: ${{ inputs.runs-on || 'ubuntu-22.04' }}
+      container-image: ${{ inputs.container-image  }}
