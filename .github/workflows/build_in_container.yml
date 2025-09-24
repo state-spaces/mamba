@@ -12,6 +12,15 @@ on:
         description: "Container image"
         required: true
         type: string
+      upload-to-release:
+        description: "Upload wheel to this release"
+        required: false
+        type: boolean
+        default: false
+      release-version:
+        description: "Upload wheel to this release"
+        required: false
+        type: string
 
   push:
 
@@ -21,3 +30,5 @@ jobs:
     with:
       runs-on: ${{ inputs.runs-on || 'ubuntu-22.04' }}
       container-image: ${{ inputs.container-image || 'nvcr.io/nvidia/pytorch:25.06-py3' }}
+      upload-to-release: ${{ inputs.upload-to-release || false }}
+      release-version: ${{ inputs.release-version || 'v2.2.5' }}
