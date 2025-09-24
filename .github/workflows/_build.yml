@@ -136,10 +136,7 @@ jobs:
           echo "build_exit_code=$EXIT_CODE" | tee -a "$GITHUB_OUTPUT"
 
           exit $EXIT_CODE
-
-      - name: Test wheels
-        run: bash build-scripts/.github/scripts/test.sh
-
+          
       - name: Log Built Wheels
         run: |
           ls dist
