@@ -47,11 +47,23 @@ jobs:
     runs-on: ${{ inputs.runs-on }}
     name: Build wheel (${{ inputs.release-version }}-${{ inputs.python-version }}-${{ inputs.cuda-version }}-${{ inputs.torch-version }}-${{ inputs.cxx11_abi }})
     steps:
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 512
+          swap-size-mb: 1024
+          remove-dotnet: 'true'
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.release-version }}
           submodules: recursive
+
+      - name: Build
+        run: |
+          echo "Free space:"
+          df -h
 
       - name: Set up Python
         uses: actions/setup-python@v5
