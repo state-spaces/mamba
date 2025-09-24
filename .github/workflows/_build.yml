@@ -32,6 +32,11 @@ on:
         description: "Upload wheel to this release"
         required: false
         type: string
+      ngc-pytorch-container:
+        description: "NGP PyTorch container"
+        required: false
+        type: string
+        default: ""
 
 defaults:
   run:
@@ -54,6 +59,7 @@ jobs:
           python-version: ${{ inputs.python-version }}
 
       - name: Set CUDA and PyTorch versions
+        if: ${{ inputs.ngc-pytorch-container == '' }}
         run: |
           echo "MATRIX_CUDA_VERSION=$(echo ${{ inputs.cuda-version }} | awk -F \. {'print $1 $2'})" >> $GITHUB_ENV
           echo "MATRIX_TORCH_VERSION=$(echo ${{ inputs.torch-version }} | awk -F \. {'print $1 "." $2'})" >> $GITHUB_ENV
@@ -75,8 +81,12 @@ jobs:
         with:
           swap-size-gb: 10
 
+      - name: Start container
+        run: |
+          docker run --rm --name test_container_${{ github.run_id }} --shm-size=64g --workdir /workspace --volume $(pwd):/workspace ${{ inputs.ngc-pytorch-container }} bash -c "sleep $(( 6 * 60 * 60 ))"
+
       - name: Install CUDA ${{ inputs.cuda-version }}
-        if: ${{ inputs.cuda-version != 'cpu' }}
+        if: ${{ inputs.cuda-version != 'cpu' && inputs.ngc-pytorch-container == '' }}
         uses: Jimver/cuda-toolkit@v0.2.26
         id: cuda-toolkit
         with:
@@ -88,6 +98,7 @@ jobs:
           sub-packages: '["nvcc"]'
 
       - name: Install PyTorch ${{ inputs.torch-version }}+cu${{ inputs.cuda-version }}
+        if: ${{ inputs.ngc-pytorch-container == '' }}
         run: |
           pip install --upgrade pip
           # For some reason torch 2.2.0 on python 3.12 errors saying no setuptools
@@ -120,31 +131,6 @@ jobs:
           python -c "from torch.utils import cpp_extension; print (cpp_extension.CUDA_HOME)"
         shell: bash
 
-      - name: Restore build cache
-        uses: actions/cache/restore@v4
-        with:
-          path: build.tar
-          key: build-${{ inputs.release-version }}-${{ inputs.python-version }}-${{ inputs.cuda-version }}-${{ inputs.torch-version }}-${{ inputs.cxx11_abi }}-${{ github.run_number }}-${{ github.run_attempt }}
-          restore-keys: |
-            build-${{ inputs.release-version }}-${{ inputs.python-version }}-${{ inputs.cuda-version }}-${{ inputs.torch-version }}-${{ inputs.cxx11_abi }}-
-
-      - name: Unpack build cache
-        run: |
-          echo ::group::Adjust timestamps
-          sudo find / -exec touch -t 197001010000 {} + || true
-          echo ::endgroup::
-
-          if [ -f build.tar ]; then
-            find . -mindepth 1 -maxdepth 1 ! -name 'build.tar' -exec rm -rf {} +
-            tar -xpvf build.tar -C .
-          else
-            echo "No build.tar found, skipping"
-          fi
-
-          ls -al ./
-          ls -al build/ || true
-          ls -al csrc/ || true
-
       - name: Build wheel
         id: build_wheel
         run: |
@@ -153,7 +139,7 @@ jobs:
           # However this still fails so I'm using a newer version of setuptools
           pip install setuptools==68.0.0
           pip install ninja packaging wheel
-          export PATH=/usr/local/nvidia/bin:/usr/local/nvidia/lib64:$PATH
+          export PATH=/usr/local/cuda/bin:/usr/local/nvidia/bin:/usr/local/nvidia/lib64:$PATH
           export LD_LIBRARY_PATH=/usr/local/nvidia/lib64:/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 
           # Limit MAX_JOBS otherwise the github runner goes OOM
@@ -178,18 +164,10 @@ jobs:
           # Do not fail the job if timeout killed the build
           exit $EXIT_CODE
 
-      - name: Log build logs after timeout
-        if: always() && steps.build_wheel.outputs.build_exit_code == 124
+      - name: Test wheels
         run: |
-          ls -al ./
-          tar -cvf build.tar . --atime-preserve=replace
-
-      - name: Save build cache timeout
-        if: always() && steps.build_wheel.outputs.build_exit_code == 124
-        uses: actions/cache/save@v4
-        with:
-          key: build-${{ inputs.release-version }}-${{ inputs.python-version }}-${{ inputs.cuda-version }}-${{ inputs.torch-version }}-${{ inputs.cxx11_abi }}-${{ github.run_number }}-${{ github.run_attempt }}
-          path: build.tar
+          pip install dist/*.whl
+          python -c "import mamba_ssm; print(mamba_ssm.__version__)"
 
       - name: Log Built Wheels
         run: |
