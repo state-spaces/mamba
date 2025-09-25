@@ -67,17 +67,6 @@ jobs:
       - name: Pull the container
         run: docker pull ${{ inputs.container-image }} 
 
-      - name: Start container
-        run: |
-          docker run \
-            --rm \
-            --shm-size=64g \
-            --workdir /workspace \
-            --volume $(pwd):/workspace \
-            --volume $GITHUB_ENV:$GITHUB_ENV \
-            -e GITHUB_ENV=$GITHUB_ENV \
-            ${{ inputs.container-image }} bash -c "sleep $(( 6 * 60 * 60 ))"
-
       - name: Set CUDA and PyTorch versions
         run: |
           cat <<'EOF' >> script.sh
