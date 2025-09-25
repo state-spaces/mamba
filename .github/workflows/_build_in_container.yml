@@ -77,14 +77,33 @@ jobs:
             -e GITHUB_ENV=$GITHUB_ENV \
             ${{ inputs.container-image }} bash -c "sleep $(( 6 * 60 * 60 ))"
 
+      - name: Set CUDA and PyTorch versions
+        run: |
+          cat <<'EOF' >> script.sh
+          echo "MATRIX_CUDA_VERSION=$(echo $CUDA_VERSION | awk -F \. {'print $1 $2'})" >> $GITHUB_ENV
+          echo "MATRIX_TORCH_VERSION=$PYTORCH_VERSION" >> $GITHUB_ENV
+          echo "WHEEL_CUDA_VERSION=$(echo $CUDA_VERSION | awk -F \. {'print $1'})" >> $GITHUB_ENV
+          echo "MATRIX_PYTHON_VERSION=$(python -c "import sys; print('{}.{}'.format(sys.version_info[0], sys.version_info[1]))" | awk -F \. {'print $1 $2'})" >> $GITHUB_ENV
+          EOF
+
+          docker exec \
+            -e GITHUB_ENV=$GITHUB_ENV \
+            test_container_${{ github.run_id }} bash /workspace/script.sh
+
       - name: Build wheel
         id: build_wheel
         env: 
           CXX11_ABI: ${{ inputs.cxx11_abi }}
+          MATRIX_TORCH_VERSION: ${{ env.MATRIX_TORCH_VERSION}}
+          WHEEL_CUDA_VERSION: ${{ env.WHEEL_CUDA_VERSION }}
+          MATRIX_PYTHON_VERSION: ${{ env.MATRIX_PYTHON_VERSION }}
         run: |
           EXIT_CODE=$(docker exec \
             -e GITHUB_ENV=$GITHUB_ENV \
             -e CXX11_ABI=$CXX11_ABI \
+            -e MATRIX_TORCH_VERSION=$MATRIX_TORCH_VERSION \
+            -e WHEEL_CUDA_VERSION=$WHEEL_CUDA_VERSION \
+            -e MATRIX_PYTHON_VERSION=$MATRIX_PYTHON_VERSION \
             test_container_${{ github.run_id }} bash /workspace/build-scripts/.github/scripts/build.sh | tail -n 1)
 
       - name: Test wheels
