@@ -93,7 +93,7 @@ jobs:
           EOF
 
           docker exec \
-            --env-file $GITHUB_ENV \	
+            --env-file $GITHUB_ENV \
             -e GITHUB_ENV=$GITHUB_ENV \
             test_container_${{ github.run_id }} bash /workspace/script.sh
 
