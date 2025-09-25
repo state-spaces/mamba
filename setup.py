@@ -303,13 +303,17 @@ def get_wheel_url():
     platform_name = get_platform()
     mamba_ssm_version = get_package_version()
     if os.environ.get("NVIDIA_PRODUCT_NAME", "") == "PyTorch":
-        torch_version = os.environ.get("PYTORCH_BUILD_VERSION")
+        torch_version = os.environ.get("PYTORCH_BUILD_VERSION").replace("+", "_")
     else:
         torch_version = f"{torch_version_raw.major}.{torch_version_raw.minor}"
     cxx11_abi = str(torch._C._GLIBCXX_USE_CXX11_ABI).upper()
 
     # Determine wheel URL based on CUDA version, torch version, python version and OS
-    wheel_filename = f"{PACKAGE_NAME}-{mamba_ssm_version}+{cuda_or_hip}{gpu_compute_version}torch{torch_version}cxx11abi{cxx11_abi}-{python_version}-{python_version}-{platform_name}.whl"
+    if os.environ.get("NVIDIA_PRODUCT_NAME", "") == "PyTorch": 
+        wheel_filename = f"{PACKAGE_NAME}-{mamba_ssm_version}+{cuda_or_hip}{gpu_compute_version}torch{torch_version}-{python_version}-{python_version}-{platform_name}.whl"
+    else:
+        wheel_filename = f"{PACKAGE_NAME}-{mamba_ssm_version}+{cuda_or_hip}{gpu_compute_version}torch{torch_version}cxx11abi{cxx11_abi}-{python_version}-{python_version}-{platform_name}.whl"
+    
     wheel_url = BASE_WHEEL_URL.format(
         tag_name=f"v{mamba_ssm_version}", wheel_name=wheel_filename
     )
