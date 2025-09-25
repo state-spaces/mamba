@@ -84,6 +84,7 @@ jobs:
         run: |
           EXIT_CODE=$(docker exec \
             -e GITHUB_ENV=$GITHUB_ENV \
+            -e CXX11_ABI=$CXX11_ABI \
             test_container_${{ github.run_id }} bash /workspace/build-scripts/.github/scripts/build.sh | tail -n 1)
 
       - name: Test wheels
