@@ -80,6 +80,10 @@ jobs:
       - name: Set CUDA and PyTorch versions
         run: |
           cat <<'EOF' >> script.sh
+          #!/bin/bash
+
+          set -eoxu pipefail
+
           echo "MATRIX_CUDA_VERSION=$(echo $CUDA_VERSION | awk -F \. {'print $1 $2'})" >> $GITHUB_ENV
           echo "MATRIX_TORCH_VERSION=$PYTORCH_VERSION" >> $GITHUB_ENV
           echo "WHEEL_CUDA_VERSION=$(echo $CUDA_VERSION | awk -F \. {'print $1'})" >> $GITHUB_ENV
