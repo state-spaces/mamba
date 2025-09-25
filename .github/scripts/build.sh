@@ -20,11 +20,16 @@ EXIT_CODE=0
 timeout 5h python setup.py bdist_wheel --dist-dir=dist || EXIT_CODE=$?
 
 if [ $EXIT_CODE -eq 0 ]; then
-MATRIX_TORCH_VERSION=$(echo "$MATRIX_TORCH_VERSION" | tr '+' '_')
-tmpname=cu${WHEEL_CUDA_VERSION}torch${MATRIX_TORCH_VERSION}cxx11abi$CXX11_ABI
-wheel_name=$(ls dist/*whl | xargs -n 1 basename | sed "s/-/+$tmpname-/2")
-ls dist/*whl |xargs -I {} mv {} dist/${wheel_name}
-echo "wheel_name=${wheel_name}" >> $GITHUB_ENV
+    MATRIX_TORCH_VERSION=$(echo "$MATRIX_TORCH_VERSION" | tr '+' '_')
+    tmpname=cu${WHEEL_CUDA_VERSION}torch${MATRIX_TORCH_VERSION}
+
+    if [ -n "$CXX11_ABI" ]; then
+        tmpname="${tmpname}_cxx11abi${CXX11_ABI}"
+    fi
+
+    wheel_name=$(ls dist/*whl | xargs -n 1 basename | sed "s/-/+$tmpname-/2")
+    ls dist/*whl |xargs -I {} mv {} dist/${wheel_name}
+    echo "wheel_name=${wheel_name}" >> $GITHUB_ENV
 fi
 
 echo $EXIT_CODE
