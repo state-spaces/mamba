@@ -93,6 +93,7 @@ jobs:
           EOF
 
           docker exec \
+            --env-file $GITHUB_ENV \	
             -e GITHUB_ENV=$GITHUB_ENV \
             test_container_${{ github.run_id }} bash /workspace/script.sh
 
@@ -110,6 +111,7 @@ jobs:
             -e MATRIX_TORCH_VERSION=$MATRIX_TORCH_VERSION \
             -e WHEEL_CUDA_VERSION=$WHEEL_CUDA_VERSION \
             -e MATRIX_PYTHON_VERSION=$MATRIX_PYTHON_VERSION \
+            --env-file $GITHUB_ENV \
             test_container_${{ github.run_id }} bash /workspace/build-scripts/.github/scripts/build.sh | tail -n 1)
 
       - name: Test wheels
