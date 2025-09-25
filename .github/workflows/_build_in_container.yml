@@ -64,12 +64,13 @@ jobs:
           echo "Free space:"
           df -h
   
+      - name: Pull the container
+        run: docker pull ${{ inputs.container-image }} 
+
       - name: Start container
         run: |
           docker run \
-            -d \
             --rm \
-            --name test_container_${{ github.run_id }} \
             --shm-size=64g \
             --workdir /workspace \
             --volume $(pwd):/workspace \
@@ -92,10 +93,14 @@ jobs:
           cat $GITHUB_ENV
           EOF
 
-          docker exec \
-            --env-file $GITHUB_ENV \
+          docker run \
+            --rm \
+            --shm-size=64g \
+            --workdir /workspace \
+            --volume $(pwd):/workspace \
+            --volume $GITHUB_ENV:$GITHUB_ENV \
             -e GITHUB_ENV=$GITHUB_ENV \
-            test_container_${{ github.run_id }} bash /workspace/script.sh
+            ${{ inputs.container-image }} bash /workspace/script.sh
 
       - name: Build wheel
         id: build_wheel
@@ -105,14 +110,18 @@ jobs:
           WHEEL_CUDA_VERSION: ${{ env.WHEEL_CUDA_VERSION }}
           MATRIX_PYTHON_VERSION: ${{ env.MATRIX_PYTHON_VERSION }}
         run: |
-          EXIT_CODE=$(docker exec \
+          EXIT_CODE=$(docker run \
+            --rm \
+            --shm-size=64g \
+            --workdir /workspace \
+            --volume $(pwd):/workspace \
+            --volume $GITHUB_ENV:$GITHUB_ENV \
             -e GITHUB_ENV=$GITHUB_ENV \
             -e CXX11_ABI=$CXX11_ABI \
             -e MATRIX_TORCH_VERSION=$MATRIX_TORCH_VERSION \
             -e WHEEL_CUDA_VERSION=$WHEEL_CUDA_VERSION \
             -e MATRIX_PYTHON_VERSION=$MATRIX_PYTHON_VERSION \
-            --env-file $GITHUB_ENV \
-            test_container_${{ github.run_id }} bash /workspace/build-scripts/.github/scripts/build.sh | tail -n 1)
+            ${{ inputs.container-image }} bash /workspace/build-scripts/.github/scripts/build.sh | tail -n 1)
 
       - name: Test wheels
         run: docker exec test_container_${{ github.run_id }} bash /workspace/build-scripts/.github/scripts/test.sh
