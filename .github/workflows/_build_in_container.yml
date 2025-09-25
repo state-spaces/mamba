@@ -88,6 +88,8 @@ jobs:
           echo "MATRIX_TORCH_VERSION=$PYTORCH_VERSION" >> $GITHUB_ENV
           echo "WHEEL_CUDA_VERSION=$(echo $CUDA_VERSION | awk -F \. {'print $1'})" >> $GITHUB_ENV
           echo "MATRIX_PYTHON_VERSION=$(python -c "import sys; print('{}.{}'.format(sys.version_info[0], sys.version_info[1]))" | awk -F \. {'print $1 $2'})" >> $GITHUB_ENV
+
+          cat $GITHUB_ENV
           EOF
 
           docker exec \
