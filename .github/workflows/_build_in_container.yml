@@ -75,9 +75,10 @@ jobs:
           set -eoxu pipefail
 
           echo "MATRIX_CUDA_VERSION=$(echo $CUDA_VERSION | awk -F \. {'print $1 $2'})" >> $GITHUB_ENV
-          echo "MATRIX_TORCH_VERSION=$PYTORCH_VERSION" >> $GITHUB_ENV
+          echo "MATRIX_TORCH_VERSION=$NVIDIA_PYTORCH_VERSION" >> $GITHUB_ENV
           echo "WHEEL_CUDA_VERSION=$(echo $CUDA_VERSION | awk -F \. {'print $1'})" >> $GITHUB_ENV
           echo "MATRIX_PYTHON_VERSION=$(python -c "import sys; print('{}.{}'.format(sys.version_info[0], sys.version_info[1]))" | awk -F \. {'print $1 $2'})" >> $GITHUB_ENV
+          echo "CXX11_ABI=$(python -c 'import torch; print(str(torch._C._GLIBCXX_USE_CXX11_ABI).upper())')" >> $GITHUB_ENV
 
           cat $GITHUB_ENV
           EOF
@@ -94,7 +95,7 @@ jobs:
       - name: Build wheel
         id: build_wheel
         env: 
-          CXX11_ABI: ${{ inputs.cxx11_abi }}
+          CXX11_ABI: ${{ env.CXX11_ABI }}
           MATRIX_TORCH_VERSION: ${{ env.MATRIX_TORCH_VERSION}}
           WHEEL_CUDA_VERSION: ${{ env.WHEEL_CUDA_VERSION }}
           MATRIX_PYTHON_VERSION: ${{ env.MATRIX_PYTHON_VERSION }}
