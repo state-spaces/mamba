@@ -303,7 +303,7 @@ def get_wheel_url():
     platform_name = get_platform()
     mamba_ssm_version = get_package_version()
     if os.environ.get("NVIDIA_PRODUCT_NAME", "") == "PyTorch":
-        torch_version = str(os.environ.get("NVIDIA_PYTORCH_VERSION"))
+        torch_version = os.environ.get("PYTORCH_BUILD_VERSION")
     else:
         torch_version = f"{torch_version_raw.major}.{torch_version_raw.minor}"
     cxx11_abi = str(torch._C._GLIBCXX_USE_CXX11_ABI).upper()

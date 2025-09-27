@@ -76,24 +76,6 @@ jobs:
       release-version: ${{ needs.setup_release.outputs.release-version }}
       upload-to-release: true
 
-  build_ngc_wheels:
-    name: Build Wheel for NGC PyTorch
-    needs: setup_release
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-20.04]
-        container-image: 
-          - nvcr.io/nvidia/pytorch:25.05-py3
-          - nvcr.io/nvidia/pytorch:25.06-py3
-          - nvcr.io/nvidia/pytorch:25.08-py3
-    uses: ./.github/workflows/_build.yml
-    with:
-      runs-on: ${{ matrix.runs-on }}
-      container-image: ${{ matrix.container-image }}
-      release-version: ${{ needs.setup_release.outputs.release-version }}
-      upload-to-release: true
-
   publish_package:
     name: Publish package
     needs: [build_wheels]

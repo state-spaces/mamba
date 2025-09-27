@@ -47,11 +47,6 @@ jobs:
         with:
           ref: ${{ inputs.release-version }}
           submodules: recursive
-      
-      - name: Checkout build scripts
-        uses: actions/checkout@v4
-        with:
-          path: build-scripts/
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -125,20 +120,76 @@ jobs:
           python -c "from torch.utils import cpp_extension; print (cpp_extension.CUDA_HOME)"
         shell: bash
 
+      - name: Restore build cache
+        uses: actions/cache/restore@v4
+        with:
+          path: build.tar
+          key: build-${{ inputs.release-version }}-${{ inputs.python-version }}-${{ inputs.cuda-version }}-${{ inputs.torch-version }}-${{ inputs.cxx11_abi }}-${{ github.run_number }}-${{ github.run_attempt }}
+          restore-keys: |
+            build-${{ inputs.release-version }}-${{ inputs.python-version }}-${{ inputs.cuda-version }}-${{ inputs.torch-version }}-${{ inputs.cxx11_abi }}-
+
+      - name: Unpack build cache
+        run: |
+          echo ::group::Adjust timestamps
+          sudo find / -exec touch -t 197001010000 {} + || true
+          echo ::endgroup::
+
+          if [ -f build.tar ]; then
+            find . -mindepth 1 -maxdepth 1 ! -name 'build.tar' -exec rm -rf {} +
+            tar -xpvf build.tar -C .
+          else
+            echo "No build.tar found, skipping"
+          fi
+
+          ls -al ./
+          ls -al build/ || true
+          ls -al csrc/ || true
+
       - name: Build wheel
         id: build_wheel
-        env: 
-          CXX11_ABI: ${{ inputs.cxx11_abi }}
-          MATRIX_TORCH_VERSION: ${{ env.MATRIX_TORCH_VERSION}}
-          WHEEL_CUDA_VERSION: ${{ env.WHEEL_CUDA_VERSION }}
-          MATRIX_PYTHON_VERSION: ${{ env.MATRIX_PYTHON_VERSION }}
         run: |
-          EXIT_CODE=$(bash build-scripts/.github/scripts/build.sh | tail -n 1)
+          # We want setuptools >= 49.6.0 otherwise we can't compile the extension if system CUDA version is 11.7 and pytorch cuda version is 11.6
+          # https://github.com/pytorch/pytorch/blob/664058fa83f1d8eede5d66418abff6e20bd76ca8/torch/utils/cpp_extension.py#L810
+          # However this still fails so I'm using a newer version of setuptools
+          pip install setuptools==68.0.0
+          pip install ninja packaging wheel
+          export PATH=/usr/local/nvidia/bin:/usr/local/nvidia/lib64:$PATH
+          export LD_LIBRARY_PATH=/usr/local/nvidia/lib64:/usr/local/cuda/lib64:$LD_LIBRARY_PATH
+
+          # Limit MAX_JOBS otherwise the github runner goes OOM
+          export MAX_JOBS=2 
+          export MAMBA_FORCE_BUILD="TRUE" 
+          export MAMBA_FORCE_CXX11_ABI=${{ inputs.cxx11_abi}} 
+
+          # 5h timeout since GH allows max 6h and we want some buffer
+          EXIT_CODE=0
+          timeout 5h python setup.py bdist_wheel --dist-dir=dist || EXIT_CODE=$?
+
+          if [ $EXIT_CODE -eq 0 ]; then
+            tmpname=cu${WHEEL_CUDA_VERSION}torch${MATRIX_TORCH_VERSION}cxx11abi${{ inputs.cxx11_abi }}
+            wheel_name=$(ls dist/*whl | xargs -n 1 basename | sed "s/-/+$tmpname-/2")
+            ls dist/*whl |xargs -I {} mv {} dist/${wheel_name}
+            echo "wheel_name=${wheel_name}" >> $GITHUB_ENV
+          fi
 
           # Store exit code in GitHub env for later steps
           echo "build_exit_code=$EXIT_CODE" | tee -a "$GITHUB_OUTPUT"
 
+          # Do not fail the job if timeout killed the build
           exit $EXIT_CODE
+
+      - name: Log build logs after timeout
+        if: always() && steps.build_wheel.outputs.build_exit_code == 124
+        run: |
+          ls -al ./
+          tar -cvf build.tar . --atime-preserve=replace
+
+      - name: Save build cache timeout
+        if: always() && steps.build_wheel.outputs.build_exit_code == 124
+        uses: actions/cache/save@v4
+        with:
+          key: build-${{ inputs.release-version }}-${{ inputs.python-version }}-${{ inputs.cuda-version }}-${{ inputs.torch-version }}-${{ inputs.cxx11_abi }}-${{ github.run_number }}-${{ github.run_attempt }}
+          path: build.tar
 
       - name: Log Built Wheels
         run: |
