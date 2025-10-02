@@ -18,11 +18,9 @@ classifiers = [
 dependencies = [
     "torch",
     "triton",
-    "ninja",
     "einops",
     "transformers",
     "packaging",
-    "setuptools>=61.0.0",
 ]
 [project.urls]
 Repository = "https://github.com/state-spaces/mamba"
