@@ -100,7 +100,7 @@ jobs:
         container-image: ${{ fromJson(needs.check_for_ngc_images.outputs.images) }}
     uses: ./.github/workflows/_build_in_container.yml
     with:
-      runs-on: ${{ matrix.runs-on }}
+      runs-on: ${{ matrix.os }}
       container-image: ${{ matrix.container-image }}
       release-version: ${{ needs.setup_release.outputs.release-version }}
       upload-to-release: true
