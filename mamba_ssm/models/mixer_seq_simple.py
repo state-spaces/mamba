@@ -26,20 +26,25 @@ except ImportError:
     RMSNorm, layer_norm_fn, rms_norm_fn = None, None, None
 
 
+from typing import Dict, List, Optional, Tuple, Union
+import torch
+from torch import nn, Tensor
+
+
 def create_block(
-    d_model,
-    d_intermediate,
-    ssm_cfg=None,
-    attn_layer_idx=None,
-    attn_cfg=None,
-    norm_epsilon=1e-5,
-    rms_norm=False,
-    residual_in_fp32=False,
-    fused_add_norm=False,
-    layer_idx=None,
-    device=None,
-    dtype=None,
-):
+    d_model: int,
+    d_intermediate: int,
+    ssm_cfg: Optional[Dict] = None,
+    attn_layer_idx: Optional[List[int]] = None,
+    attn_cfg: Optional[Dict] = None,
+    norm_epsilon: float = 1e-5,
+    rms_norm: bool = False,
+    residual_in_fp32: bool = False,
+    fused_add_norm: bool = False,
+    layer_idx: Optional[int] = None,
+    device: Optional[Union[str, torch.device]] = None,
+    dtype: Optional[torch.dtype] = None,
+) -> nn.Module:
     if ssm_cfg is None:
         ssm_cfg = {}
     if attn_layer_idx is None:
@@ -88,7 +93,7 @@ def _init_weights(
     n_layer,
     initializer_range=0.02,  # Now only used for embedding layer.
     rescale_prenorm_residual=True,
-    n_residuals_per_layer=1,  # Change to 2 if we have MLP
+    n_residuals_per_layer=1,
 ):
     if isinstance(module, nn.Linear):
         if module.bias is not None:
@@ -122,16 +127,16 @@ class MixerModel(nn.Module):
         n_layer: int,
         d_intermediate: int,
         vocab_size: int,
-        ssm_cfg=None,
-        attn_layer_idx=None,
-        attn_cfg=None,
+        ssm_cfg: Optional[Dict] = None,
+        attn_layer_idx: Optional[List[int]] = None,
+        attn_cfg: Optional[Dict] = None,
         norm_epsilon: float = 1e-5,
         rms_norm: bool = False,
-        initializer_cfg=None,
-        fused_add_norm=False,
-        residual_in_fp32=False,
-        device=None,
-        dtype=None,
+        initializer_cfg: Optional[Dict] = None,
+        fused_add_norm: bool = False,
+        residual_in_fp32: bool = False,
+        device: Optional[Union[str, torch.device]] = None,
+        dtype: Optional[torch.dtype] = None,
     ) -> None:
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
@@ -187,7 +192,12 @@ class MixerModel(nn.Module):
             for i, layer in enumerate(self.layers)
         }
 
-    def forward(self, input_ids, inference_params=None, **mixer_kwargs):
+    def forward(
+        self,
+        input_ids: Tensor,
+        inference_params = None,
+        **mixer_kwargs
+    ) -> Tuple[Tensor, Optional[Dict[str, Tensor]]]:
         hidden_states = self.embedding(input_ids)
         residual = None
         for layer in self.layers:
@@ -213,13 +223,12 @@ class MixerModel(nn.Module):
 
 
 class MambaLMHeadModel(nn.Module, GenerationMixin):
-
     def __init__(
         self,
         config: MambaConfig,
-        initializer_cfg=None,
-        device=None,
-        dtype=None,
+        initializer_cfg: Optional[Dict] = None,
+        device: Optional[Union[str, torch.device]] = None,
+        dtype: Optional[torch.dtype] = None,
     ) -> None:
         self.config = config
         d_model = config.d_model
@@ -271,7 +280,14 @@ class MambaLMHeadModel(nn.Module, GenerationMixin):
     def allocate_inference_cache(self, batch_size, max_seqlen, dtype=None, **kwargs):
         return self.backbone.allocate_inference_cache(batch_size, max_seqlen, dtype=dtype, **kwargs)
 
-    def forward(self, input_ids, position_ids=None, inference_params=None, num_last_tokens=0, **mixer_kwargs):
+    def forward(
+        self,
+        input_ids: Tensor,
+        position_ids: Optional[Tensor] = None,
+        inference_params = None,
+        num_last_tokens: int = 0,
+        **mixer_kwargs
+    ) -> Union[Tensor, Tuple[Tensor, Dict[str, Tensor]]]:
         """
         "position_ids" is just to be compatible with Transformer generation. We don't use it.
         num_last_tokens: if > 0, only return the logits for the last n tokens
