@@ -88,7 +88,7 @@ jobs:
         id: check_for_ngc_images
         run: |
           bash ./.github/scripts/check_for_ngc_images.sh
-          echo "IMAGES=$(cat ngc_images.json| jq -cr)" >> $GITHUB_OUTPUT
+          echo "IMAGES=$(cat ngc_images.json| jq -cr)" | tee -a $GITHUB_OUTPUT
 
   build_ngc_wheels:
     name: Build Wheel for NGC PyTorch
@@ -97,10 +97,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-22.04]
-        container-image:
-          - nvcr.io/nvidia/pytorch:25.05-py3
-          - nvcr.io/nvidia/pytorch:25.06-py3
-          - nvcr.io/nvidia/pytorch:25.08-py3
+        container-image: ${{ fromJson(needs.check_for_ngc_images.outputs.images) }}
     uses: ./.github/workflows/_build_in_container.yml
     with:
       runs-on: ${{ matrix.runs-on }}
