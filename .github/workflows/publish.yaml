@@ -76,9 +76,23 @@ jobs:
       release-version: ${{ needs.setup_release.outputs.release-version }}
       upload-to-release: true
 
+  check_for_ngc_images:
+    runs-on: ubuntu-latest
+    outputs:
+      images: ${{ steps.check_for_ngc_images.outputs.IMAGES }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check for NGC PyTorch images
+        id: check_for_ngc_images
+        run: |
+          bash ./.github/scripts/check_for_ngc_images.sh
+          echo "IMAGES=$(cat ngc_images.json| jq -cr)" >> $GITHUB_OUTPUT
+
   build_ngc_wheels:
     name: Build Wheel for NGC PyTorch
-    needs: setup_release
+    needs: [setup_release, check_for_ngc_images]
     strategy:
       fail-fast: false
       matrix:
