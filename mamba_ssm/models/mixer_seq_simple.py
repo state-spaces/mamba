@@ -1,24 +1,20 @@
 # Copyright (c) 2023, Albert Gu, Tri Dao.
-
-import math
-from functools import partial
-import json
-import os
 import copy
-
+import math
 from collections import namedtuple
+from functools import partial
 
 import torch
 import torch.nn as nn
+from huggingface_hub import PyTorchModelHubMixin
 
 from mamba_ssm.models.config_mamba import MambaConfig
-from mamba_ssm.modules.mamba_simple import Mamba
+from mamba_ssm.modules.block import Block
 from mamba_ssm.modules.mamba2 import Mamba2
+from mamba_ssm.modules.mamba_simple import Mamba
 from mamba_ssm.modules.mha import MHA
 from mamba_ssm.modules.mlp import GatedMLP
-from mamba_ssm.modules.block import Block
 from mamba_ssm.utils.generation import GenerationMixin
-from mamba_ssm.utils.hf import load_config_hf, load_state_dict_hf
 
 try:
     from mamba_ssm.ops.triton.layer_norm import RMSNorm, layer_norm_fn, rms_norm_fn
@@ -212,7 +208,15 @@ class MixerModel(nn.Module):
         return hidden_states
 
 
-class MambaLMHeadModel(nn.Module, GenerationMixin):
+class MambaLMHeadModel(
+        nn.Module,
+        GenerationMixin,
+        PyTorchModelHubMixin,
+        library_name="mamba-ssm",
+        repo_url="https://github.com/state-spaces/mamba",
+        tags=["arXiv:2312.00752", "arXiv:2405.21060"],
+        pipeline_tag="text-generation",
+    ):
 
     def __init__(
         self,
@@ -283,27 +287,3 @@ class MambaLMHeadModel(nn.Module, GenerationMixin):
         CausalLMOutput = namedtuple("CausalLMOutput", ["logits"])
         return CausalLMOutput(logits=lm_logits)
 
-    @classmethod
-    def from_pretrained(cls, pretrained_model_name, device=None, dtype=None, **kwargs):
-        config_data = load_config_hf(pretrained_model_name)
-        config = MambaConfig(**config_data)
-        model = cls(config, device=device, dtype=dtype, **kwargs)
-        model.load_state_dict(load_state_dict_hf(pretrained_model_name, device=device, dtype=dtype))
-        return model
-
-    def save_pretrained(self, save_directory):
-        """
-        Minimal implementation of save_pretrained for MambaLMHeadModel.
-        Save the model and its configuration file to a directory.
-        """
-        # Ensure save_directory exists
-        os.makedirs(save_directory, exist_ok=True)
-
-        # Save the model's state_dict
-        model_path = os.path.join(save_directory, 'pytorch_model.bin')
-        torch.save(self.state_dict(), model_path)
-
-        # Save the configuration of the model
-        config_path = os.path.join(save_directory, 'config.json')
-        with open(config_path, 'w') as f:
-            json.dump(self.config.__dict__, f, indent=4)
