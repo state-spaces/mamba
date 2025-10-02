@@ -1,16 +1,10 @@
 # Copyright (c) 2023, Albert Gu, Tri Dao.
 import gc
-import time
-from collections import namedtuple
 from dataclasses import dataclass, field
-from functools import partial
-from typing import Callable, Optional, Sequence, Union
+from typing import Callable, Optional
 
 import torch
-import torch.nn.functional as F
-from einops import rearrange, repeat
 from torch import Tensor
-from torch.profiler import ProfilerActivity, profile, record_function
 from transformers.generation import GreedySearchDecoderOnlyOutput, SampleDecoderOnlyOutput, TextStreamer
 
 

@@ -5,9 +5,8 @@ from mamba_ssm.models.mixer_seq_simple import MambaLMHeadModel
 from mamba_ssm.models.config_mamba import MambaConfig
 from mamba_ssm.utils.generation import InferenceParams
 
-import pytest
 
-from einops import rearrange, repeat
+from einops import rearrange
 
 
 def test_generation():
