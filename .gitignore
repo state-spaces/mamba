@@ -4,3 +4,5 @@ build/
 **.so
 *.hip
 *_hip.*
+.idea/
+dist/
