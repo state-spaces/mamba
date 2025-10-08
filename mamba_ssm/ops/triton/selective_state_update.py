@@ -51,9 +51,17 @@ def _selective_scan_update_kernel(
     pid_b = tl.program_id(axis=1)
     pid_h = tl.program_id(axis=2)
 
+    offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    out_ptr += pid_b * stride_out_batch + pid_h * stride_out_head
+    out_ptrs = out_ptr + offs_m * stride_out_dim
+
     if HAS_STATE_BATCH_INDICES:
         state_batch_indices_ptr += pid_b
         state_batch_idx = tl.load(state_batch_indices_ptr)
+        # Skip padding tokens
+        if state_batch_idx < 0:
+            tl.store(out_ptrs, 0.0, mask=offs_m < dim)
+            return
         state_ptr += state_batch_idx * stride_state_batch + pid_h * stride_state_head
     else:
         state_ptr += pid_b * stride_state_batch + pid_h * stride_state_head
@@ -67,9 +75,7 @@ def _selective_scan_update_kernel(
     C_ptr += pid_b * stride_C_batch + (pid_h // nheads_ngroups_ratio) * stride_C_group
     if HAS_Z:
         z_ptr += pid_b * stride_z_batch + pid_h * stride_z_head
-    out_ptr += pid_b * stride_out_batch + pid_h * stride_out_head
 
-    offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_n = tl.arange(0, BLOCK_SIZE_DSTATE)
     state_ptrs = state_ptr + (offs_m[:, None] * stride_state_dim + offs_n[None, :] * stride_state_dstate)
     x_ptrs = x_ptr + offs_m * stride_x_dim
@@ -85,7 +91,6 @@ def _selective_scan_update_kernel(
         D_ptrs = D_ptr + offs_m * stride_D_dim
     if HAS_Z:
         z_ptrs = z_ptr + offs_m * stride_z_dim
-    out_ptrs = out_ptr + offs_m * stride_out_dim
 
     state = tl.load(state_ptrs, mask=(offs_m[:, None] < dim) & (offs_n[None, :] < dstate), other=0.0)
     x = tl.load(x_ptrs, mask=offs_m < dim, other=0.0).to(tl.float32)
