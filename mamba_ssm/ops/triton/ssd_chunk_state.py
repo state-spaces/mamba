@@ -48,9 +48,9 @@ def _chunk_cumsum_fwd_kernel(
     HAS_DT_BIAS: tl.constexpr,
     BLOCK_SIZE_H: tl.constexpr, BLOCK_SIZE_CHUNK: tl.constexpr,
 ):
-    pid_b = tl.program_id(axis=0)
-    pid_c = tl.program_id(axis=1)
-    pid_h = tl.program_id(axis=2)
+    pid_b = tl.program_id(axis=0).to(tl.int64)
+    pid_c = tl.program_id(axis=1).to(tl.int64)
+    pid_h = tl.program_id(axis=2).to(tl.int64)
     dt_ptr += pid_b * stride_dt_batch + pid_c * chunk_size * stride_dt_seqlen
     dt_out_ptr += pid_b * stride_dt_out_batch + pid_c * stride_dt_out_chunk
     dA_cumsum_ptr += pid_b * stride_dA_cs_batch + pid_c * stride_dA_cs_chunk
@@ -191,13 +191,13 @@ def _chunk_state_fwd_kernel(
     HAS_SEQ_IDX: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
 ):
-    pid_bc = tl.program_id(axis=1)
+    pid_bc = tl.program_id(axis=1).to(tl.int64)
     pid_c = pid_bc // batch
     pid_b = pid_bc - pid_c * batch
-    pid_h = tl.program_id(axis=2)
+    pid_h = tl.program_id(axis=2).to(tl.int64)
     num_pid_n = tl.cdiv(dstate, BLOCK_SIZE_N)
-    pid_m = tl.program_id(axis=0) // num_pid_n
-    pid_n = tl.program_id(axis=0) % num_pid_n
+    pid_m = tl.program_id(axis=0).to(tl.int64) // num_pid_n
+    pid_n = tl.program_id(axis=0).to(tl.int64) % num_pid_n
     b_ptr += pid_b * stride_b_batch + pid_c * chunk_size * stride_b_seqlen + (pid_h // nheads_ngroups_ratio) * stride_b_head
     x_ptr += pid_b * stride_x_batch + pid_c * chunk_size * stride_x_seqlen + pid_h * stride_x_head
     dt_ptr += pid_b * stride_dt_batch + pid_c * stride_dt_chunk + pid_h * stride_dt_head
