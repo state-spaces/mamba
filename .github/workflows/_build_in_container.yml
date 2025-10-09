@@ -39,11 +39,11 @@ jobs:
           root-reserve-mb: 5120
           temp-reserve-mb: 32
           swap-size-mb: 10240
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
-          build-mount-path: '/var/lib/docker/'
+          remove-dotnet: "true"
+          remove-android: "true"
+          remove-haskell: "true"
+          remove-codeql: "true"
+          build-mount-path: "/var/lib/docker/"
 
       - name: Restore /var/lib/docker/
         run: sudo sh -c "mv ${GITHUB_WORKSPACE}/docker/* /var/lib/docker"
@@ -63,9 +63,9 @@ jobs:
         run: |
           echo "Free space:"
           df -h
-  
+
       - name: Pull the container
-        run: docker pull ${{ inputs.container-image }} 
+        run: docker pull ${{ inputs.container-image }}
 
       - name: Set CUDA and PyTorch versions
         run: |
@@ -94,7 +94,7 @@ jobs:
 
       - name: Build wheel
         id: build_wheel
-        env: 
+        env:
           CXX11_ABI: ${{ env.CXX11_ABI }}
           MATRIX_TORCH_VERSION: ${{ env.MATRIX_TORCH_VERSION}}
           WHEEL_CUDA_VERSION: ${{ env.WHEEL_CUDA_VERSION }}
@@ -106,6 +106,7 @@ jobs:
             --workdir /workspace \
             --volume $(pwd):/workspace \
             --volume $GITHUB_ENV:$GITHUB_ENV \
+            -e PIP_CONSTRAINT= \
             -e GITHUB_ENV=$GITHUB_ENV \
             -e CXX11_ABI=$CXX11_ABI \
             -e MATRIX_TORCH_VERSION=$MATRIX_TORCH_VERSION \
