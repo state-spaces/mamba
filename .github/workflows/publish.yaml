@@ -96,7 +96,7 @@ jobs:
 
   publish_package:
     name: Publish package
-    needs: [build_wheels]
+    needs: [build_wheels, build_ngc_wheels]
 
     runs-on: ubuntu-latest
 
@@ -119,9 +119,15 @@ jobs:
         run: |
           python setup.py sdist --dist-dir=dist
 
-      - name: Deploy
-        env:
-          TWINE_USERNAME: "__token__"
-          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-        run: |
-          python -m twine upload dist/*
+      - name: Download all wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          merge-multiple: true
+          path: dist
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          packages-dir: dist
