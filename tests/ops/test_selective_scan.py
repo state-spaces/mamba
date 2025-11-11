@@ -35,8 +35,9 @@ from mamba_ssm.ops.selective_scan_interface import mamba_inner_fn, mamba_inner_r
 @pytest.mark.parametrize("is_variable_C", [True])
 # @pytest.mark.parametrize("is_variable_B", [False, True])
 @pytest.mark.parametrize("is_variable_B", [True])
+@pytest.mark.parametrize("scan_chunks", [1,2,3])
 def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D, has_z, has_delta_bias,
-                        delta_softplus, return_last_state, seqlen, itype, wtype):
+                        delta_softplus, return_last_state, seqlen, itype, wtype, scan_chunks):
     if varBC_groups > 1 and (not is_variable_B or not is_variable_C):
         pytest.skip()  # This config is not applicable
     device = 'cuda'
@@ -92,13 +93,34 @@ def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D, has_z
     u_ref = u.detach().clone().requires_grad_()
     delta_ref = delta.detach().clone().requires_grad_()
     delta_bias_ref = delta_bias.detach().clone().requires_grad_() if delta_bias is not None else None
-    out, *rest = selective_scan_fn(
-        u, delta, A, B, C, D, z=z,
-        delta_bias=delta_bias, delta_softplus=delta_softplus,
-        return_last_state=return_last_state
-    )
-    if return_last_state:
-        state = rest[0]
+    state = None
+    state_ref = None
+    outs = []
+    for c in range(scan_chunks):
+        chunked_prompt_len = seqlen // scan_chunks
+        chunk_start = chunked_prompt_len * c
+        chunk_end = chunked_prompt_len * (c + 1)
+        if c == scan_chunks - 1:
+            chunk_end = seqlen
+        _B = B
+        if is_variable_B:
+            _B = B[...,chunk_start:chunk_end]
+        _C = C
+        if is_variable_B:
+            _C = C[...,chunk_start:chunk_end]
+        _z = z
+        if has_z:
+            _z = z[...,chunk_start:chunk_end]
+        out, *rest = selective_scan_fn(
+            u[...,chunk_start:chunk_end], delta[...,chunk_start:chunk_end], A, _B, _C, D, z=_z,
+            delta_bias=delta_bias, delta_softplus=delta_softplus,
+            return_last_state=return_last_state,prev_state=state if c > 0 else None
+        )
+        outs.append(out)
+        if return_last_state:
+            state = rest[0]
+    if len(outs) > 1:
+        out = torch.cat(outs,dim=-1)
     out_ref, *rest = selective_scan_ref(
         u_ref, delta_ref, A_ref, B_ref, C_ref, D_ref, z=z_ref,
         delta_bias=delta_bias_ref, delta_softplus=delta_softplus,
@@ -115,6 +137,9 @@ def test_selective_scan(is_variable_B, is_variable_C, varBC_groups, has_D, has_z
     if return_last_state:
         print(f'State max diff: {(state - state_ref).abs().max().item()}')
         assert torch.allclose(state, state_ref, rtol=rtol, atol=atol)
+    if scan_chunks > 1:
+        # skip grad test in case of scan chunks ( not supported atm )
+        return
 
     g = torch.randn_like(out)
     out_ref.backward(g)
