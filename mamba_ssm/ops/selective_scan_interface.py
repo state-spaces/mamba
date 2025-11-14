@@ -173,7 +173,7 @@ def selective_scan_ref(u, delta, A, B, C, D=None, z=None, delta_bias=None, delta
         if y.is_complex():
             y = y.real * 2
         ys.append(y)
-    y = torch.stack(ys, dim=2) # (batch dim L)
+    y = torch.stack(ys, dim=2)  # (batch, dim, L)
     out = y if D is None else y + u * rearrange(D, "d -> d 1")
     if z is not None:
         out = out * F.silu(z)
@@ -385,7 +385,8 @@ def mamba_inner_ref(
     xz, conv1d_weight, conv1d_bias, x_proj_weight, delta_proj_weight,
     out_proj_weight, out_proj_bias,
     A, B=None, C=None, D=None, delta_bias=None, B_proj_bias=None,
-    C_proj_bias=None, delta_softplus=True
+    C_proj_bias=None, delta_softplus=True,
+    b_rms_weight=None, c_rms_weight=None, dt_rms_weight=None, b_c_dt_rms_eps=1e-6
 ):
     assert causal_conv1d_fn is not None, "causal_conv1d_fn is not available. Please install causal-conv1d."
     L = xz.shape[-1]
@@ -399,21 +400,39 @@ def mamba_inner_ref(
     x_dbl = F.linear(rearrange(x, 'b d l -> (b l) d'), x_proj_weight)  # (bl d)
     delta = delta_proj_weight @ x_dbl[:, :delta_rank].t()
     delta = rearrange(delta, "d (b l) -> b d l", l=L)
+
+    if dt_rms_weight is not None:
+        delta_reshaped = rearrange(delta, "b d l -> (b l) d").contiguous()
+        delta_reshaped = rms_norm_forward(delta_reshaped, dt_rms_weight, bias=None, eps=b_c_dt_rms_eps)
+        delta = rearrange(delta_reshaped, "(b l) d -> b d l", l=L).contiguous()
+
     if B is None:  # variable B
         B = x_dbl[:, delta_rank:delta_rank + d_state]  # (bl d)
         if B_proj_bias is not None:
             B = B + B_proj_bias.to(dtype=B.dtype)
         if not A.is_complex():
-            B = rearrange(B, "(b l) dstate -> b dstate l", l=L).contiguous()
+            B = rearrange(B, "(b l) dstate -> b dstate l", l=L)
         else:
-            B = rearrange(B, "(b l) (dstate two) -> b dstate (l two)", l=L, two=2).contiguous()
+            B = rearrange(B, "(b l) (dstate two) -> b dstate (l two)", l=L, two=2)
+        if b_rms_weight is not None:
+            B_reshaped = rearrange(B, "b dstate l -> (b l) dstate").contiguous()
+            B_reshaped = rms_norm_forward(B_reshaped, b_rms_weight, bias=None, eps=b_c_dt_rms_eps)
+            B = rearrange(B_reshaped, "(b l) dstate -> b dstate l", l=L).contiguous()
+        else:
+            B = B.contiguous() # Ensure contiguity if not already handled by RMSNorm path
     if C is None:  # variable B
         C = x_dbl[:, -d_state:]  # (bl d)
         if C_proj_bias is not None:
             C = C + C_proj_bias.to(dtype=C.dtype)
         if not A.is_complex():
-            C = rearrange(C, "(b l) dstate -> b dstate l", l=L).contiguous()
+            C = rearrange(C, "(b l) dstate -> b dstate l", l=L)
         else:
-            C = rearrange(C, "(b l) (dstate two) -> b dstate (l two)", l=L, two=2).contiguous()
+            C = rearrange(C, "(b l) (dstate two) -> b dstate (l two)", l=L, two=2)
+        if c_rms_weight is not None:
+            C_reshaped = rearrange(C, "b dstate l -> (b l) dstate").contiguous()
+            C_reshaped = rms_norm_forward(C_reshaped, c_rms_weight, bias=None, eps=b_c_dt_rms_eps)
+            C = rearrange(C_reshaped, "(b l) dstate -> b dstate l", l=L).contiguous()
+        else:
+            C = C.contiguous() # Ensure contiguity if not already handled by RMSNorm path
     y = selective_scan_fn(x, delta, A, B, C, D, z=z, delta_bias=delta_bias, delta_softplus=True)
     return F.linear(rearrange(y, "b d l -> b l d"), out_proj_weight, out_proj_bias)
