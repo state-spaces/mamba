@@ -15,6 +15,11 @@ import triton.language as tl
 from einops import rearrange, repeat
 
 from mamba_ssm.ops.triton.ssd_bmm import _bmm_chunk_fwd, _bmm_chunk_bwd
+from mamba_ssm.utils.determinism import (
+    alloc_tile_workspace,
+    finalize_tile_workspace,
+    use_deterministic_mode,
+)
 
 TRITON_22 = version.parse(triton.__version__) >= version.parse('2.2.0')
 
@@ -535,10 +540,11 @@ def _chunk_scan_bwd_dc_kernel(
     stride_dA_cs_batch, stride_dA_cs_chunk, stride_dA_cs_head, stride_dA_cs_csize,
     stride_seq_idx_batch, stride_seq_idx_seqlen,
     stride_dc_batch, stride_dc_seqlen, stride_dc_split, stride_dc_group, stride_dc_dstate,
-    stride_ddA_cs_batch, stride_ddA_cs_chunk, stride_ddA_cs_head, stride_ddA_cs_csize,
+    stride_ddA_cs_batch, stride_ddA_cs_chunk, stride_ddA_cs_head, stride_ddA_cs_csize, stride_ddA_tile,
     # Meta-parameters
     HAS_DDA_CS: tl.constexpr,
     HAS_SEQ_IDX: tl.constexpr,
+    DETERMINISTIC_REDUCTION: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
 ):
     pid_bc = tl.program_id(axis=1)
@@ -556,7 +562,7 @@ def _chunk_scan_bwd_dc_kernel(
     dA_cumsum_ptr += pid_b * stride_dA_cs_batch + pid_c * stride_dA_cs_chunk + (pid_g * (nheads // ngroups) + pid_s * nheads_per_program) * stride_dA_cs_head
     if HAS_DDA_CS:
         C_ptr += pid_b * stride_C_batch + pid_c * chunk_size * stride_C_seqlen + pid_g * stride_C_head
-        ddA_cumsum_ptr += pid_b * stride_ddA_cs_batch + pid_c * stride_ddA_cs_chunk + (pid_g * (nheads // ngroups) + pid_s * nheads_per_program) * stride_ddA_cs_head
+        ddA_cumsum_ptr += pid_b * stride_ddA_cs_batch + pid_c * stride_ddA_cs_chunk + (pid_g * (nheads // ngroups) + pid_s * nheads_per_program) * stride_ddA_cs_head + pid_n * stride_ddA_tile
     if HAS_SEQ_IDX:
         seq_idx_ptr += pid_b * stride_seq_idx_batch + pid_c * chunk_size * stride_seq_idx_seqlen
 
@@ -591,7 +597,10 @@ def _chunk_scan_bwd_dc_kernel(
         dc *= scale[:, None]
         if HAS_DDA_CS:
             ddA_cs = tl.sum(dc * c, axis=1)
-            tl.atomic_add(ddA_cumsum_ptrs, ddA_cs, mask=offs_m < chunk_size)
+            if DETERMINISTIC_REDUCTION:
+                tl.store(ddA_cumsum_ptrs, ddA_cs, mask=offs_m < chunk_size)
+            else:
+                tl.atomic_add(ddA_cumsum_ptrs, ddA_cs, mask=offs_m < chunk_size)
         acc += dc
         dout_ptrs += stride_dout_head
         prev_states_ptrs += stride_prev_states_head
@@ -606,6 +615,11 @@ def _chunk_scan_bwd_dc_kernel(
     offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     dc_ptrs = dc_ptr + (offs_m[:, None] * stride_dc_seqlen + offs_n[None, :] * stride_dc_dstate)
     tl.store(dc_ptrs, acc, mask=(offs_m[:, None] < chunk_size_limit) & (offs_n[None, :] < dstate))
+
+
+_CHUNK_SCAN_BWD_DC_MIN_BLOCK_N = min(
+    cfg.kwargs['BLOCK_SIZE_N'] for cfg in _chunk_scan_bwd_dc_kernel.configs
+)
 
 
 @triton.autotune(
@@ -638,11 +652,12 @@ def _chunk_scan_bwd_dx_kernel(
     stride_dA_cs_batch, stride_dA_cs_chunk, stride_dA_cs_head, stride_dA_cs_csize,
     stride_D_head,
     stride_dx_batch, stride_dx_seqlen, stride_dx_head, stride_dx_hdim,
-    stride_ddt_batch, stride_ddt_chunk, stride_ddt_head, stride_ddt_csize,
+    stride_ddt_batch, stride_ddt_chunk, stride_ddt_head, stride_ddt_csize, stride_ddt_tile,
     # stride_dD_batch, stride_dD_chunk, stride_dD_head, stride_dD_hdim, stride_dD_csize,
     # Meta-parameters
     HAS_D: tl.constexpr,
     D_HAS_HDIM: tl.constexpr,
+    DETERMINISTIC_REDUCTION: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
 ):
     pid_bc = tl.program_id(axis=1)
@@ -656,7 +671,7 @@ def _chunk_scan_bwd_dx_kernel(
     cb_ptr += pid_b * stride_cb_batch + pid_c * stride_cb_chunk + (pid_h // nheads_ngroups_ratio) * stride_cb_head
     dout_ptr += pid_b * stride_dout_batch + pid_c * chunk_size * stride_dout_seqlen + pid_h * stride_dout_head
     dt_ptr += pid_b * stride_dt_batch + pid_c * stride_dt_chunk + pid_h * stride_dt_head
-    ddt_ptr += pid_b * stride_ddt_batch + pid_c * stride_ddt_chunk + pid_h * stride_ddt_head
+    ddt_ptr += pid_b * stride_ddt_batch + pid_c * stride_ddt_chunk + pid_h * stride_ddt_head + pid_n * stride_ddt_tile
     dA_cumsum_ptr += pid_b * stride_dA_cs_batch + pid_c * stride_dA_cs_chunk + pid_h * stride_dA_cs_head
     # if HAS_D:
     #     dD_ptr += pid_b * stride_dD_batch + pid_c * stride_dD_chunk + pid_h * stride_dD_head + pid_m * stride_dD_csize
@@ -715,13 +730,21 @@ def _chunk_scan_bwd_dx_kernel(
     x = tl.load(x_ptrs, mask=(offs_m[:, None] < chunk_size_limit) & (offs_n[None, :] < hdim), other=0.0).to(tl.float32)
     ddt = tl.sum(acc * x, axis=1)
     ddt_ptrs = ddt_ptr + offs_m * stride_ddt_csize
-    tl.atomic_add(ddt_ptrs, ddt, mask=offs_m < chunk_size)
+    if DETERMINISTIC_REDUCTION:
+        tl.store(ddt_ptrs, ddt, mask=offs_m < chunk_size)
+    else:
+        tl.atomic_add(ddt_ptrs, ddt, mask=offs_m < chunk_size)
 
     # if HAS_D:
     #     dout_new_ptrs = dout_ptr + (offs_m[:, None] * stride_dout_csize + offs_n[None, :] * stride_dout_hdim)
     #     dout = tl.load(dout_new_ptrs, mask=(offs_m[:, None] < M) & (offs_n[None, :] < N), other=0.0).to(tl.float32)
     #     dD = tl.sum(x * dout, axis=0)
     #     tl.store(dD_ptr + offs_n * stride_dD_hdim, dD, mask=offs_n < N)
+
+
+_CHUNK_SCAN_BWD_DX_MIN_BLOCK_N = min(
+    cfg.kwargs['BLOCK_SIZE_N'] for cfg in _chunk_scan_bwd_dx_kernel.configs
+)
 
 
 # Disabling HAS_DDA_CS for now since it's much slower
@@ -1433,15 +1456,30 @@ def _chunk_scan_bwd_dC(prev_states, dA_cumsum, dout, seq_idx=None, C=None, ngrou
     assert dout.shape == (batch, seqlen, nheads, headdim)
     if seq_idx is not None:
         assert seq_idx.shape == (batch, seqlen)
+    deterministic = use_deterministic_mode()
     if C is not None:
         assert C.shape == (batch, seqlen, ngroups, dstate)
         C_strides = (C.stride(0), C.stride(1), C.stride(2), C.stride(3))
-        ddA_cumsum_prev = torch.empty(batch, nheads, nchunks, chunk_size, device=dout.device, dtype=torch.float32)
-        ddA_cumsum_prev_strides = (ddA_cumsum_prev.stride(0), ddA_cumsum_prev.stride(2), ddA_cumsum_prev.stride(1), ddA_cumsum_prev.stride(3))
+        tile_count = math.ceil(dstate / _CHUNK_SCAN_BWD_DC_MIN_BLOCK_N)
+        ddA_cumsum_prev, stride_ddA_tile = alloc_tile_workspace(
+            (batch, nheads, nchunks, chunk_size),
+            tile_count,
+            torch.float32,
+            dout.device,
+            deterministic,
+            zero_init=True,
+        )
+        ddA_cumsum_prev_strides = (
+            ddA_cumsum_prev.stride(0),
+            ddA_cumsum_prev.stride(2),
+            ddA_cumsum_prev.stride(1),
+            ddA_cumsum_prev.stride(3),
+        )
     else:
         C_strides = (0, 0, 0, 0)
         ddA_cumsum_prev = None
         ddA_cumsum_prev_strides = (0, 0, 0, 0)
+        stride_ddA_tile = 0
     nheads_ngroups_ratio = nheads // ngroups
     sm_count = torch.cuda.get_device_properties(dout.device).multi_processor_count
     nheads_per_program = max(min(math.ceil(batch * nchunks * nheads / sm_count), nheads_ngroups_ratio), 1)
@@ -1460,12 +1498,15 @@ def _chunk_scan_bwd_dC(prev_states, dA_cumsum, dout, seq_idx=None, C=None, ngrou
             dA_cumsum.stride(0), dA_cumsum.stride(2), dA_cumsum.stride(1), dA_cumsum.stride(3),
             *((seq_idx.stride(0), seq_idx.stride(1)) if seq_idx is not None else (0, 0)),
             dC.stride(0), dC.stride(1), dC.stride(2), dC.stride(3), dC.stride(4),
-            *ddA_cumsum_prev_strides,
+            *ddA_cumsum_prev_strides, stride_ddA_tile,
             HAS_DDA_CS=ddA_cumsum_prev is not None,
             HAS_SEQ_IDX=seq_idx is not None,
+            DETERMINISTIC_REDUCTION=deterministic,
             BLOCK_SIZE_K=max(triton.next_power_of_2(headdim), 16),
         )
     dC = dC.sum(2)
+    if ddA_cumsum_prev is not None:
+        ddA_cumsum_prev = finalize_tile_workspace(ddA_cumsum_prev, deterministic)
     return dC if C is None else (dC, ddA_cumsum_prev)
 
 
@@ -1535,7 +1576,16 @@ def _chunk_scan_bwd_dx(cb, x, dt, dA_cumsum, dout, D=None):
     # else:
     #     dD = None
     dx = torch.empty_like(x)
-    ddt = torch.empty(batch, nheads, nchunks, chunk_size, device=dout.device, dtype=torch.float32)
+    deterministic = use_deterministic_mode()
+    tile_count = math.ceil(headdim / _CHUNK_SCAN_BWD_DX_MIN_BLOCK_N)
+    ddt, stride_ddt_tile = alloc_tile_workspace(
+        (batch, nheads, nchunks, chunk_size),
+        tile_count,
+        torch.float32,
+        dout.device,
+        deterministic,
+        zero_init=True,
+    )
     grid_dx = lambda META: (triton.cdiv(chunk_size, META['BLOCK_SIZE_M']) * triton.cdiv(headdim, META['BLOCK_SIZE_N']),
                         batch * nchunks, nheads)
     with torch.cuda.device(x.device.index):
@@ -1550,16 +1600,18 @@ def _chunk_scan_bwd_dx(cb, x, dt, dA_cumsum, dout, D=None):
             dA_cumsum.stride(0), dA_cumsum.stride(2), dA_cumsum.stride(1), dA_cumsum.stride(3),
             D.stride(0) if D is not None else 0,
             dx.stride(0), dx.stride(1), dx.stride(2), dx.stride(3),
-            ddt.stride(0), ddt.stride(2), ddt.stride(1), ddt.stride(3),
+            ddt.stride(0), ddt.stride(2), ddt.stride(1), ddt.stride(3), stride_ddt_tile,
             # dD.stride(1) if dD is not None else 0, dD.stride(2) if dD is not None else 0, dD.stride(3) if dD is not None else 0, dD.stride(4) if dD is not None else 0, dD.stride(0) if dD is not None else 0,
             D is not None,
             D.dim() == 2 if D is not None else True,
+            DETERMINISTIC_REDUCTION=deterministic,
         )
     # if D is not None:
     #     BLOCK_SIZE_actual = _chunk_scan_bwd_dx_kernel.best_config.kwargs["BLOCK_SIZE_M"]
     #     n_valid_blocks = (chunk_size + BLOCK_SIZE_actual - 1) // BLOCK_SIZE_actual
     #     dD = dD[:n_valid_blocks].sum(dim=(0, 1, 2)).to(dtype=D.dtype)
-    return dx, ddt.to(dtype=dt.dtype)
+    ddt = finalize_tile_workspace(ddt, deterministic, target_dtype=dt.dtype)
+    return dx, ddt
 
 
 def _chunk_scan_bwd_ddAcs_unstable(x, dt, out, dout, ddt, D=None, subtract_ddtdt=True):

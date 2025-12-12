@@ -30,6 +30,7 @@ from mamba_ssm.distributed.distributed_utils import all_reduce, reduce_scatter
 
 from mamba_ssm.ops.triton.ssd_combined import mamba_chunk_scan_combined
 from mamba_ssm.ops.triton.ssd_combined import mamba_split_conv1d_scan_combined
+from mamba_ssm.utils.determinism import set_deterministic_mode
 
 from huggingface_hub import PyTorchModelHubMixin
 
@@ -58,6 +59,7 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
         # Fused kernel and sharding options
         chunk_size=256,
         use_mem_eff_path=True,
+        deterministic=None,
         layer_idx=None,  # Absorb kwarg for general module
         process_group=None,
         sequence_parallel=True,
@@ -90,6 +92,7 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
         self.activation = "silu"
         self.chunk_size = chunk_size
         self.use_mem_eff_path = use_mem_eff_path
+        self.deterministic = deterministic
         self.layer_idx = layer_idx
 
         # Order: [z, x, B, C, dt]
@@ -159,6 +162,8 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
             (in case batch is small).
         Returns: same shape as u
         """
+        if self.deterministic is not None:
+            set_deterministic_mode(self.deterministic)
         seqlen_og = seqlen
         if seqlen is None:
             batch, seqlen, dim = u.shape
