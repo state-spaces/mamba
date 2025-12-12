@@ -19,7 +19,6 @@ except ImportError:
 
 from mamba_ssm.ops.triton.ssd_combined import mamba_chunk_scan_combined
 from mamba_ssm.ops.triton.ssd_combined import mamba_split_conv1d_scan_combined
-from mamba_ssm.utils.determinism import set_deterministic_mode
 
 
 class Mamba2Simple(nn.Module):
@@ -44,7 +43,6 @@ class Mamba2Simple(nn.Module):
         # Fused kernel and sharding options
         chunk_size=256,
         use_mem_eff_path=True,
-        deterministic=None,
         layer_idx=None,  # Absorb kwarg for general module
         device=None,
         dtype=None,
@@ -66,7 +64,6 @@ class Mamba2Simple(nn.Module):
         self.activation = activation
         self.chunk_size = chunk_size
         self.use_mem_eff_path = use_mem_eff_path
-        self.deterministic = deterministic
         self.layer_idx = layer_idx
 
         # Order: [z, x, B, C, dt]
@@ -129,8 +126,6 @@ class Mamba2Simple(nn.Module):
         u: (B, L, D)
         Returns: same shape as u
         """
-        if self.deterministic is not None:
-            set_deterministic_mode(self.deterministic)
         batch, seqlen, dim = u.shape
 
         zxbcdt = self.in_proj(u)  # (B, L, d_in_proj)

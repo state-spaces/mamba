@@ -364,8 +364,9 @@ def _chunk_state_bwd_dx_kernel(
     ddA_cs_last = -tl.sum(ddA_cs)
     ddA_cumsum_ptrs = ddA_cumsum_ptr + offs_m * stride_ddA_cs_csize
     if DETERMINISTIC_REDUCTION:
+        # Preserve atomic semantics by adding ddA_cs_last into the last element
+        ddA_cs = tl.where(offs_m == (chunk_size - 1), ddA_cs + ddA_cs_last, ddA_cs)
         tl.store(ddA_cumsum_ptrs, ddA_cs, mask=offs_m < chunk_size)
-        tl.store(ddA_cumsum_ptr + (chunk_size - 1) * stride_ddA_cs_csize, ddA_cs_last)
     else:
         tl.atomic_add(ddA_cumsum_ptrs, ddA_cs, mask=offs_m < chunk_size)
         tl.atomic_add(ddA_cumsum_ptr + (chunk_size - 1) * stride_ddA_cs_csize, ddA_cs_last)
