@@ -79,7 +79,8 @@ void set_ssm_params_fwd(SSMParamsBase &params,
                         void* delta_bias_ptr,
                         void* x_ptr,
                         bool has_z,
-                        bool delta_softplus) {
+                        bool delta_softplus,
+                        const at::Tensor initial_state) {
 
     // Reset the parameters
     memset(&params, 0, sizeof(params));
@@ -138,6 +139,18 @@ void set_ssm_params_fwd(SSMParamsBase &params,
     }
     params.out_batch_stride = out.stride(0);
     params.out_d_stride = out.stride(1);
+    
+    // Set initial state if provided
+    params.initial_state_ptr = initial_state.defined() ? initial_state.data_ptr() : nullptr;
+    if (initial_state.defined()) {
+        params.initial_state_batch_stride = initial_state.stride(0);
+        params.initial_state_d_stride = initial_state.stride(1);
+        params.initial_state_dstate_stride = initial_state.stride(2);
+    } else {
+        params.initial_state_batch_stride = 0;
+        params.initial_state_d_stride = 0;
+        params.initial_state_dstate_stride = 0;
+    }
 }
 
 void set_ssm_params_bwd(SSMParamsBwd &params,
@@ -229,7 +242,8 @@ selective_scan_fwd(const at::Tensor &u, const at::Tensor &delta,
                   const c10::optional<at::Tensor> &D_,
                   const c10::optional<at::Tensor> &z_,
                   const c10::optional<at::Tensor> &delta_bias_,
-                  bool delta_softplus) {
+                  bool delta_softplus,
+                  const c10::optional<at::Tensor> &initial_state_ = c10::nullopt) {
     auto input_type = u.scalar_type();
     auto weight_type = A.scalar_type();
     TORCH_CHECK(input_type == at::ScalarType::Float || input_type == at::ScalarType::Half || input_type == at::ScalarType::BFloat16);
@@ -293,6 +307,15 @@ selective_scan_fwd(const at::Tensor &u, const at::Tensor &delta,
         CHECK_SHAPE(delta_bias, dim);
     }
 
+    if (initial_state_.has_value()) {
+        auto initial_state = initial_state_.value();
+        TORCH_CHECK(initial_state.scalar_type() == weight_type);
+        TORCH_CHECK(initial_state.is_cuda());
+        TORCH_CHECK(initial_state.dim() == 3);
+        CHECK_SHAPE(initial_state, batch_size, dim, dstate);
+        TORCH_CHECK(initial_state.stride(-1) == 1 || initial_state.size(-1) == 1);
+    }
+
     at::Tensor z, out_z;
     const bool has_z = z_.has_value();
     if (has_z) {
@@ -319,7 +342,8 @@ selective_scan_fwd(const at::Tensor &u, const at::Tensor &delta,
                        delta_bias_.has_value() ? delta_bias_.value().data_ptr() : nullptr,
                        x.data_ptr(),
                        has_z,
-                       delta_softplus);
+                       delta_softplus,
+                       initial_state_.has_value() ? initial_state_.value() : at::Tensor());
 
     // Otherwise the kernel will be launched from cuda:0 device
     // Cast to char to avoid compiler warning about narrowing

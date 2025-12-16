@@ -160,21 +160,32 @@ class Mamba(nn.Module):
             )
         else:
             x, z = xz.chunk(2, dim=1)
-            # Compute short convolution
+            # Compute short convolution, state continuity logic is inference-only
             if conv_state is not None:
-                # If we just take x[:, :, -self.d_conv :], it will error if seqlen < self.d_conv
-                # Instead F.pad will pad with zeros if seqlen < self.d_conv, and truncate otherwise.
-                conv_state.copy_(F.pad(x, (self.d_conv - x.shape[-1], 0)))  # Update state (B D W)
+                k = self.d_conv - 1
+                conv_inputs = conv_state[:, :, -k:]
+                x_input = torch.cat([conv_inputs, x], dim=2)
+                conv_state.copy_(F.pad(x_input, (self.d_conv - x_input.shape[-1], 0))[:, :, -self.d_conv:])  # Update state (B D W)
+            else:
+                x_input = x
             if causal_conv1d_fn is None:
-                x = self.act(self.conv1d(x)[..., :seqlen])
+                x_conv = self.conv1d(x_input)
+                if conv_state is not None:
+                    x = self.act(x_conv[:, :, k:k+seqlen])
+                else:
+                    x = self.act(x_conv[..., :seqlen])
             else:
                 assert self.activation in ["silu", "swish"]
-                x = causal_conv1d_fn(
-                    x=x,
+                x_conv = causal_conv1d_fn(
+                    x=x_input,
                     weight=rearrange(self.conv1d.weight, "d 1 w -> d w"),
                     bias=self.conv1d.bias,
                     activation=self.activation,
                 )
+                if conv_state is not None:
+                    x = x_conv[:, :, k:k+seqlen]
+                else:
+                    x = x_conv
 
             # We're careful here about the layout, to avoid extra transposes.
             # We want dt to have d as the slowest moving dimension
@@ -186,6 +197,7 @@ class Mamba(nn.Module):
             B = rearrange(B, "(b l) dstate -> b dstate l", l=seqlen).contiguous()
             C = rearrange(C, "(b l) dstate -> b dstate l", l=seqlen).contiguous()
             assert self.activation in ["silu", "swish"]
+            # Ability to pass initial state to kernel in inference - it will incorporate exp(deltaA[0]) * h0 into the first state
             y = selective_scan_fn(
                 x,
                 dt,
@@ -197,6 +209,7 @@ class Mamba(nn.Module):
                 delta_bias=self.dt_proj.bias.float(),
                 delta_softplus=True,
                 return_last_state=ssm_state is not None,
+                initial_state=ssm_state,  # Kernel will incorporate this as exp(deltaA[0]) * h0
             )
             if ssm_state is not None:
                 y, last_state = y

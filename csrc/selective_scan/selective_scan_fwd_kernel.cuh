@@ -23,7 +23,7 @@
 
 template<int kNThreads_, int kNItems_, int kNRows_, bool kIsEvenLen_,
          bool kIsVariableB_, bool kIsVariableC_,
-         bool kHasZ_, typename input_t_, typename weight_t_>
+         bool kHasZ_, bool kHasInitialState_, typename input_t_, typename weight_t_>
 struct Selective_Scan_fwd_kernel_traits {
     static_assert(kNItems_ % 4 == 0);
     using input_t = input_t_;
@@ -43,6 +43,7 @@ struct Selective_Scan_fwd_kernel_traits {
     static constexpr bool kIsVariableB = kIsVariableB_;
     static constexpr bool kIsVariableC = kIsVariableC_;
     static constexpr bool kHasZ = kHasZ_;
+    static constexpr bool kHasInitialState = kHasInitialState_;
 
     static constexpr bool kDirectIO = kIsEvenLen && kNLoads == 1;
 
@@ -76,6 +77,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     constexpr bool kIsVariableB = Ktraits::kIsVariableB;
     constexpr bool kIsVariableC = Ktraits::kIsVariableC;
     constexpr bool kHasZ = Ktraits::kHasZ;
+    constexpr bool kHasInitialState = Ktraits::kHasInitialState;
     constexpr int kNThreads = Ktraits::kNThreads;
     constexpr int kNItems = Ktraits::kNItems;
     constexpr int kNRows = Ktraits::kNRows;
@@ -218,8 +220,21 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                 #pragma unroll
                 for (int i = 0; i < kNItems; ++i) {
                     if constexpr (!kIsComplex) {
-                        thread_data[i] = make_float2(exp2f(delta_vals[r][i] * A_val[r]),
-                                                     !kIsVariableB ? delta_u_vals[r][i] : B_vals[i] * delta_u_vals[r][i]);
+                        weight_t delta_a = exp2f(delta_vals[r][i] * A_val[r]);
+                        weight_t delta_b_u = !kIsVariableB ? delta_u_vals[r][i] : B_vals[i] * delta_u_vals[r][i];
+
+                        if constexpr (kHasInitialState) {
+                            if (chunk == 0 && i == 0) {
+                                const weight_t *initial_state = reinterpret_cast<const weight_t *>(params.initial_state_ptr)
+                                    + batch_id * params.initial_state_batch_stride
+                                    + dim_id * params.initial_state_d_stride;
+                                weight_t h0_val = initial_state[state_idx * params.initial_state_dstate_stride];
+                                // Modify: deltaB[0]*u[0] -> deltaA[0]*h0 + deltaB[0]*u[0]
+                                delta_b_u = delta_a * h0_val + delta_b_u;
+                            }
+                        }
+                        
+                        thread_data[i] = make_float2(delta_a, delta_b_u);
                         if constexpr (!Ktraits::kIsEvenLen) {  // So that the last state is correct
                             if (threadIdx.x * kNItems + i >= params.seqlen - chunk * kChunkSize) {
                                 thread_data[i] = make_float2(1.f, 0.f);
@@ -229,6 +244,21 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                         // Pytorch's implementation of complex exp (which calls thrust) is very slow
                         complex_t delta_a_exp = cexp2f(delta_vals[r][i] * A_val[r]);
                         weight_t B_delta_u_val = !kIsVariableB ? delta_u_vals[r][i] : B_vals[i] * delta_u_vals[r][i];
+                        
+                        // Incorporate initial state for chunk 0, first timestep (complex case)
+                        if constexpr (kHasInitialState) {
+                            if (chunk == 0 && i == 0) {
+                                // For complex, initial_state is stored as complex_t (interleaved real/imag)
+                                const complex_t *initial_state_complex = reinterpret_cast<const complex_t *>(params.initial_state_ptr)
+                                    + batch_id * (params.initial_state_batch_stride / 2)
+                                    + dim_id * (params.initial_state_d_stride / 2);
+                                complex_t h0_val = initial_state_complex[state_idx * (params.initial_state_dstate_stride / 2)];
+                                complex_t h0_contrib = delta_a_exp * h0_val;
+                                // B_delta_u_val is already complex_t, add h0_contrib
+                                B_delta_u_val = h0_contrib + B_delta_u_val;
+                            }
+                        }
+                        
                         thread_data[i] = make_float4(delta_a_exp.real_, delta_a_exp.imag_, B_delta_u_val.real_, B_delta_u_val.imag_);
                         if constexpr (!Ktraits::kIsEvenLen) {  // So that the last state is correct
                             if (threadIdx.x * kNItems + i >= params.seqlen - chunk * kChunkSize) {
@@ -316,7 +346,8 @@ void selective_scan_fwd_launch(SSMParamsBase &params, cudaStream_t stream) {
         BOOL_SWITCH(params.is_variable_B, kIsVariableB, [&] {
             BOOL_SWITCH(params.is_variable_C, kIsVariableC, [&] {
                 BOOL_SWITCH(params.z_ptr != nullptr , kHasZ, [&] {
-                    using Ktraits = Selective_Scan_fwd_kernel_traits<kNThreads, kNItems, kNRows, kIsEvenLen, kIsVariableB, kIsVariableC, kHasZ, input_t, weight_t>;
+                    BOOL_SWITCH(params.initial_state_ptr != nullptr, kHasInitialState, [&] {
+                        using Ktraits = Selective_Scan_fwd_kernel_traits<kNThreads, kNItems, kNRows, kIsEvenLen, kIsVariableB, kIsVariableC, kHasZ, kHasInitialState, input_t, weight_t>;
                     
                     constexpr int kSmemSize = Ktraits::kSmemSize + kNRows * MAX_DSTATE * sizeof(typename Ktraits::scan_t);
                     dim3 grid(params.batch, params.dim / kNRows);
@@ -341,6 +372,7 @@ void selective_scan_fwd_launch(SSMParamsBase &params, cudaStream_t stream) {
 
                     kernel<<<grid, Ktraits::kNThreads, kSmemSize, stream>>>(params);
                     C10_CUDA_KERNEL_LAUNCH_CHECK();
+                    });
                 });
             });
         });
