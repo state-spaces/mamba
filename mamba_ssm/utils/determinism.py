@@ -9,8 +9,10 @@ _deterministic_override = None
 def use_deterministic_mode():
     if _deterministic_override is not None:
         return _deterministic_override
-    val = os.environ.get('MAMBA_DETERMINISTIC', '').lower()
-    return val in ('1', 'true', 'yes')
+    env = os.environ.get('MAMBA_DETERMINISTIC')
+    if env:
+        return env[0] == '1'
+    return torch.are_deterministic_algorithms_enabled()
 
 
 def set_deterministic_mode(value):
