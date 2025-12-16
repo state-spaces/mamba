@@ -34,7 +34,7 @@ def set_deterministic_mode(value):
 
 def autotune_configs(configs):
     """Wrap autotune configs for determinism. Uses cached autotuning if available,
-    otherwise selects single config via TRITON_AUTOTUNE_CONFIG_INDEX (default: last)."""
+    otherwise selects single config via TRITON_AUTOTUNE_BLOCK_SIZE_N or TRITON_AUTOTUNE_CONFIG_INDEX."""
     if not configs or not use_deterministic_mode():
         return configs
     
@@ -49,6 +49,13 @@ def autotune_configs(configs):
         else:
             msg = "Deterministic mode: upgrade to Triton >= 3.4.0 for cached autotuning."
         warnings.warn(msg)
+
+    block_size_n = os.environ.get("TRITON_AUTOTUNE_BLOCK_SIZE_N")
+    if block_size_n is not None:
+        target_n = int(block_size_n)
+        matching = [c for c in configs if c.kwargs.get('BLOCK_SIZE_N') == target_n]
+        if matching:
+            return matching[:1]
 
     idx = int(os.environ.get("TRITON_AUTOTUNE_CONFIG_INDEX", "-1"))
     if idx < 0:
