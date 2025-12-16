@@ -21,7 +21,7 @@ def _max_abs_diff(a: torch.Tensor, b: torch.Tensor) -> float:
     return (a.float() - b.float()).abs().max().item()
 
 
-def _make_inputs(*, seed: int, headdim: int, dstate: int, scale: float = 1.0) -> dict[str, torch.Tensor]:
+def _make_inputs(*, seed: int, headdim: int, dstate: int) -> dict[str, torch.Tensor]:
     """Inputs for determinism-enabled backward kernels."""
     import math
 
@@ -35,22 +35,23 @@ def _make_inputs(*, seed: int, headdim: int, dstate: int, scale: float = 1.0) ->
     chunk_size = 256
     nchunks = math.ceil(seqlen / chunk_size)
 
-    x = torch.randn(batch, seqlen, nheads, headdim, device=device, dtype=torch.bfloat16) * scale
-    dout = torch.randn_like(x) * scale
-    dt = torch.randn(batch, nheads, nchunks, chunk_size, device=device, dtype=torch.float32) * scale
-    dA_cumsum = torch.randn_like(dt) * scale
-    cb = torch.randn(batch, nchunks, ngroups, chunk_size, chunk_size, device=device, dtype=torch.bfloat16) * scale
+    x = torch.randn(batch, seqlen, nheads, headdim, device=device, dtype=torch.bfloat16)
+    dout = torch.randn_like(x)
+    dt = torch.randn(batch, nheads, nchunks, chunk_size, device=device, dtype=torch.float32)
+    dA_cumsum = torch.randn_like(dt)
+    cb = torch.randn(batch, nchunks, ngroups, chunk_size, chunk_size, device=device, dtype=torch.bfloat16)
 
-    B = (torch.randn(batch, seqlen, ngroups, dstate, device=device, dtype=torch.bfloat16) * scale).contiguous()
-    C = (torch.randn(batch, seqlen, ngroups, dstate, device=device, dtype=torch.bfloat16) * scale).contiguous()
-    dstates = torch.randn(batch, nchunks, nheads, headdim, dstate, device=device, dtype=torch.float32) * scale
-    prev_states = torch.randn_like(dstates) * scale
+    B = torch.randn(batch, seqlen, ngroups, dstate, device=device, dtype=torch.bfloat16).contiguous()
+    C = torch.randn(batch, seqlen, ngroups, dstate, device=device, dtype=torch.bfloat16).contiguous()
+    dstates = torch.randn(batch, nchunks, nheads, headdim, dstate, device=device, dtype=torch.float32)
+    prev_states = torch.randn_like(dstates)
 
-    ddA = torch.randn(batch, nheads, nchunks, chunk_size, device=device, dtype=torch.float32) * scale
-    ddt_out = torch.randn_like(ddA) * scale
-    dt_raw = torch.randn(batch, seqlen, nheads, device=device, dtype=torch.bfloat16) * scale
+    ddA = torch.randn(batch, nheads, nchunks, chunk_size, device=device, dtype=torch.float32)
+    ddt_out = torch.randn_like(ddA)
+    dt_raw = torch.randn(batch, seqlen, nheads, device=device, dtype=torch.bfloat16)
     A = (torch.randn(nheads, device=device, dtype=torch.float32) * -1.0).contiguous()
-    dt_bias = (torch.randn(nheads, device=device, dtype=torch.float32) * scale).contiguous()
+    dt_bias = torch.randn(nheads, device=device, dtype=torch.float32).contiguous()
+    D = torch.randn(nheads, device=device, dtype=torch.float32)
 
     return {
         "x": x,
@@ -67,18 +68,16 @@ def _make_inputs(*, seed: int, headdim: int, dstate: int, scale: float = 1.0) ->
         "dt_raw": dt_raw,
         "A": A,
         "dt_bias": dt_bias,
+        "D": D,
     }
 
 
-def _run_case_outputs(*, case: str, deterministic: bool, seed: int, scale: float = 1.0) -> dict[str, torch.Tensor]:
+def _run_case_outputs(
+    *, case: str, deterministic: bool, seed: int, headdim: int = 64,
+) -> dict[str, torch.Tensor]:
     """Run one kernel wrapper and return named outputs (as fp32)."""
     _set_deterministic(deterministic)
-    if case in ("chunk_scan_bwd_dC", "chunk_state_bwd_db"):
-        headdim = 256
-    else:
-        headdim = 384
-    dstate = 384
-    t = _make_inputs(seed=seed, headdim=headdim, dstate=dstate, scale=scale)
+    t = _make_inputs(seed=seed, headdim=headdim, dstate=64)
 
     if case == "chunk_scan_bwd_dx":
         from mamba_ssm.ops.triton.ssd_chunk_scan import _chunk_scan_bwd_dx
@@ -106,8 +105,8 @@ def _run_case_outputs(*, case: str, deterministic: bool, seed: int, scale: float
         out = {"ddt": ddt, "dA": dA, "ddt_bias": ddt_bias}
     elif case == "combined_bwd_dx":
         from mamba_ssm.ops.triton.ssd_combined import _chunk_scan_chunk_state_bwd_dx
-        dx, ddt, _ = _chunk_scan_chunk_state_bwd_dx(t["x"], t["dt"], t["dA_cumsum"], t["B"], t["cb"], t["dout"], t["dstates"])
-        out = {"dx": dx, "ddt": ddt}
+        dx, ddt, dD = _chunk_scan_chunk_state_bwd_dx(t["x"], t["dt"], t["dA_cumsum"], t["B"], t["cb"], t["dout"], t["dstates"], D=t["D"])
+        out = {"dx": dx, "ddt": ddt, "dD": dD}
     else:
         raise AssertionError(f"Unknown case: {case}")
 
@@ -125,64 +124,34 @@ _CASES = [
     "combined_bwd_dx",
 ]
 
-
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("headdim", [32, 64])
 @pytest.mark.parametrize("case", _CASES)
-def test_all_determinism_enabled_kernels_reproducible(case: str):
+def test_all_determinism_enabled_kernels_reproducible(case: str, headdim: int):
     runs = 5
-    outs = [_run_case_outputs(case=case, deterministic=True, seed=123) for _ in range(runs)]
+    outs = [_run_case_outputs(case=case, deterministic=True, seed=123, headdim=headdim) for _ in range(runs)]
     ref = outs[0]
     for i in range(1, runs):
         for k in ref:
-            assert _max_abs_diff(ref[k], outs[i][k]) == 0.0, f"{case} output {k} differs"
+            assert _max_abs_diff(ref[k], outs[i][k]) == 0.0, f"{case} output {k} differs (headdim={headdim})"
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_default_mode_is_not_reproducible_for_atomics_path():
-    runs = 50
-    outs = [_run_case_outputs(case="chunk_scan_bwd_dx", deterministic=False, seed=123) for _ in range(runs)]
-    ref = outs[0]["ddt"]
-    observed = any(_max_abs_diff(ref, outs[i]["ddt"]) != 0.0 for i in range(1, runs))
-    if not observed:
-        pytest.xfail(
-            "Did not observe nondeterminism in default mode after "
-            f"{runs} runs. If you expect nondeterminism on this GPU, increase "
-            "the run count and/or adjust shapes to increase atomic contention."
-        )
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-@pytest.mark.parametrize("case", _CASES)
-def test_all_determinism_enabled_kernels_close_to_default(case: str):
-    scale = 1.0
-    atol = 1e-2
-    rtol = atol
-    det = _run_case_outputs(case=case, deterministic=True, seed=123, scale=scale)
-    for _ in range(3):
-        default = _run_case_outputs(case=case, deterministic=False, seed=123, scale=scale)
-        for k in det:
-            assert torch.allclose(default[k], det[k], atol=atol, rtol=rtol), f"{case} output {k} not close"
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_mamba2_fwd_bwd_deterministic_mode_is_reproducible():
+def test_default_mode_is_not_reproducible():
     from mamba_ssm.modules.mamba2 import Mamba2
 
     device = "cuda"
     dtype = torch.bfloat16
     seed = 123
-    runs = 5
-    scale = 1.0
-    batch = 2
-    seqlen = 2048
+    runs = 20
+    batch = 4
+    seqlen = 4096
 
     _set_seeds(seed)
-    _set_deterministic(True)
-
     model = Mamba2(
         d_model=256,
-        d_state=384,
-        headdim=128,
+        d_state=64,
+        headdim=64,
         expand=2,
         d_conv=4,
         chunk_size=256,
@@ -190,7 +159,80 @@ def test_mamba2_fwd_bwd_deterministic_mode_is_reproducible():
         device=device,
         dtype=dtype,
     ).train()
-    x_data = torch.randn(batch, seqlen, model.d_model, device=device, dtype=dtype) * scale
+    x_data = torch.randn(batch, seqlen, model.d_model, device=device, dtype=dtype)
+
+    def _run() -> dict[str, torch.Tensor]:
+        _set_deterministic(False)
+        model.zero_grad(set_to_none=True)
+        x = x_data.clone().requires_grad_(True)
+        y = model(x)
+        (y.float().square().mean()).backward()
+        torch.cuda.synchronize()
+        grads = {"input": x.grad.detach().float().clone()}
+        for name, p in model.named_parameters():
+            if p.grad is not None:
+                grads[name] = p.grad.detach().float().clone()
+        return grads
+
+    _run()  # warmup
+    ref = _run()
+    observed_diff = False
+    for _ in range(runs - 1):
+        g = _run()
+        for k in ref:
+            if _max_abs_diff(ref[k], g[k]) != 0.0:
+                observed_diff = True
+                break
+        if observed_diff:
+            break
+
+    if not observed_diff:
+        pytest.xfail(
+            f"Did not observe nondeterminism in default mode after {runs} runs. "
+            "This GPU may have deterministic atomic behavior at these shapes."
+        )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("headdim", [32, 64])
+@pytest.mark.parametrize("case", _CASES)
+def test_all_determinism_enabled_kernels_close_to_default(case: str, headdim: int):
+    atol = 1e-2
+    rtol = atol
+    det = _run_case_outputs(case=case, deterministic=True, seed=123, headdim=headdim)
+    for _ in range(3):
+        default = _run_case_outputs(case=case, deterministic=False, seed=123, headdim=headdim)
+        for k in det:
+            assert torch.allclose(default[k], det[k], atol=atol, rtol=rtol), f"{case} output {k} not close (headdim={headdim})"
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("headdim", [32, 128])
+def test_mamba2_fwd_bwd_deterministic_mode_is_reproducible(headdim: int):
+    from mamba_ssm.modules.mamba2 import Mamba2
+
+    device = "cuda"
+    dtype = torch.bfloat16
+    seed = 123
+    runs = 5
+    batch = 2
+    seqlen = 2048
+
+    _set_seeds(seed)
+    _set_deterministic(True)
+
+    model = Mamba2(
+        d_model=headdim,
+        d_state=16,
+        headdim=headdim,
+        expand=2,
+        d_conv=4,
+        chunk_size=16,
+        use_mem_eff_path=True,
+        device=device,
+        dtype=dtype,
+    ).train()
+    x_data = torch.randn(batch, seqlen, model.d_model, device=device, dtype=dtype)
 
     def _run() -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         model.zero_grad(set_to_none=True)
@@ -211,4 +253,50 @@ def test_mamba2_fwd_bwd_deterministic_mode_is_reproducible():
         assert _max_abs_diff(y0, y) == 0.0
         assert g.keys() == g0.keys()
         for k in g0:
-            assert _max_abs_diff(g0[k], g[k]) == 0.0, f"Mamba2 grad {k} differs"
+            assert _max_abs_diff(g0[k], g[k]) == 0.0, f"Mamba2 grad {k} differs (headdim={headdim})"
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("headdim", [32, 64])
+def test_mamba2_fwd_bwd_deterministic_close_to_default(headdim: int):
+    from mamba_ssm.modules.mamba2 import Mamba2
+
+    device = "cuda"
+    dtype = torch.bfloat16
+    seed = 123
+    batch = 2
+    seqlen = 2048
+    atol = 1e-2
+    rtol = 1e-2
+
+    def _run(deterministic: bool) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        torch.use_deterministic_algorithms(deterministic, warn_only=True)
+        _set_seeds(seed)
+        model = Mamba2(
+            d_model=headdim * 4,
+            d_state=32,
+            headdim=headdim,
+            expand=2,
+            d_conv=4,
+            chunk_size=64,
+            use_mem_eff_path=True,
+            device=device,
+            dtype=dtype,
+        ).train()
+        x = torch.randn(batch, seqlen, model.d_model, device=device, dtype=dtype).requires_grad_(True)
+        y = model(x)
+        (y.float().square().mean()).backward()
+        torch.cuda.synchronize()
+        grads: dict[str, torch.Tensor] = {"input": x.grad.detach().float().clone()}
+        for name, p in model.named_parameters():
+            if p.grad is not None:
+                grads[name] = p.grad.detach().float().clone()
+        return y.detach().float().clone(), grads
+
+    _run(False)  # warmup
+    y_default, g_default = _run(False)
+    y_det, g_det = _run(True)
+
+    assert torch.allclose(y_default, y_det, atol=atol, rtol=rtol), "Mamba2 output differs"
+    for k in g_default:
+        assert torch.allclose(g_default[k], g_det[k], atol=atol, rtol=rtol), f"Mamba2 grad {k} not close (headdim={headdim})"

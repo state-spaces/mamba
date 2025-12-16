@@ -19,6 +19,7 @@ from mamba_ssm.utils.determinism import (
     alloc_tile_workspace,
     finalize_tile_workspace,
     use_deterministic_mode,
+    autotune_configs,
 )
 
 TRITON_22 = version.parse(triton.__version__) >= version.parse('2.2.0')
@@ -29,7 +30,7 @@ def init_to_zero(names):
 
 
 @triton.autotune(
-    configs=[
+    configs=autotune_configs([
         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64}, num_stages=3, num_warps=8),
         triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4),
         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4),
@@ -41,7 +42,7 @@ def init_to_zero(names):
         triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32}, num_stages=5, num_warps=2),
         triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32}, num_stages=5, num_warps=2),
         triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=2),
-    ],
+    ]),
     key=['chunk_size', 'hdim', 'dstate', 'IS_CAUSAL'],
 )
 @triton.jit
@@ -180,14 +181,14 @@ def _chunk_scan_fwd_kernel(
 
 
 @triton.autotune(
-    configs=[
+    configs=autotune_configs([
         # triton.Config({'BLOCK_SIZE_N': 256}, num_stages=4, num_warps=4),
         # triton.Config({'BLOCK_SIZE_N': 128}, num_stages=4, num_warps=4),
         triton.Config({'BLOCK_SIZE_N': 64}, num_stages=4, num_warps=4),
         triton.Config({'BLOCK_SIZE_N': 32}, num_stages=4, num_warps=4),
         triton.Config({'BLOCK_SIZE_N': 64}, num_stages=4, num_warps=8),
         triton.Config({'BLOCK_SIZE_N': 32}, num_stages=4, num_warps=8),
-    ],
+    ]),
     key=['chunk_size', 'hdim', 'dstate'],
 )
 @triton.jit
@@ -336,12 +337,12 @@ def _chunk_scan_fwd_kernel_wip(
 
 
 @triton.autotune(
-    configs=[
+    configs=autotune_configs([
         triton.Config({'BLOCK_SIZE_M': 32}),
         triton.Config({'BLOCK_SIZE_M': 64}),
         triton.Config({'BLOCK_SIZE_M': 128}),
         triton.Config({'BLOCK_SIZE_M': 256}),
-    ],
+    ]),
     key=["chunk_size", "hdim"],
 )
 @triton.jit
@@ -431,7 +432,7 @@ def _chunk_scan_bwd_dz_kernel(
 
 
 @triton.autotune(
-    configs=[
+    configs=autotune_configs([
         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64}, num_stages=3, num_warps=8),
         triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4),
         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4),
@@ -441,7 +442,7 @@ def _chunk_scan_bwd_dz_kernel(
         triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32}, num_stages=5, num_warps=2),
         triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32}, num_stages=5, num_warps=2),
         triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=2),
-    ],
+    ]),
     key=['hdim', 'dstate', 'chunk_size'],
 )
 @triton.jit
@@ -513,7 +514,7 @@ def _chunk_scan_bwd_dstates_kernel(
 
 
 @triton.autotune(
-    configs=[
+    configs=autotune_configs([
         triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 128}, num_stages=3, num_warps=4, pre_hook=init_to_zero(["ddA_cumsum_ptr"])),
         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 32}, num_stages=3, num_warps=4, pre_hook=init_to_zero(["ddA_cumsum_ptr"])),
         triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128}, num_stages=3, num_warps=4, pre_hook=init_to_zero(["ddA_cumsum_ptr"])),
@@ -522,7 +523,7 @@ def _chunk_scan_bwd_dstates_kernel(
         triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 32}, num_stages=3, num_warps=4, pre_hook=init_to_zero(["ddA_cumsum_ptr"])),
         triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64}, num_stages=3, num_warps=4, pre_hook=init_to_zero(["ddA_cumsum_ptr"])),
         triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 32}, num_stages=3, num_warps=4, pre_hook=init_to_zero(["ddA_cumsum_ptr"])),
-    ],
+    ]),
     key=['chunk_size', 'dstate', 'hdim'],
 )
 @triton.jit
@@ -623,7 +624,7 @@ _CHUNK_SCAN_BWD_DC_MIN_BLOCK_N = min(
 
 
 @triton.autotune(
-    configs=[
+    configs=autotune_configs([
         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64}, num_stages=3, num_warps=8, pre_hook=init_to_zero(["ddt_ptr"])),
         triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4, pre_hook=init_to_zero(["ddt_ptr"])),
         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4, pre_hook=init_to_zero(["ddt_ptr"])),
@@ -633,7 +634,7 @@ _CHUNK_SCAN_BWD_DC_MIN_BLOCK_N = min(
         triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32}, num_stages=5, num_warps=4, pre_hook=init_to_zero(["ddt_ptr"])),
         triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32}, num_stages=5, num_warps=4, pre_hook=init_to_zero(["ddt_ptr"])),
         triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4, pre_hook=init_to_zero(["ddt_ptr"])),
-    ],
+    ]),
     key=['chunk_size', 'hdim'],
 )
 @triton.jit
@@ -749,7 +750,7 @@ _CHUNK_SCAN_BWD_DX_MIN_BLOCK_N = min(
 
 # Disabling HAS_DDA_CS for now since it's much slower
 @triton.autotune(
-    configs=[
+    configs=autotune_configs([
         triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 128}, num_stages=3, num_warps=4),
         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 32}, num_stages=3, num_warps=4),
         triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64}, num_stages=3, num_warps=4),
@@ -764,7 +765,7 @@ _CHUNK_SCAN_BWD_DX_MIN_BLOCK_N = min(
         # triton.Config({'BLOCK_SIZE_M': 32}, num_stages=4, num_warps=8),
         # triton.Config({'BLOCK_SIZE_M': 64}, num_stages=4, num_warps=8),
         # triton.Config({'BLOCK_SIZE_M': 128}, num_stages=4, num_warps=8),
-    ],
+    ]),
     key=['chunk_size', 'hdim'],
 )
 # @triton.heuristics({"BLOCK_SIZE_N": lambda args: max(triton.next_power_of_2(args["chunk_size"]), 16)})
@@ -876,12 +877,12 @@ def _chunk_scan_bwd_dcb_kernel(
 
 # Not numerically stable and should not be used. Leaving here for reference.
 @triton.autotune(
-    configs=[
+    configs=autotune_configs([
         triton.Config({'BLOCK_SIZE_M': 32}),
         triton.Config({'BLOCK_SIZE_M': 64}),
         triton.Config({'BLOCK_SIZE_M': 128}),
         triton.Config({'BLOCK_SIZE_M': 256}),
-    ],
+    ]),
     key=["chunk_size", "hdim"],
 )
 @triton.jit
@@ -954,7 +955,7 @@ def _chunk_scan_bwd_ddAcs_unstable_kernel(
 
 
 @triton.autotune(
-    configs=[
+    configs=autotune_configs([
         # triton.Config({'BLOCK_SIZE_M': 16, 'BLOCK_SIZE_K': 32}, num_stages=3, num_warps=4),
         # triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_K': 32}, num_stages=3, num_warps=4),
         # triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_K': 32}, num_stages=3, num_warps=4),
@@ -971,7 +972,7 @@ def _chunk_scan_bwd_ddAcs_unstable_kernel(
         triton.Config({'BLOCK_SIZE_M': 32}, num_stages=4, num_warps=8),
         triton.Config({'BLOCK_SIZE_M': 64}, num_stages=4, num_warps=8),
         triton.Config({'BLOCK_SIZE_M': 128}, num_stages=4, num_warps=8),
-    ],
+    ]),
     key=['chunk_size', 'hdim'],
 )
 @triton.jit
@@ -1080,7 +1081,7 @@ def _chunk_scan_bwd_ddAcs_stable_kernel_old(
 
 
 @triton.autotune(
-    configs=[
+    configs=autotune_configs([
         triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 32}, num_stages=3, num_warps=4),
         # triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64}, num_stages=3, num_warps=4),
         # triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 128}, num_stages=3, num_warps=4),
@@ -1090,7 +1091,7 @@ def _chunk_scan_bwd_ddAcs_stable_kernel_old(
         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 32}, num_stages=3, num_warps=4),
         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64}, num_stages=3, num_warps=4),
         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128}, num_stages=3, num_warps=4),
-    ],
+    ]),
     key=['chunk_size', 'hdim'],
 )
 @triton.jit
@@ -1183,14 +1184,14 @@ def _chunk_scan_bwd_ddAcs_stable_kernel(
 
 
 @triton.autotune(
-    configs=[
+    configs=autotune_configs([
         triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 128}, num_stages=3, num_warps=4, pre_hook=init_to_zero(["ddA_cumsum_ptr"])),
         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 32}, num_stages=3, num_warps=4, pre_hook=init_to_zero(["ddA_cumsum_ptr"])),
         triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64}, num_stages=3, num_warps=4, pre_hook=init_to_zero(["ddA_cumsum_ptr"])),
         triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 32}, num_stages=3, num_warps=4, pre_hook=init_to_zero(["ddA_cumsum_ptr"])),
         triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64}, num_stages=3, num_warps=4, pre_hook=init_to_zero(["ddA_cumsum_ptr"])),
         triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 32}, num_stages=3, num_warps=4, pre_hook=init_to_zero(["ddA_cumsum_ptr"])),
-    ],
+    ]),
     key=['chunk_size', 'dstate', 'hdim'],
 )
 @triton.jit

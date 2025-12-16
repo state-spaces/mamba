@@ -1,7 +1,19 @@
 # Copyright (c) 2024, Tri Dao, Albert Gu.
 
 import os
+import warnings
+from packaging import version
+
 import torch
+
+try:
+    import triton
+    TRITON_VERSION = version.parse(triton.__version__)
+except ImportError:
+    TRITON_VERSION = version.parse("0.0.0")
+
+TRITON_HAS_CACHE_RESULTS = TRITON_VERSION >= version.parse("3.4.0")
+_autotune_warning_issued = False
 
 _deterministic_override = None
 
@@ -18,6 +30,31 @@ def use_deterministic_mode():
 def set_deterministic_mode(value):
     global _deterministic_override
     _deterministic_override = value
+
+
+def autotune_configs(configs):
+    """Wrap autotune configs for determinism. Uses cached autotuning if available,
+    otherwise selects single config via TRITON_AUTOTUNE_CONFIG_INDEX (default: last)."""
+    if not configs or not use_deterministic_mode():
+        return configs
+    
+    if TRITON_HAS_CACHE_RESULTS and os.environ.get("TRITON_CACHE_AUTOTUNING") == "1":
+        return configs
+    
+    global _autotune_warning_issued
+    if not _autotune_warning_issued:
+        _autotune_warning_issued = True
+        if TRITON_HAS_CACHE_RESULTS:
+            msg = "Deterministic mode: set TRITON_CACHE_AUTOTUNING=1 for cached autotuning."
+        else:
+            msg = "Deterministic mode: upgrade to Triton >= 3.4.0 for cached autotuning."
+        warnings.warn(msg)
+
+    idx = int(os.environ.get("TRITON_AUTOTUNE_CONFIG_INDEX", "-1"))
+    if idx < 0:
+        idx += len(configs)
+    idx = max(0, min(idx, len(configs) - 1))
+    return configs[idx:idx + 1]
 
 
 def alloc_tile_workspace(base_shape, tile_dim, dtype, device, deterministic, *, zero_init=True):

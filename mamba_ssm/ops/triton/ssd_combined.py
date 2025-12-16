@@ -44,6 +44,7 @@ from mamba_ssm.ops.triton.layernorm_gated import rmsnorm_fn, _layer_norm_fwd, _l
 from mamba_ssm.ops.triton.k_activations import _swiglu_fwd, _swiglu_bwd
 from mamba_ssm.utils.determinism import (
     alloc_tile_workspace,
+    autotune_configs,
     finalize_tile_workspace,
     use_deterministic_mode,
 )
@@ -63,7 +64,7 @@ def rearrange_and_update_stride(tensor, pattern=None, dim=2):
 
 
 @triton.autotune(
-    configs=[
+    configs=autotune_configs([
         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64}, num_stages=3, num_warps=8, pre_hook=init_to_zero(["ddt_ptr"])),
         triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4, pre_hook=init_to_zero(["ddt_ptr"])),
         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4, pre_hook=init_to_zero(["ddt_ptr"])),
@@ -73,7 +74,7 @@ def rearrange_and_update_stride(tensor, pattern=None, dim=2):
         triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32}, num_stages=5, num_warps=4, pre_hook=init_to_zero(["ddt_ptr"])),
         triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32}, num_stages=5, num_warps=4, pre_hook=init_to_zero(["ddt_ptr"])),
         triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4, pre_hook=init_to_zero(["ddt_ptr"])),
-    ],
+    ]),
     key=['chunk_size', 'hdim', 'dstate'],
 )
 @triton.jit

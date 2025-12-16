@@ -16,6 +16,8 @@ from mamba_ssm.utils.torch import custom_bwd, custom_fwd
 import triton
 import triton.language as tl
 
+from mamba_ssm.utils.determinism import autotune_configs
+
 
 def layer_norm_ref(
     x,
@@ -167,7 +169,7 @@ configs_autotune = [
 pruned_configs_autotune = config_prune(configs_autotune)
 
 @triton.autotune(
-    configs = pruned_configs_autotune,
+    configs=autotune_configs(pruned_configs_autotune),
     key=["N", "HAS_RESIDUAL", "STORE_RESIDUAL_OUT", "IS_RMS_NORM", "HAS_BIAS"],
 )
 # @triton.heuristics({"HAS_BIAS": lambda args: args["B"] is not None})
@@ -419,7 +421,7 @@ def _layer_norm_fwd(
 
 
 @triton.autotune(
-    configs=pruned_configs_autotune,
+    configs=autotune_configs(pruned_configs_autotune),
     key=["N", "HAS_DRESIDUAL", "STORE_DRESIDUAL", "IS_RMS_NORM", "HAS_BIAS", "HAS_DROPOUT"],
 )
 # @triton.heuristics({"HAS_BIAS": lambda args: args["B"] is not None})
