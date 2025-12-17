@@ -1611,7 +1611,7 @@ def _chunk_scan_bwd_dx(cb, x, dt, dA_cumsum, dout, D=None):
     #     BLOCK_SIZE_actual = _chunk_scan_bwd_dx_kernel.best_config.kwargs["BLOCK_SIZE_M"]
     #     n_valid_blocks = (chunk_size + BLOCK_SIZE_actual - 1) // BLOCK_SIZE_actual
     #     dD = dD[:n_valid_blocks].sum(dim=(0, 1, 2)).to(dtype=D.dtype)
-    ddt = finalize_tile_workspace(ddt, deterministic, target_dtype=dt.dtype)
+    ddt = finalize_tile_workspace(ddt, deterministic)
     return dx, ddt
 
 

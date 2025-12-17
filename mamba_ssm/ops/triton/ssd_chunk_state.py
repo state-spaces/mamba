@@ -891,8 +891,8 @@ def _chunk_state_bwd_dx(B, x, dt, dA_cumsum, dstates, dx=None):
             DETERMINISTIC_REDUCTION=deterministic,
             BLOCK_SIZE_DSTATE=max(triton.next_power_of_2(dstate), 16),
         )
-    ddt = finalize_tile_workspace(ddt, deterministic, target_dtype=dt.dtype)
-    ddA_cumsum = finalize_tile_workspace(ddA_cumsum, deterministic, target_dtype=dA_cumsum.dtype)
+    ddt = finalize_tile_workspace(ddt, deterministic)
+    ddA_cumsum = finalize_tile_workspace(ddA_cumsum, deterministic)
     if deterministic:
         # Match `_chunk_state_bwd_dx_kernel` atomic path (`tl.atomic_add(..., ddA_cs_last)` into last element).
         ddA_cumsum[..., -1] -= ddA_cumsum.sum(dim=-1)
@@ -1010,7 +1010,7 @@ def _chunk_state_bwd_ddAcs_stable(B, x, dt, dA_cumsum, dstates, seq_idx=None):
             BLOCK_SIZE_M=max(triton.next_power_of_2(chunk_size), 16),
             BLOCK_SIZE_DSTATE=max(triton.next_power_of_2(dstate), 16),
         )
-    ddA_cumsum = finalize_tile_workspace(ddA_cumsum, deterministic, target_dtype=ddA_cumsum.dtype)
+    ddA_cumsum = finalize_tile_workspace(ddA_cumsum, deterministic)
     torch.cumsum(ddA_cumsum[..., 1:], dim=-1, out=ddA_cumsum[..., 1:])
     return ddA_cumsum
 
