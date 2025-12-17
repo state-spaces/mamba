@@ -32,36 +32,49 @@ def set_deterministic_mode(value):
     _deterministic_override = value
 
 
+def _estimate_config_cost(cfg):
+    """Estimate shared memory cost of a config. Lower is cheaper."""
+    block_product = 1
+    for key, val in cfg.kwargs.items():
+        if key.startswith('BLOCK_SIZE_'):
+            block_product *= val
+    return block_product * (getattr(cfg, 'num_stages', 1) or 1)
+
+
+def _filter_configs_by_block_sizes(configs):
+    """Filter configs by TRITON_AUTOTUNE_BLOCK_SIZE_* env vars."""
+    env_filters = {}
+    for suffix in ('M', 'N', 'K', 'DSTATE'):
+        env_val = os.environ.get(f"TRITON_AUTOTUNE_BLOCK_SIZE_{suffix}")
+        if env_val is not None:
+            env_filters[f'BLOCK_SIZE_{suffix}'] = int(env_val)
+    if not env_filters:
+        return None
+    matching = configs
+    for key, target in env_filters.items():
+        matching = [c for c in matching if c.kwargs.get(key) == target]
+    return matching[:1] if matching else None
+
+
 def autotune_configs(configs):
-    """Wrap autotune configs for determinism. Uses cached autotuning if available,
-    otherwise selects single config via TRITON_AUTOTUNE_BLOCK_SIZE_N or TRITON_AUTOTUNE_CONFIG_INDEX."""
+    """Select autotune configs for deterministic mode.
+    
+    Uses cached autotuning (TRITON_CACHE_AUTOTUNING=1) if Triton >= 3.4.0,
+    otherwise auto-selects the cheapest config by block size * stages.
+    """
     if not configs or not use_deterministic_mode():
         return configs
-    
     if TRITON_HAS_CACHE_RESULTS and os.environ.get("TRITON_CACHE_AUTOTUNING") == "1":
         return configs
-    
     global _autotune_warning_issued
     if not _autotune_warning_issued:
         _autotune_warning_issued = True
-        if TRITON_HAS_CACHE_RESULTS:
-            msg = "Deterministic mode: set TRITON_CACHE_AUTOTUNING=1 for cached autotuning."
-        else:
-            msg = "Deterministic mode: upgrade to Triton >= 3.4.0 for cached autotuning."
+        msg = "Deterministic mode: set TRITON_CACHE_AUTOTUNING=1 for cached autotuning." if TRITON_HAS_CACHE_RESULTS else "Deterministic mode: upgrade to Triton >= 3.4.0 for cached autotuning."
         warnings.warn(msg)
-
-    block_size_n = os.environ.get("TRITON_AUTOTUNE_BLOCK_SIZE_N")
-    if block_size_n is not None:
-        target_n = int(block_size_n)
-        matching = [c for c in configs if c.kwargs.get('BLOCK_SIZE_N') == target_n]
-        if matching:
-            return matching[:1]
-
-    idx = int(os.environ.get("TRITON_AUTOTUNE_CONFIG_INDEX", "-1"))
-    if idx < 0:
-        idx += len(configs)
-    idx = max(0, min(idx, len(configs) - 1))
-    return configs[idx:idx + 1]
+    filtered = _filter_configs_by_block_sizes(configs)
+    if filtered:
+        return filtered
+    return [min(configs, key=_estimate_config_cost)]
 
 
 def alloc_tile_workspace(base_shape, tile_dim, dtype, device, deterministic, *, zero_init=True):
@@ -72,16 +85,12 @@ def alloc_tile_workspace(base_shape, tile_dim, dtype, device, deterministic, *, 
         factory = torch.zeros if zero_init else torch.empty
         tensor = factory(*base_shape, tile_dim, device=device, dtype=dtype)
         return tensor, tensor.stride(-1)
-    tensor = torch.empty(*base_shape, device=device, dtype=dtype)
-    return tensor, 0
+    return torch.empty(*base_shape, device=device, dtype=dtype), 0
 
 
-def finalize_tile_workspace(tensor, deterministic, *, target_dtype=torch.float32):
-    """Collapse extra tile dimension (if needed) and optionally cast."""
+def finalize_tile_workspace(tensor, deterministic):
     if tensor is None:
         return None
     if deterministic:
         tensor = tensor.sum(dim=-1)
-    if target_dtype is not None and tensor.dtype != target_dtype:
-        tensor = tensor.to(target_dtype)
     return tensor
