@@ -224,7 +224,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                         weight_t delta_b_u = !kIsVariableB ? delta_u_vals[r][i] : B_vals[i] * delta_u_vals[r][i];
 
                         if constexpr (kHasInitialState) {
-                            if (chunk == 0 && i == 0) {
+                            if (chunk == 0 && i == 0 && threadIdx.x == 0) {
                                 const weight_t *initial_state = reinterpret_cast<const weight_t *>(params.initial_state_ptr)
                                     + batch_id * params.initial_state_batch_stride
                                     + dim_id * params.initial_state_d_stride;
@@ -247,7 +247,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                         
                         // Incorporate initial state for chunk 0, first timestep (complex case)
                         if constexpr (kHasInitialState) {
-                            if (chunk == 0 && i == 0) {
+                            if (chunk == 0 && i == 0 && threadIdx.x == 0) {
                                 // For complex, initial_state is stored as complex_t (interleaved real/imag)
                                 const complex_t *initial_state_complex = reinterpret_cast<const complex_t *>(params.initial_state_ptr)
                                     + batch_id * (params.initial_state_batch_stride / 2)
