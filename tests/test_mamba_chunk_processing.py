@@ -62,15 +62,16 @@ def test_one_forward_matches_two_state_continuity_forward(device):
 
 
 @pytest.mark.parametrize("device", ["cuda"])
-def forward_matches_steps(device):
-    """Test that processing a chunk matches sequential step-by-step processing."""
+def test_forward_matches_steps(device):
+    """Test that processing two chunks with state continuity matches sequential step-by-step processing."""
     torch.manual_seed(0)
-    B, L, D = 2, 25, 32
+    B, L, D = 2, 30, 32
     model = _make_mamba(d_model=D, n_layers=2, d_state=16, device=device, dtype=torch.float32)
-    
+
     vocab_size = 100
     x = torch.randint(0, vocab_size, (B, L), device=device, dtype=torch.long)
-    
+    L1 = L // 2
+
     with torch.no_grad():
         # Sequential step-by-step processing using forward with seqlen_offset > 0
         # This triggers step() method internally
@@ -83,10 +84,12 @@ def forward_matches_steps(device):
             y_t = model(x_t, inference_params=inference_params_seq)  # (B, 1, D)
             y_list.append(y_t)
         logits_step = torch.cat(y_list, dim=1)  # (B, L, D)
-        
-        # Process as single chunk using forward with seqlen_offset=0
+
+        # Process in two chunks using forward with seqlen_offset=0
         # This uses parallel scan with initial_state support
         inference_params_chunk = _empty_caches_for_model(model, B, device, torch.float32)
-        logits_chunk = model(x, inference_params=inference_params_chunk)  # (B, L, D)
-    
+        y1 = model(x[:, :L1], inference_params=inference_params_chunk)  # (B, L1, D)
+        y2 = model(x[:, L1:], inference_params=inference_params_chunk)  # (B, L-L1, D)
+        logits_chunk = torch.cat([y1, y2], dim=1)
+
     assert torch.allclose(logits_chunk, logits_step, atol=1e-5, rtol=1e-5)
