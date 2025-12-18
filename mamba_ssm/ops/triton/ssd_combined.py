@@ -926,6 +926,7 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
             doutproj_weight, doutproj_bias = None, None
         dxBC_given_update, dweight, dbias, *_ = causal_conv1d_bwd_function(
             rearrange(ensure_stride(xBC), "b s d -> b d s"), conv1d_weight, conv1d_bias,
+            # It might be okay to not run ensure_stride on dxBC, but we're not sure. So playing safe here.
             rearrange(ensure_stride(dxBC), "b s d -> b d s"), seq_idx, None, None,
             rearrange(ensure_stride(dxBC_given), "b s d -> b d s"), False, ctx.activation in ["silu", "swish"]
         )
