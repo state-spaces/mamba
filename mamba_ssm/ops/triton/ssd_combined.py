@@ -42,6 +42,12 @@ from mamba_ssm.ops.triton.ssd_chunk_scan import chunk_scan, chunk_scan_ref
 from mamba_ssm.ops.triton.ssd_chunk_scan import _chunk_scan_bwd_ddAcs_prev
 from mamba_ssm.ops.triton.layernorm_gated import rmsnorm_fn, _layer_norm_fwd, _layer_norm_bwd
 from mamba_ssm.ops.triton.k_activations import _swiglu_fwd, _swiglu_bwd
+from mamba_ssm.utils.determinism import (
+    alloc_tile_workspace,
+    autotune_configs,
+    finalize_tile_workspace,
+    use_deterministic_mode,
+)
 
 TRITON_22 = version.parse(triton.__version__) >= version.parse('2.2.0')
 
@@ -58,17 +64,17 @@ def rearrange_and_update_stride(tensor, pattern=None, dim=2):
 
 
 @triton.autotune(
-    configs=[
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64}, num_stages=3, num_warps=8, pre_hook=init_to_zero(["ddt_ptr"])),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4, pre_hook=init_to_zero(["ddt_ptr"])),
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4, pre_hook=init_to_zero(["ddt_ptr"])),
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4, pre_hook=init_to_zero(["ddt_ptr"])),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4, pre_hook=init_to_zero(["ddt_ptr"])),
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4, pre_hook=init_to_zero(["ddt_ptr"])),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32}, num_stages=5, num_warps=4, pre_hook=init_to_zero(["ddt_ptr"])),
-        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32}, num_stages=5, num_warps=4, pre_hook=init_to_zero(["ddt_ptr"])),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4, pre_hook=init_to_zero(["ddt_ptr"])),
-    ],
+    configs=autotune_configs([
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64}, num_stages=3, num_warps=8, pre_hook=init_to_zero(["ddt_ptr", "dD_ptr"])),
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4, pre_hook=init_to_zero(["ddt_ptr", "dD_ptr"])),
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4, pre_hook=init_to_zero(["ddt_ptr", "dD_ptr"])),
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4, pre_hook=init_to_zero(["ddt_ptr", "dD_ptr"])),
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4, pre_hook=init_to_zero(["ddt_ptr", "dD_ptr"])),
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4, pre_hook=init_to_zero(["ddt_ptr", "dD_ptr"])),
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32}, num_stages=5, num_warps=4, pre_hook=init_to_zero(["ddt_ptr", "dD_ptr"])),
+        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32}, num_stages=5, num_warps=4, pre_hook=init_to_zero(["ddt_ptr", "dD_ptr"])),
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4, pre_hook=init_to_zero(["ddt_ptr", "dD_ptr"])),
+    ]),
     key=['chunk_size', 'hdim', 'dstate'],
 )
 @triton.jit
@@ -91,7 +97,7 @@ def _chunk_scan_chunk_state_bwd_dx_kernel(
     stride_b_batch, stride_b_seqlen, stride_b_head, stride_b_dstate,
     stride_dstates_batch, stride_dstates_chunk, stride_dstates_head, stride_dstates_hdim, stride_dstates_dstate,
     stride_dx_batch, stride_dx_seqlen, stride_dx_head, stride_dx_hdim,
-    stride_ddt_batch, stride_ddt_chunk, stride_ddt_head, stride_ddt_csize,
+    stride_ddt_batch, stride_ddt_chunk, stride_ddt_head, stride_ddt_csize, stride_ddt_tile,
     stride_dD_batch, stride_dD_chunk, stride_dD_head, stride_dD_csize, stride_dD_hdim,
     # Meta-parameters
     HAS_D: tl.constexpr,
@@ -100,6 +106,7 @@ def _chunk_scan_chunk_state_bwd_dx_kernel(
     BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
     BLOCK_SIZE_DSTATE: tl.constexpr,
     IS_TRITON_22: tl.constexpr,
+    DETERMINISTIC_REDUCTION: tl.constexpr,
 ):
     pid_bc = tl.program_id(axis=1)
     pid_c = pid_bc // batch
@@ -112,7 +119,7 @@ def _chunk_scan_chunk_state_bwd_dx_kernel(
     cb_ptr += pid_b * stride_cb_batch + pid_c * stride_cb_chunk + (pid_h // nheads_ngroups_ratio) * stride_cb_head
     dout_ptr += pid_b * stride_dout_batch + pid_c * chunk_size * stride_dout_seqlen + pid_h * stride_dout_head
     dt_ptr += pid_b * stride_dt_batch + pid_c * stride_dt_chunk + pid_h * stride_dt_head
-    ddt_ptr += pid_b * stride_ddt_batch + pid_c * stride_ddt_chunk + pid_h * stride_ddt_head
+    ddt_ptr += pid_b * stride_ddt_batch + pid_c * stride_ddt_chunk + pid_h * stride_ddt_head + pid_n * stride_ddt_tile
     dA_cumsum_ptr += pid_b * stride_dA_cs_batch + pid_c * stride_dA_cs_chunk + pid_h * stride_dA_cs_head
     b_ptr += pid_b * stride_b_batch + pid_c * chunk_size * stride_b_seqlen + (pid_h // nheads_ngroups_ratio) * stride_b_head
     dstates_ptr += pid_b * stride_dstates_batch + pid_c * stride_dstates_chunk + pid_h * stride_dstates_head
@@ -223,10 +230,21 @@ def _chunk_scan_chunk_state_bwd_dx_kernel(
             tl.store(dD_ptrs, dD, mask=offs_n < hdim)
         else:
             dD = tl.sum(dout_res * x)
-            tl.store(dD_ptr, dD)
+            if DETERMINISTIC_REDUCTION:
+                tl.store(dD_ptr + pid_n * stride_dD_hdim, dD)
+            else:
+                tl.atomic_add(dD_ptr, dD)
     ddt = tl.sum(acc * x, axis=1)
     ddt_ptrs = ddt_ptr + offs_m * stride_ddt_csize
-    tl.atomic_add(ddt_ptrs, ddt, mask=offs_m < chunk_size)
+    if DETERMINISTIC_REDUCTION:
+        tl.store(ddt_ptrs, ddt, mask=offs_m < chunk_size)
+    else:
+        tl.atomic_add(ddt_ptrs, ddt, mask=offs_m < chunk_size)
+
+
+_CHUNK_SCAN_CHUNK_STATE_BWD_DX_MIN_BLOCK_N = min(
+    cfg.kwargs['BLOCK_SIZE_N'] for cfg in _chunk_scan_chunk_state_bwd_dx_kernel.configs
+)
 
 
 def _chunk_scan_chunk_state_bwd_dx(x, dt, dA_cumsum, B, CB, dout, dstates, D=None, seq_idx=None, dx=None):
@@ -242,21 +260,37 @@ def _chunk_scan_chunk_state_bwd_dx(x, dt, dA_cumsum, B, CB, dout, dstates, D=Non
     assert dstates.shape == (batch, nchunks, nheads, headdim, dstate)
     if seq_idx is not None:
         assert seq_idx.shape == (batch, seqlen)
+    deterministic = use_deterministic_mode()
     if D is not None:
         assert D.shape == (nheads, headdim) or D.shape == (nheads,)
         assert D.stride(-1) == 1
         BLOCK_SIZE_min = 32
-        dD = torch.empty(triton.cdiv(chunk_size, BLOCK_SIZE_min), batch, nchunks, nheads,
-                         headdim if D.dim() == 2 else 1, device=D.device, dtype=torch.float32)
+        pid_m_tiles = triton.cdiv(chunk_size, BLOCK_SIZE_min)
+        pid_n_tiles = math.ceil(headdim / _CHUNK_SCAN_CHUNK_STATE_BWD_DX_MIN_BLOCK_N)
+        if D.dim() == 2:
+            dD_hdim = headdim
+        elif deterministic:
+            dD_hdim = pid_n_tiles
+        else:
+            dD_hdim = 1
+        dD = torch.zeros(pid_m_tiles, batch, nchunks, nheads, dD_hdim, device=D.device, dtype=torch.float32)
+        dD_strides = (dD.stride(0), dD.stride(1), dD.stride(2), dD.stride(3), dD.stride(4))
     else:
         dD = None
-    dD_strides = ((dD.stride(0), dD.stride(1), dD.stride(2), dD.stride(3), dD.stride(4))
-                    if D is not None else (0, 0, 0, 0, 0))
+        dD_strides = (0, 0, 0, 0, 0)
     if dx is None:
         dx = torch.empty_like(x)
     else:
         assert dx.shape == x.shape
-    ddt = torch.empty(batch, nheads, nchunks, chunk_size, device=dout.device, dtype=torch.float32)
+    tile_count = math.ceil(headdim / _CHUNK_SCAN_CHUNK_STATE_BWD_DX_MIN_BLOCK_N)
+    ddt, stride_ddt_tile = alloc_tile_workspace(
+        (batch, nheads, nchunks, chunk_size),
+        tile_count,
+        torch.float32,
+        dout.device,
+        deterministic,
+        zero_init=True,
+    )
     grid_dx = lambda META: (triton.cdiv(chunk_size, META['BLOCK_SIZE_M']) * triton.cdiv(headdim, META['BLOCK_SIZE_N']),
                         batch * nchunks, nheads)
     with torch.cuda.device(x.device.index):
@@ -274,21 +308,24 @@ def _chunk_scan_chunk_state_bwd_dx(x, dt, dA_cumsum, B, CB, dout, dstates, D=Non
             B.stride(0), B.stride(1), B.stride(2), B.stride(3),
             dstates.stride(0), dstates.stride(1), dstates.stride(2), dstates.stride(3), dstates.stride(4),
             dx.stride(0), dx.stride(1), dx.stride(2), dx.stride(3),
-            ddt.stride(0), ddt.stride(2), ddt.stride(1), ddt.stride(3),
+            ddt.stride(0), ddt.stride(2), ddt.stride(1), ddt.stride(3), stride_ddt_tile,
             dD_strides[1], dD_strides[2], dD_strides[3], dD_strides[0], dD_strides[4],
             D is not None,
             D.dim() == 2 if D is not None else True,
             HAS_SEQ_IDX=seq_idx is not None,
             BLOCK_SIZE_DSTATE=max(triton.next_power_of_2(dstate), 16),
-            IS_TRITON_22=TRITON_22
+            IS_TRITON_22=TRITON_22,
+            DETERMINISTIC_REDUCTION=deterministic,
         )
     if D is not None:
         BLOCK_SIZE_actual = _chunk_scan_chunk_state_bwd_dx_kernel.best_config.kwargs["BLOCK_SIZE_M"]
         n_valid_blocks = (chunk_size + BLOCK_SIZE_actual - 1) // BLOCK_SIZE_actual
-        dD = dD[:n_valid_blocks].sum(dim=(0, 1, 2)).to(dtype=D.dtype)
+        dD = dD[:n_valid_blocks].sum(dim=(0, 1, 2))
         if D.dim() == 1:
-            dD = rearrange(dD, "h 1 -> h")
-    return dx, ddt.to(dtype=dt.dtype), dD
+            dD = dD.sum(dim=-1)
+        dD = dD.to(dtype=D.dtype)
+    ddt = finalize_tile_workspace(ddt, deterministic)
+    return dx, ddt, dD
 
 
 def _mamba_chunk_scan_combined_fwd(x, dt, A, B, C, chunk_size, D=None, z=None, dt_bias=None, initial_states=None, seq_idx=None, cu_seqlens=None, dt_softplus=False, dt_limit=(0.0, float("inf"))):
