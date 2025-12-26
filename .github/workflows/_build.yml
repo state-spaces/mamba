@@ -144,6 +144,15 @@ jobs:
         run: |
           ls dist
 
+      - name: Upload wheel as artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ inputs.python-version }}-${{ inputs.cuda-version }}-${{ inputs.torch-version }}-${{ inputs.cxx11_abi }}
+          path: dist/*.whl
+          retention-days: 7
+          if-no-files-found: ignore
+
       - name: Get Release with tag
         id: get_current_release
         uses: joutvhu/get-release@v1
