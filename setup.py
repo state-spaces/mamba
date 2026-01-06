@@ -217,7 +217,8 @@ if not SKIP_CUDA_BUILD:
             "nvcc": [
                 "-O3",
                 "-std=c++17",
-                f"--offload-arch={os.getenv('HIP_ARCHITECTURES', 'native')}",
+                # Support multiple architectures via semicolon-separated HIP_ARCHITECTURES
+                *[f'--offload-arch={arch}' for arch in os.getenv('HIP_ARCHITECTURES', 'native').split(';')],
                 "-U__CUDA_NO_HALF_OPERATORS__",
                 "-U__CUDA_NO_HALF_CONVERSIONS__",
                 "-fgpu-flush-denormals-to-zero",
