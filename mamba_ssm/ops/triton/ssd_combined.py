@@ -56,11 +56,23 @@ def init_to_zero(names):
     return lambda nargs: [nargs[name].zero_() for name in names if nargs[name] is not None]
 
 
-def rearrange_and_update_stride(tensor, pattern=None, dim=2):
-    # ensure tensor.stride(dim) is a multiple of eight after rearranging according to pattern,
-    # if not call contiguous(), rearrange only if pattern is not None
-    tensor_rearranged = rearrange(tensor, pattern) if pattern is not None else tensor
-    return tensor_rearranged.contiguous() if tensor_rearranged.stride(dim) % 8 != 0 else tensor_rearranged
+def ensure_stride(inp):
+    """
+    Return inp, while ensuring that stride(1) of the returned tensor is a multiple of 8.
+
+    The inp tensor is of shape [batch, length, channels], where channels is assumed, and tested, to be
+    a multiple of 8. If it is contiguous, inp will have strides [length*channels, channels, 1]. The
+    output of this function will be rearranged to shape [batch, channels, length] before being passed to
+    causal_conv1d. That rearranged tensor will have strides [length*channels, 1, channels].
+    causal_conv1d handles this stride configuration (which it calls channels_last) directly and
+    efficiently, after first recognizing it (when stride[1]==1 and stride[2]>1). causal_conv1d cannot
+    operate on a channels_last tensor for which stride[2] is not a multiple of 8, and in that case will
+    raise an exception. This function prevents the aforementioned exception by returning a tensor with
+    stride(1) equal to channels, by making the returned tensor contiguous, if inp.stride(1) is not
+    already a multiple of 8.
+    """
+    assert inp.shape[2] % 8 == 0, "Number of convolution channels is required to be a multiple of 8."
+    return inp if inp.stride(1) % 8 == 0 else inp.contiguous()
 
 
 @triton.autotune(
@@ -826,8 +838,8 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
         zx0, z, xBC, dt = torch.split(zxbcdt, [2 * d_nonssm, dim, dim + ngroups * dstate * 2, nheads], dim=-1)
         seq_idx = seq_idx.contiguous() if seq_idx is not None else None
         xBC_conv = rearrange(
-            causal_conv1d_fwd_function(rearrange_and_update_stride(xBC, "b s d -> b d s"),
-                                                 conv1d_weight, conv1d_bias, seq_idx, None, None, activation in ["silu", "swish"]),
+            causal_conv1d_fwd_function(rearrange(ensure_stride(xBC), "b s d -> b d s"),
+                conv1d_weight, conv1d_bias, seq_idx, None, None, activation in ["silu", "swish"]),
             "b d s -> b s d"
         )
         x, B, C = torch.split(xBC_conv, [dim, ngroups * dstate, ngroups * dstate], dim=-1)
@@ -900,8 +912,8 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
         zx0, z, xBC, dt = torch.split(zxbcdt, [2 * d_nonssm, dim, dim + 2 * ctx.ngroups * dstate, nheads], dim=-1)
         # Recompute x, B, C
         xBC_conv = rearrange(
-            causal_conv1d_fwd_function(rearrange_and_update_stride(xBC, "b s d -> b d s"),
-                                       conv1d_weight, conv1d_bias, seq_idx, None, None, ctx.activation in ["silu", "swish"]),
+            causal_conv1d_fwd_function(rearrange(ensure_stride(xBC), "b s d -> b d s"),
+                conv1d_weight, conv1d_bias, seq_idx, None, None, ctx.activation in ["silu", "swish"]),
             "b d s -> b s d"
         )
         x, B, C = torch.split(xBC_conv, [dim, ctx.ngroups * dstate, ctx.ngroups * dstate], dim=-1)
@@ -949,16 +961,17 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
             doutproj_bias = dout_og.sum(dim=(0, 1)) if outproj_bias is not None else None
         else:
             doutproj_weight, doutproj_bias = None, None
-        dxBC_given = rearrange(dxBC_given, "b s d -> b d s")
         dxBC_given_update, dweight, dbias, *_ = causal_conv1d_bwd_function(
-            rearrange_and_update_stride(xBC, "b s d -> b d s"), conv1d_weight, conv1d_bias,
-            rearrange(dxBC, "b s d -> b d s"), seq_idx, None, None, rearrange_and_update_stride(dxBC_given), False, ctx.activation in ["silu", "swish"]
+            rearrange(ensure_stride(xBC), "b s d -> b d s"), conv1d_weight, conv1d_bias,
+            # It might be okay to not run ensure_stride on dxBC, but we're not sure. So playing safe here.
+            rearrange(ensure_stride(dxBC), "b s d -> b d s"), seq_idx, None, None,
+            rearrange(ensure_stride(dxBC_given), "b s d -> b d s"), False, ctx.activation in ["silu", "swish"]
         )
+        dxBC_given_update = rearrange(dxBC_given_update, "b d s -> b s d")
         if dxBC_given.stride() != dxBC_given_update.stride():
             dxBC_given.copy_(dxBC_given_update)
         else:
             dxBC_given = dxBC_given_update
-        dxBC_given = rearrange(dxBC_given, "b d s -> b s d")
         return dzxbcdt, dweight, dbias, ddt_bias, dA, dD, None, dinitial_states, None, None, None, None, drmsnorm_weight, None, doutproj_weight, doutproj_bias, None, None, None
 
 
