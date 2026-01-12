@@ -97,6 +97,7 @@ jobs:
   publish_package:
     name: Publish package
     needs: [build_wheels]
+    if: always() && !cancelled()
 
     runs-on: ubuntu-latest
 
