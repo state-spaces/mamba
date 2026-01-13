@@ -221,6 +221,7 @@ if not SKIP_CUDA_BUILD:
                 "-U__CUDA_NO_HALF_OPERATORS__",
                 "-U__CUDA_NO_HALF_CONVERSIONS__",
                 "-fgpu-flush-denormals-to-zero",
+                "-DWIN32_LEAN_AND_MEAN",
             ]
             + cc_flag,
         }
@@ -392,12 +393,13 @@ setup(
     },
     python_requires=">=3.9",
     install_requires=[
-        "torch",
+        "torch>=2.4.0",
         "packaging",
         "ninja",
         "einops",
-        "triton",
-        "transformers",
-        # "causal_conv1d>=1.4.0",
+        "transformers>=4.51.3"
     ],
+    extras_require={'win32': ['triton-windows'],
+                    'linux': ['triton']
+                    }
 )
