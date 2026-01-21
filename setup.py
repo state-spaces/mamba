@@ -398,6 +398,7 @@ setup(
         "einops",
         "triton",
         "transformers",
+        "huggingface_hub>=0.23.5",
         # "causal_conv1d>=1.4.0",
     ],
 )
