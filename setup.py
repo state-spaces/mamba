@@ -157,6 +157,7 @@ if not SKIP_CUDA_BUILD:
                     "Refer to the README.md for detailed instructions.",
                     UserWarning
                 )
+            cc_flag.append(f"-DROCM_MAJOR_VERSION={hip_version.major}")
 
         cc_flag.append("-DBUILD_PYTHON_PACKAGE")
 
