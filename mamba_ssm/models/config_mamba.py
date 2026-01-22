@@ -1,8 +1,9 @@
 from dataclasses import dataclass, field
+from transformers import PretrainedConfig
 
 
 @dataclass
-class MambaConfig:
+class MambaConfig(PretrainedConfig):
 
     d_model: int = 2560
     d_intermediate: int = 0
