@@ -66,6 +66,10 @@ struct SSMParamsBase {
     void *__restrict__ x_ptr;
     void *__restrict__ z_ptr;
     void *__restrict__ out_z_ptr;
+    void *__restrict__ initial_state_ptr;  // Optional initial state (batch, dim, dstate)
+    index_t initial_state_batch_stride;
+    index_t initial_state_d_stride;
+    index_t initial_state_dstate_stride;
 };
 
 struct SSMParamsBwd: public SSMParamsBase {
