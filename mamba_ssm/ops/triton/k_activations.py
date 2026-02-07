@@ -5,16 +5,18 @@ import torch
 import triton
 import triton.language as tl
 
+from mamba_ssm.utils.determinism import autotune_configs
+
 
 @triton.autotune(
-    configs=[
+    configs=autotune_configs([
         triton.Config({'BLOCK_N': 32}),
         triton.Config({'BLOCK_N': 64}),
         triton.Config({'BLOCK_N': 128}),
         triton.Config({'BLOCK_N': 256}),
         triton.Config({'BLOCK_N': 512}),
         triton.Config({'BLOCK_N': 1024}),
-    ],
+    ]),
     key=['ncols'],
 )
 @triton.jit
@@ -61,14 +63,14 @@ def _swiglu_fwd(xy, out=None):
 
 
 @triton.autotune(
-    configs=[
+    configs=autotune_configs([
         triton.Config({'BLOCK_N': 32}),
         triton.Config({'BLOCK_N': 64}),
         triton.Config({'BLOCK_N': 128}),
         triton.Config({'BLOCK_N': 256}),
         triton.Config({'BLOCK_N': 512}),
         triton.Config({'BLOCK_N': 1024}),
-    ],
+    ]),
     key=['ncols'],
 )
 @triton.heuristics({"RECOMPUTE_OUTPUT": lambda args: args["OUT"] is not None})
