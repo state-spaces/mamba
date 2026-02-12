@@ -12,10 +12,17 @@
     #include <cub/block/block_load.cuh>
     #include <cub/block/block_store.cuh>
     #include <cub/block/block_scan.cuh>
+    #define ROCM_ONLY(x)
 #else
     #include <hipcub/hipcub.hpp>
     namespace cub = hipcub;
+    #define ROCM_ONLY(x) x
 #endif
+
+#ifndef M_LOG2E
+#define M_LOG2E 1.4426950408889634074
+#endif
+
 
 #include "selective_scan.h"
 #include "selective_scan_common.h"
@@ -311,7 +318,7 @@ template<int kNThreads, int kNItems, typename input_t, typename weight_t>
 void selective_scan_fwd_launch(SSMParamsBase &params, cudaStream_t stream) {
     // Only kNRows == 1 is tested for now, which ofc doesn't differ from previously when we had each block
     // processing 1 row.
-    constexpr int kNRows = 1;
+    static constexpr int kNRows = 1;
     BOOL_SWITCH(params.seqlen % (kNThreads * kNItems) == 0, kIsEvenLen, [&] {
         BOOL_SWITCH(params.is_variable_B, kIsVariableB, [&] {
             BOOL_SWITCH(params.is_variable_C, kIsVariableC, [&] {
@@ -329,14 +336,9 @@ void selective_scan_fwd_launch(SSMParamsBase &params, cudaStream_t stream) {
 
                     
                     if (kSmemSize >= 48 * 1024) {
-                        #ifndef USE_ROCM
                         C10_CUDA_CHECK(cudaFuncSetAttribute(
-                            kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
-                        #else
-                        C10_CUDA_CHECK(cudaFuncSetAttribute(
-                            (void *) kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
-                            std::cerr << "Warning (selective_scan_fwd_kernel): attempting to set maxDynamicSharedMemorySize on an AMD GPU which is currently a non-op (in ROCm versions <= 6.1). This might lead to undefined behavior. \n" << std::endl;
-                        #endif
+                           ROCM_ONLY((void *)) kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
+                        ROCM_ONLY(std::cerr << "Warning (selective_scan_fwd_kernel): attempting to set maxDynamicSharedMemorySize on an AMD GPU which is currently a non-op (in ROCm versions <= 6.1). This might lead to undefined behavior. \n" << std::endl);
                     }
 
                     kernel<<<grid, Ktraits::kNThreads, kSmemSize, stream>>>(params);
