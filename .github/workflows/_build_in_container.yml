@@ -46,7 +46,7 @@ jobs:
           build-mount-path: "/var/lib/containerd/"
 
       - name: Restore /var/lib/containerd/
-        run: sudo sh -c "mv ${GITHUB_WORKSPACE}/docker/* /var/lib/docker"
+        run: sudo sh -c "mv ${GITHUB_WORKSPACE}/docker/* /var/lib/containerd"
 
       - name: Checkout source
         uses: actions/checkout@v4
