@@ -31,10 +31,14 @@ jobs:
     name: Build wheel (${{ inputs.container-image }})
     steps:
       - name: Move /var/lib/containerd/
-        run: sudo mv /var/lib/containerd/ "${GITHUB_WORKSPACE}/docker/containerd"
+        run: |
+          mkdir -p "${GITHUB_WORKSPACE}/docker/containerd"
+          sudo mv /var/lib/containerd/ "${GITHUB_WORKSPACE}/docker/containerd"
 
       - name: Move /var/lib/containerd/
-        run: sudo mv /var/lib/docker/ "${GITHUB_WORKSPACE}/docker/docker"
+        run: |
+          mkdir -p "${GITHUB_WORKSPACE}/docker/docker"
+          sudo mv /var/lib/docker/ "${GITHUB_WORKSPACE}/docker/docker"
 
       - name: Maximize build space
         uses: easimon/maximize-build-space@master
