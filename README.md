@@ -11,6 +11,9 @@
 > Tri Dao*, Albert Gu*\
 > Paper: https://arxiv.org/abs/2405.21060
 
+> **Mamba-3: Improved Sequence Modeling with Structured State Spaces**\
+> Paper: https://openreview.net/pdf?id=HwCvaJOiCj
+
 ## About
 
 Mamba is a new state space model architecture showing promising performance on information-dense data such as language modeling, where previous subquadratic models fall short of Transformers.
@@ -94,6 +97,28 @@ assert y.shape == x.shape
 
 A minimal version of the inner SSD module (Listing 1 from the Mamba-2 paper) with conversion between "discrete" and "continuous" SSM versions
 is at [modules/ssd_minimal.py](mamba_ssm/modules/ssd_minimal.py).
+
+### Mamba-3
+
+The Mamba-3 block is implemented at [modules/mamba3.py](mamba_ssm/modules/mamba3.py).
+
+A simpler version is at [modules/mamba3_simple.py](mamba_ssm/modules/mamba3_simple.py)
+
+Usage:
+``` python
+from mamba_ssm import Mamba3
+model = Mamba3(
+    d_model=dim, # Model dimension d_model
+    d_state=64,  # SSM state expansion factor
+    d_conv=4,    # Local convolution width
+    expand=2,    # Block expansion factor
+).to("cuda")
+y = model(x)
+assert y.shape == x.shape
+```
+
+Mamba-3 adds RoPE, BCNorm, and MIMO (multi-input multi-output) support on top of the SSD framework.
+To use Mamba-3 in a full language model, set `"layer": "Mamba3"` in `ssm_cfg`.
 
 ### Mamba Language Model
 
@@ -238,6 +263,12 @@ If you use this codebase, or otherwise find our work valuable, please cite Mamba
   author={Dao, Tri and Gu, Albert},
   booktitle={International Conference on Machine Learning (ICML)},
   year={2024}
+}
+
+@inproceedings{mamba3,
+  title={Mamba-3: Improved Sequence Modeling with Structured State Spaces},
+  booktitle={International Conference on Learning Representations (ICLR)},
+  year={2026}
 }
 
 ```
