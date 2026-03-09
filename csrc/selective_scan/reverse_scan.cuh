@@ -101,7 +101,40 @@ struct WarpReverseScan {
     #ifndef USE_ROCM
         #define WARP_THREADS CUB_WARP_THREADS(0)
     #else
-        #define WARP_THREADS HIPCUB_WARP_THREADS
+        // ROCm 7.0+: HIPCUB_WARP_THREADS (rocprim::warp_size()) is no longer constexpr.
+        // We need a compile-time constant for IS_ARCH_WARP below.
+        // See: https://rocm.docs.amd.com/en/latest/about/release-notes.html
+        #if defined(__AMDGCN_WAVEFRONT_SIZE)
+            // Deprecated but still available and constexpr in ROCm 7.x
+            #define WARP_THREADS __AMDGCN_WAVEFRONT_SIZE
+        #elif defined(__gfx942__) || defined(__gfx941__) || defined(__gfx940__)
+            // AMD Instinct MI300 series (CDNA3) - 64-wide wavefronts
+            #define WARP_THREADS 64
+        #elif defined(__gfx90a__)
+            // AMD Instinct MI200 series (CDNA2) - 64-wide wavefronts
+            #define WARP_THREADS 64
+        #elif defined(__gfx908__)
+            // AMD Instinct MI100 (CDNA1) - 64-wide wavefronts
+            #define WARP_THREADS 64
+        #elif defined(__gfx906__) || defined(__gfx900__)
+            // AMD Instinct MI50/MI60 (Vega) - 64-wide wavefronts
+            #define WARP_THREADS 64
+        #elif defined(__gfx1100__) || defined(__gfx1101__) || defined(__gfx1102__) || defined(__gfx1103__)
+            // AMD Radeon RX 7000 series (RDNA3) - 32-wide wavefronts
+            #define WARP_THREADS 32
+        #elif defined(__gfx1030__) || defined(__gfx1031__) || defined(__gfx1032__) || defined(__gfx1034__)
+            // AMD Radeon RX 6000 series (RDNA2) - 32-wide wavefronts
+            #define WARP_THREADS 32
+        #elif defined(__gfx1010__) || defined(__gfx1011__) || defined(__gfx1012__)
+            // AMD Radeon RX 5000 series (RDNA1) - 32-wide wavefronts
+            #define WARP_THREADS 32
+        #else
+            // Unknown architecture - default to 64 (CDNA/GCN)
+            // This may not be optimal for RDNA GPUs
+            #pragma message("Warning: Unknown AMD GPU architecture. Defaulting WARP_THREADS to 64. " \
+                            "For RDNA GPUs (gfx10xx/gfx11xx), this should be 32.")
+            #define WARP_THREADS 64
+        #endif
     #endif
     static constexpr bool IS_ARCH_WARP = (LOGICAL_WARP_THREADS == WARP_THREADS);
     /// The number of warp scan steps
@@ -129,7 +162,11 @@ struct WarpReverseScan {
     /// Constructor
     explicit __device__ __forceinline__
     WarpReverseScan()
-        : lane_id(threadIdx.x & 0x1f)
+#ifndef USE_ROCM
+        : lane_id(threadIdx.x & 0x1f)  // CUDA: 32-thread warps, mask = 31
+#else
+        : lane_id(threadIdx.x & (WARP_THREADS - 1))  // ROCm: use actual wavefront size (64 or 32)
+#endif
         , warp_id(IS_ARCH_WARP ? 0 : (lane_id / LOGICAL_WARP_THREADS))
         , member_mask(cub::WarpMask<LOGICAL_WARP_THREADS>(warp_id))
     {
