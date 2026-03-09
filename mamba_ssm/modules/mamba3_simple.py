@@ -16,6 +16,18 @@ except ImportError:
 
 from mamba_ssm.modules.mamba3 import apply_rotary_emb, compute_cumulative_rotary
 
+try:
+    from mamba_ssm.ops.triton.mamba3_ssd import mamba3_chunk_scan_combined
+except ImportError:
+    mamba3_chunk_scan_combined = None
+
+try:
+    from mamba_ssm.ops.triton.mamba3_combined import mamba3_chunk_scan_combined_triton
+    _has_triton_combined = True
+except ImportError:
+    mamba3_chunk_scan_combined_triton = None
+    _has_triton_combined = False
+
 
 class Mamba3Simple(nn.Module):
     def __init__(
@@ -40,6 +52,7 @@ class Mamba3Simple(nn.Module):
         mimo_rank=0,
         # Kernel options
         chunk_size=256,
+        use_triton_fwd=True,  # use Triton-accelerated forward when available
         layer_idx=None,
         device=None,
         dtype=None,
@@ -57,6 +70,7 @@ class Mamba3Simple(nn.Module):
         self.dt_limit = dt_limit
         self.learnable_init_states = learnable_init_states
         self.chunk_size = chunk_size
+        self.use_triton_fwd = use_triton_fwd
         self.layer_idx = layer_idx
 
         # Mamba-3 specific
@@ -223,8 +237,43 @@ class Mamba3Simple(nn.Module):
         # Initial states
         initial_states = repeat(self.init_states, "... -> b ...", b=batch) if self.learnable_init_states else None
 
-        # Run step-by-step recurrence (reference impl)
-        y = self._recurrence(x, dt, A, B, C, lam=lam, initial_states=initial_states, seq_idx=seq_idx)
+        # Choose between Triton-accelerated chunked path and step-by-step recurrence
+        _scan_fn = None
+        if _has_triton_combined and self.use_triton_fwd and mamba3_chunk_scan_combined_triton is not None:
+            _scan_fn = mamba3_chunk_scan_combined_triton
+        elif mamba3_chunk_scan_combined is not None:
+            _scan_fn = mamba3_chunk_scan_combined
+
+        if _scan_fn is not None:
+            # Compute trapezoidal weights
+            gamma_val = None
+            beta_val = None
+            if self.use_trapezoidal and lam is not None:
+                gamma_val = lam * dt  # (batch, seqlen, nheads)
+                beta_val = (1 - lam) * dt * torch.exp(dt * A.view(1, 1, self.nheads))
+            else:
+                gamma_val = dt  # Euler fallback
+
+            # B, C are already expanded to head level, so ngroups=nheads
+            # theta has already been applied via RoPE above, so pass theta=None
+            # to avoid double-application. However, mamba3_chunk_scan_combined
+            # expects B/C at group level if theta is provided (it expands internally).
+            # Since we already expanded and applied RoPE, pass theta=None and ngroups=nheads.
+            y = _scan_fn(
+                x, dt, A, B, C,
+                chunk_size=self.chunk_size,
+                gamma=gamma_val,
+                beta=beta_val if self.use_trapezoidal else None,
+                theta=None,  # RoPE already applied above
+                D=None,  # D applied outside
+                initial_states=initial_states,
+                return_final_states=False,
+                ngroups=self.nheads,  # B, C already at head level
+                seq_idx=seq_idx,
+            )
+        else:
+            # Fall back to step-by-step recurrence (reference impl)
+            y = self._recurrence(x, dt, A, B, C, lam=lam, initial_states=initial_states, seq_idx=seq_idx)
 
         # D skip + flatten (cast D to y's dtype to avoid float32 promotion)
         D = self.D.to(dtype=y.dtype)

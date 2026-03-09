@@ -40,6 +40,13 @@ except ImportError:
     mamba3_chunk_scan_combined = None
     mamba3_state_update = None
 
+try:
+    from mamba_ssm.ops.triton.mamba3_combined import mamba3_chunk_scan_combined_triton
+    _has_triton_combined = True
+except ImportError:
+    mamba3_chunk_scan_combined_triton = None
+    _has_triton_combined = False
+
 from torch.utils.checkpoint import checkpoint as gradient_checkpoint
 
 from mamba_ssm.distributed.tensor_parallel import ColumnParallelLinear, RowParallelLinear
@@ -95,6 +102,7 @@ class Mamba3(nn.Module, PyTorchModelHubMixin):
         # Fused kernel and sharding options
         chunk_size=256,
         use_mem_eff_path=True,  # gradient checkpointing for memory-efficient training
+        use_triton_fwd=True,  # use Triton-accelerated forward when available
         layer_idx=None,
         process_group=None,
         sequence_parallel=True,
@@ -128,6 +136,7 @@ class Mamba3(nn.Module, PyTorchModelHubMixin):
         self.dt_limit = dt_limit
         self.chunk_size = chunk_size
         self.use_mem_eff_path = use_mem_eff_path
+        self.use_triton_fwd = use_triton_fwd
         self.layer_idx = layer_idx
 
         # Mamba-3 specific
@@ -429,9 +438,16 @@ class Mamba3(nn.Module, PyTorchModelHubMixin):
         else:
             gamma = dt  # Euler fallback
 
-        if mamba3_chunk_scan_combined is not None:
+        # Choose between Triton-accelerated and PyTorch-only chunked forward
+        _scan_fn = None
+        if _has_triton_combined and self.use_triton_fwd and mamba3_chunk_scan_combined_triton is not None:
+            _scan_fn = mamba3_chunk_scan_combined_triton
+        elif mamba3_chunk_scan_combined is not None:
+            _scan_fn = mamba3_chunk_scan_combined
+
+        if _scan_fn is not None:
             # B, C are already expanded to head level, so ngroups=nheads
-            return mamba3_chunk_scan_combined(
+            return _scan_fn(
                 x, dt, A, B, C,
                 chunk_size=self.chunk_size,
                 gamma=gamma,

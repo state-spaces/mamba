@@ -46,6 +46,7 @@ def mamba3_ssd_chunked(
     gamma=None,
     beta=None,
     D=None,
+    z=None,
     initial_states=None,
     return_final_states=False,
     initial_prev_Bx=None,
@@ -354,6 +355,11 @@ def mamba3_ssd_chunked(
             else:
                 Y = Y + X * rearrange(D, "h p -> 1 1 h p")
 
+    # z gating (SiLU)
+    if z is not None:
+        z = z.float()
+        Y = Y * F.silu(z)
+
     # Cast back to original dtype
     Y = Y.to(out_dtype)
 
@@ -500,6 +506,9 @@ def mamba3_chunk_scan_combined(
             gamma = F.pad(gamma, (0, 0, 0, pad_len))
         if beta is not None:
             beta = F.pad(beta, (0, 0, 0, pad_len))
+        if z is not None:
+            z = F.pad(z, (0, 0, 0, 0, 0, pad_len)) if not is_mimo else \
+                F.pad(z, (0, 0, 0, 0, 0, 0, 0, pad_len))
         if seq_idx is not None:
             # Pad with -1 so padded positions are never equal to real doc indices
             seq_idx = F.pad(seq_idx, (0, pad_len), value=-1)
@@ -510,6 +519,7 @@ def mamba3_chunk_scan_combined(
         gamma=gamma,
         beta=beta,
         D=D,
+        z=z,
         initial_states=initial_states,
         return_final_states=return_final_states,
         initial_prev_Bx=initial_prev_Bx,
