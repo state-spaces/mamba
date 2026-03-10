@@ -1081,7 +1081,7 @@ class ChunkStateFn(torch.autograd.Function):
 def chunk_state(B, x, dt, dA_cumsum, states_in_fp32=True):
     """
     Argument:
-        B: (batch, seqlen, ngroups, headdim)
+        B: (batch, seqlen, ngroups, dstate)
         x: (batch, seqlen, nheads, headdim)
         dt: (batch, nheads, nchunks, chunk_size)
         dA_cumsum: (batch, nheads, nchunks, chunk_size)
@@ -1094,7 +1094,7 @@ def chunk_state(B, x, dt, dA_cumsum, states_in_fp32=True):
 def chunk_state_ref(B, x, dt, dA_cumsum):
     """
     Argument:
-        B: (batch, seqlen, ngroups, headdim)
+        B: (batch, seqlen, ngroups, dstate)
         x: (batch, seqlen, nheads, headdim)
         dt: (batch, nheads, nchunks, chunk_size)
         dA_cumsum: (batch, nheads, nchunks, chunk_size)
