@@ -4,3 +4,13 @@ build/
 **.so
 *.hip
 *_hip.*
+
+# Virtual environment
+.venv/
+venv/
+*.venv
+
+# Data
+data/
+!data/.gitkeep
+checkpoints/

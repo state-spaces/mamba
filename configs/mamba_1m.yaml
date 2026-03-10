@@ -1,0 +1,16 @@
+model_params:
+  d_model: 1024
+  n_layer: 24
+  vocab_size: 5
+  seq_len: 1048576
+
+train_params:
+  lr: 0.0001
+  min_lr: 0.00001
+  weight_decay: 0.1
+  batch_size: 1
+  epochs: 5
+
+data_params:
+  train_path: "data/processed/train.npy"
+  val_path: "data/processed/val.npy"

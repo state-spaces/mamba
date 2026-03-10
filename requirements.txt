@@ -1,0 +1,14 @@
+torch>=2.1
+numpy
+tqdm
+biopython
+pysam
+pyfastx
+transformers
+datasets
+accelerate
+PyYAML
+tensorboard
+mamba-ssm
+requests
+
