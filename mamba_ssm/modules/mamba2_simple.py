@@ -159,7 +159,6 @@ class Mamba2Simple(nn.Module):
             z, xBC, dt = torch.split(
                 zxbcdt, [self.d_inner, self.d_inner + 2 * self.ngroups * self.d_state, self.nheads], dim=-1
             )
-            dt = F.softplus(dt + self.dt_bias)  # (B, L, nheads)
             assert self.activation in ["silu", "swish"]
 
             # 1D Convolution
@@ -190,6 +189,8 @@ class Mamba2Simple(nn.Module):
                 z=None,
                 seq_idx=seq_idx,
                 initial_states=initial_states,
+                dt_bias=self.dt_bias,
+                dt_softplus=True,
                 **dt_limit_kwargs,
             )
             y = rearrange(y, "b l h p -> b l (h p)")
