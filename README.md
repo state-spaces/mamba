@@ -29,10 +29,11 @@ It can also be built from source with `pip install .` from this repository.
 Try passing `--no-build-isolation` to `pip` if installation encounters difficulties either when building from source or installing from PyPi. Common `pip` complaints that can be resolved in this way include PyTorch versions, but other cases exist as well.
 
 Other requirements:
-- Linux
 - NVIDIA GPU
 - PyTorch 1.12+
 - CUDA 11.6+
+
+Note: on Windows, it is recommended to use x64 Native Tools Command Prompt for VS with DISTUTILS_USE_SDK=1. 
 
 For AMD cards, see additional prerequisites below.
 
