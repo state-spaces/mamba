@@ -34,16 +34,14 @@ on:
         required: false
         type: string
 
-  push:
-
 jobs:
   build-wheels:
     uses: ./.github/workflows/_build.yml
     with:
       runs-on: ${{ inputs.runs-on || 'ubuntu-22.04' }}
-      python-version: ${{ inputs.python-version || '3.10' }}
+      python-version: ${{ inputs.python-version || '3.12' }}
       cuda-version: ${{ inputs.cuda-version || '12.9.1' }}
-      torch-version: ${{ inputs.torch-version || '2.7.1' }}
-      cxx11_abi: ${{ inputs.cxx11_abi || 'FALSE' }}
+      torch-version: ${{ inputs.torch-version || '2.10.0' }}
+      cxx11_abi: ${{ inputs.cxx11_abi || 'TRUE' }}
       upload-to-release: ${{ inputs.upload-to-release || false }}
-      release-version: ${{ inputs.release-version || 'v2.2.5' }}
+      release-version: ${{ inputs.release-version || 'v2.2.6.post3' }}
