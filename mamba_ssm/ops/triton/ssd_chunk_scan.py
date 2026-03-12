@@ -497,7 +497,7 @@ def _chunk_scan_bwd_dstates_kernel(
             seq_idx_k = tl.load(seq_idx_ptrs, mask=offs_k < chunk_size_limit - k, other=-1)
             scale_k = tl.where(seq_idx_k == seq_idx_prev, tl.exp(dA_cs_k), 0.0)
         dout = (dout * scale_k).to(dout_ptr.dtype.element_ty)
-        c = tl.load(c_ptrs, mask=(offs_k[:, None] < chunk_size_limit - k) & (offs_n[None, :] < dstate), other=0.0)
+        c = tl.load(c_ptrs, mask=(offs_k[:, None] < chunk_size_limit - k) & (offs_n[None, :] < dstate), other=0.0).to(dout_ptr.dtype.element_ty)
         acc += tl.dot(dout, c)
         dout_ptrs += BLOCK_SIZE_K * stride_dout_seqlen
         c_ptrs += BLOCK_SIZE_K * stride_c_seqlen
