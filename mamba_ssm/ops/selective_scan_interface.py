@@ -17,7 +17,10 @@ except ImportError:
 
 from mamba_ssm.ops.triton.layer_norm import _layer_norm_fwd
 
-import selective_scan_cuda
+try:
+    import selective_scan_cuda
+except ImportError:
+    selective_scan_cuda = None
 
 
 class SelectiveScanFn(torch.autograd.Function):
@@ -109,7 +112,10 @@ def selective_scan_fn(u, delta, A, B, C, D=None, z=None, delta_bias=None, delta_
     last_state has shape (batch, dim, dstate). Note that the gradient of the last state is
     not considered in the backward pass.
     """
-    return SelectiveScanFn.apply(u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state)
+    if selective_scan_cuda is None:
+        return selective_scan_ref(u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state)
+    else:
+        return SelectiveScanFn.apply(u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state)
 
 
 def selective_scan_ref(u, delta, A, B, C, D=None, z=None, delta_bias=None, delta_softplus=False,
@@ -376,9 +382,15 @@ def mamba_inner_fn(
     A, B=None, C=None, D=None, delta_bias=None, B_proj_bias=None,
     C_proj_bias=None, delta_softplus=True, checkpoint_lvl=1, b_rms_weight= None, c_rms_weight= None, dt_rms_weight= None, b_c_dt_rms_eps=1e-6
 ):
-    return MambaInnerFn.apply(xz, conv1d_weight, conv1d_bias, x_proj_weight, delta_proj_weight,
+    if causal_conv1d_cuda is None:
+        return mamba_inner_ref(xz, conv1d_weight, conv1d_bias, x_proj_weight, delta_proj_weight,
+                               out_proj_weight, out_proj_bias,
+                               A, B, C, D, delta_bias, B_proj_bias, C_proj_bias, delta_softplus)
+    else:
+        return MambaInnerFn.apply(xz, conv1d_weight, conv1d_bias, x_proj_weight, delta_proj_weight,
                               out_proj_weight, out_proj_bias,
                               A, B, C, D, delta_bias, B_proj_bias, C_proj_bias, delta_softplus, checkpoint_lvl, b_rms_weight, c_rms_weight, dt_rms_weight, b_c_dt_rms_eps)
+
 
 
 def mamba_inner_ref(
