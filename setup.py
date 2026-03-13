@@ -172,27 +172,42 @@ if not SKIP_CUDA_BUILD:
                     "Note: make sure nvcc has a supported version by running nvcc -V."
                 )
 
-        cc_flag.append("-gencode")
-        cc_flag.append("arch=compute_75,code=sm_75")
-        cc_flag.append("-gencode")
-        cc_flag.append("arch=compute_80,code=sm_80")
-        cc_flag.append("-gencode")
-        cc_flag.append("arch=compute_87,code=sm_87")
-        if bare_metal_version >= Version("11.8"):
+        # Allow overriding CUDA architectures via TORCH_CUDA_ARCH_LIST
+        # (standard PyTorch convention, used by flash-attention, xformers, etc.)
+        cuda_arch_list = os.environ.get("TORCH_CUDA_ARCH_LIST", None)
+        if cuda_arch_list:
+            for arch in cuda_arch_list.replace(" ", "").split(";"):
+                arch = arch.strip()
+                if not arch:
+                    continue
+                if "+" in arch:  # e.g. "8.6+PTX"
+                    arch = arch.split("+")[0]
+                major, minor = arch.split(".")
+                cc = f"{major}{minor}"
+                cc_flag.append("-gencode")
+                cc_flag.append(f"arch=compute_{cc},code=sm_{cc}")
+        else:
             cc_flag.append("-gencode")
-            cc_flag.append("arch=compute_90,code=sm_90")
-        if bare_metal_version >= Version("12.8"):
+            cc_flag.append("arch=compute_75,code=sm_75")
             cc_flag.append("-gencode")
-            cc_flag.append("arch=compute_100,code=sm_100")
+            cc_flag.append("arch=compute_80,code=sm_80")
             cc_flag.append("-gencode")
-            cc_flag.append("arch=compute_120,code=sm_120")
-        if bare_metal_version >= Version("13.0"):
-            cc_flag.append("-gencode")
-            cc_flag.append("arch=compute_103,code=sm_103")
-            cc_flag.append("-gencode")
-            cc_flag.append("arch=compute_110,code=sm_110")
-            cc_flag.append("-gencode")
-            cc_flag.append("arch=compute_121,code=sm_121")
+            cc_flag.append("arch=compute_87,code=sm_87")
+            if bare_metal_version >= Version("11.8"):
+                cc_flag.append("-gencode")
+                cc_flag.append("arch=compute_90,code=sm_90")
+            if bare_metal_version >= Version("12.8"):
+                cc_flag.append("-gencode")
+                cc_flag.append("arch=compute_100,code=sm_100")
+                cc_flag.append("-gencode")
+                cc_flag.append("arch=compute_120,code=sm_120")
+            if bare_metal_version >= Version("13.0"):
+                cc_flag.append("-gencode")
+                cc_flag.append("arch=compute_103,code=sm_103")
+                cc_flag.append("-gencode")
+                cc_flag.append("arch=compute_110,code=sm_110")
+                cc_flag.append("-gencode")
+                cc_flag.append("arch=compute_121,code=sm_121")
 
 
     # HACK: The compiler flag -D_GLIBCXX_USE_CXX11_ABI is set to be the same as
