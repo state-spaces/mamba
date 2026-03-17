@@ -49,7 +49,7 @@ def get_platform():
     Returns the platform name as used in wheel filenames.
     """
     if sys.platform.startswith("linux"):
-        return "linux_x86_64"
+        return f"linux_{platform.machine()}"
     elif sys.platform == "darwin":
         mac_version = ".".join(platform.mac_ver()[0].split(".")[:2])
         return f"macosx_{mac_version}_x86_64"
@@ -171,6 +171,12 @@ if not SKIP_CUDA_BUILD:
                     f"{PACKAGE_NAME} is only supported on CUDA 11.6 and above.  "
                     "Note: make sure nvcc has a supported version by running nvcc -V."
                 )
+
+        # If system CUDA and PyTorch CUDA have different major versions,
+        # clear TORCH_CUDA_ARCH_LIST to prevent cpp_extension from erroring
+        torch_cuda_version = parse(torch.version.cuda)
+        if bare_metal_version.major != torch_cuda_version.major:
+            os.environ["TORCH_CUDA_ARCH_LIST"] = ""
 
         cc_flag.append("-gencode")
         cc_flag.append("arch=compute_75,code=sm_75")
@@ -303,6 +309,10 @@ def get_wheel_url():
     mamba_ssm_version = get_package_version()
     if os.environ.get("NVIDIA_PRODUCT_NAME", "") == "PyTorch":
         torch_version = str(os.environ.get("NVIDIA_PYTORCH_VERSION"))
+        # On NGC images, use the container's CUDA version (matching how wheels are built)
+        ngc_cuda_version = os.environ.get("CUDA_VERSION", "")
+        if ngc_cuda_version:
+            cuda_version = str(parse(ngc_cuda_version).major)
     else:
         torch_version = f"{torch_version_raw.major}.{torch_version_raw.minor}"
     cxx11_abi = str(torch._C._GLIBCXX_USE_CXX11_ABI).upper()
