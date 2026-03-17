@@ -11,6 +11,12 @@
 > Tri Dao*, Albert Gu*\
 > Paper: https://arxiv.org/abs/2405.21060
 
+![Mamba-3](assets/mamba3.png "Inference-first State Space Model")
+> **Mamba-3: Improved Sequence Modeling using State Space Principles**\
+>     **Through Structured State Space Duality**\
+> Aakash Lahoti*, Kevin Y. Li*, Berlin Chen*, Caitlin Wang*, Aviv Bick, J. Zico Kolter, Tri Dao†, Albert Gu†\
+> Paper: https://arxiv.org/abs/2603.15569
+
 ## About
 
 Mamba is a new state space model architecture showing promising performance on information-dense data such as language modeling, where previous subquadratic models fall short of Transformers.
@@ -240,4 +246,13 @@ If you use this codebase, or otherwise find our work valuable, please cite Mamba
   year={2024}
 }
 
+@misc{lahoti2026mamba3improvedsequencemodeling,
+      title={Mamba-3: Improved Sequence Modeling using State Space Principles}, 
+      author={Aakash Lahoti and Kevin Y. Li and Berlin Chen and Caitlin Wang and Aviv Bick and J. Zico Kolter and Tri Dao and Albert Gu},
+      year={2026},
+      eprint={2603.15569},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2603.15569}, 
+}
 ```
