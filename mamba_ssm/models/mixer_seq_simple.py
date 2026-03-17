@@ -14,6 +14,7 @@ import torch.nn as nn
 from mamba_ssm.models.config_mamba import MambaConfig
 from mamba_ssm.modules.mamba_simple import Mamba
 from mamba_ssm.modules.mamba2 import Mamba2
+from mamba_ssm.modules.mamba3 import Mamba3
 from mamba_ssm.modules.mha import MHA
 from mamba_ssm.modules.mlp import GatedMLP
 from mamba_ssm.modules.block import Block
@@ -51,10 +52,11 @@ def create_block(
         # Create a copy of the config to modify
         ssm_cfg = copy.deepcopy(ssm_cfg) if ssm_cfg is not None else {}
         ssm_layer = ssm_cfg.pop("layer", "Mamba1")
-        if ssm_layer not in ["Mamba1", "Mamba2"]:
-            raise ValueError(f"Invalid ssm_layer: {ssm_layer}, only support Mamba1 and Mamba2")
+        if ssm_layer not in ["Mamba1", "Mamba2", "Mamba3"]:
+            raise ValueError(f"Invalid ssm_layer: {ssm_layer}, only support Mamba1, Mamba2, and Mamba3")
+        layer_cls = {"Mamba1": Mamba, "Mamba2": Mamba2, "Mamba3": Mamba3}[ssm_layer]
         mixer_cls = partial(
-            Mamba2 if ssm_layer == "Mamba2" else Mamba,
+            layer_cls,
             layer_idx=layer_idx,
             **ssm_cfg,
             **factory_kwargs

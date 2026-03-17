@@ -68,7 +68,8 @@ def _state_passing_fwd_kernel(
         states = tl.load(initstates_ptrs, mask=offs_m < dim, other=0.0).to(tl.float32)
     tl.store(out_ptrs, states, mask=offs_m < dim)
     out_ptrs += stride_out_chunk
-    seq_idx = 0
+    if HAS_SEQ_IDX:
+        seq_idx = tl.load(seq_idx_ptr).to(tl.int64)
     for c in range(nchunks):
         new_states = tl.load(states_ptrs, mask=offs_m < dim, other=0.0).to(tl.float32)
         dA_cs = tl.load(dA_cs_ptr).to(tl.float32)
