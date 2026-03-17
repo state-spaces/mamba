@@ -387,8 +387,11 @@ setup(
         "packaging",
         "ninja",
         "einops",
-        "triton",
+        "triton>=3.5.0",
         "transformers",
+        "tilelang>=0.1.7.post3",
+        "nvidia-cutlass-dsl==4.4.1",
+        "quack-kernels==0.3.1",
         # "causal_conv1d>=1.4.0",
     ],
 )
