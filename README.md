@@ -1,4 +1,83 @@
-# Mamba
+# Mamba for Genomic Sequence Modeling
+
+This repository contains a reproduction of the Mamba model for long-context genomic sequence modeling, specifically focusing on the HG38 human genome dataset. This project aims to faithfully replicate the experimental setup described in the paper "Mamba: Linear-Time Sequence Modeling with Selective State Spaces".
+
+## Project Overview
+
+The goal of this project is to train and evaluate Mamba models of various sizes (1K to 125M parameters) on DNA sequences. We strictly follow the methodology outlined in the paper, including:
+
+*   **Data:** HG38 human genome, tokenized at the character level (A, C, G, T, N).
+*   **Architecture:** Official Mamba implementation with selective state spaces.
+*   **Metrics:** Bits-per-base (BPB), Perplexity, and Accuracy.
+
+## Repository Structure
+
+```
+mamba-genomics/
+├── configs/                # YAML configuration files for different model sizes
+├── scripts/                # Utility scripts (downloading data, sharding)
+├── src/
+│   ├── data/               # Data loading, tokenization, and preparation
+│   ├── model/              # Mamba model wrapper and embeddings
+│   ├── training/           # Training loop and scheduler
+│   └── eval/               # Evaluation metrics
+├── COLAB_TRAINING_GUIDE.md # Guide for training on Google Colab
+├── REPLICATION_GUIDE.md    # Detailed replication steps
+├── project_context.md      # Project goals and constraints
+└── requirements.txt        # Python dependencies
+```
+
+## Getting Started
+
+### 1. Prerequisites
+
+*   Python 3.10+
+*   CUDA-enabled GPU (required for Mamba kernels)
+*   PyTorch 2.1+
+
+### 2. Installation
+
+```bash
+pip install -r requirements.txt
+```
+
+### 3. Data Preparation
+
+Download and prepare the HG38 dataset:
+
+```bash
+# Download raw data
+bash scripts/download_hg38.sh
+
+# Tokenize and split (train/val/test)
+python src/data/prepare_hg38.py
+```
+
+### 4. Training
+
+Train a model using a specific configuration:
+
+```bash
+python src/training/train_mamba.py --config configs/mamba_125m.yaml
+```
+
+### 5. Evaluation
+
+(Instructions for evaluation scripts to be added)
+
+## Documentation
+
+*   [Replication Guide](REPLICATION_GUIDE.md): Detailed steps to reproduce the experiments.
+*   [Colab Training Guide](COLAB_TRAINING_GUIDE.md): Instructions for training on Google Colab using VS Code Remote SSH.
+*   [Project Context](project_context.md): Detailed project goals and constraints.
+
+## License
+
+This project is based on the official [Mamba implementation](https://github.com/state-spaces/mamba) and is released under the MIT License.
+
+---
+
+# Original Mamba README
 
 ![Mamba](assets/selection.png "Selective State Space")
 > **Mamba: Linear-Time Sequence Modeling with Selective State Spaces**\
