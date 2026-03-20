@@ -14,10 +14,17 @@
     #include <cub/block/block_store.cuh>
     #include <cub/block/block_scan.cuh>
     #include <cub/block/block_reduce.cuh>
+    #define ROCM_ONLY(x)
 #else
     #include <hipcub/hipcub.hpp>
     namespace cub = hipcub;
+    #define ROCM_ONLY(x) x
 #endif
+
+#ifndef M_LOG2E
+#define M_LOG2E 1.4426950408889634074
+#endif
+
 
 #include "selective_scan.h"
 #include "selective_scan_common.h"
@@ -511,15 +518,9 @@ void selective_scan_bwd_launch(SSMParamsBwd &params, cudaStream_t stream) {
                         auto kernel = &selective_scan_bwd_kernel<Ktraits>;
 
                         if (kSmemSize >= 48 * 1024) {
-
-                            #ifndef USE_ROCM
                             C10_CUDA_CHECK(cudaFuncSetAttribute(
-                                kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
-                            #else
-                            C10_CUDA_CHECK(cudaFuncSetAttribute(
-                                (void *) kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
-                            std::cerr << "Warning (selective_scan_bwd_kernel): attempting to set maxDynamicSharedMemorySize on an AMD GPU which is currently a non-op (in ROCm versions <= 6.1). This might lead to undefined behavior. \n" << std::endl;
-                            #endif
+                                ROCM_ONLY((void *)) kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
+                            ROCM_ONLY(std::cerr << "Warning (selective_scan_bwd_kernel): attempting to set maxDynamicSharedMemorySize on an AMD GPU which is currently a non-op (in ROCm versions <= 6.1). This might lead to undefined behavior. \n" << std::endl);
 
                         }
 

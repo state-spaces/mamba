@@ -33,10 +33,11 @@ Install PyTorch first, then:
 `--no-build-isolation` is required so that pip uses your existing CUDA-enabled PyTorch instead of installing torch-cpu in an isolated build environment.
 
 Other requirements:
-- Linux
 - NVIDIA GPU
 - PyTorch 1.12+
 - CUDA 11.6+
+
+Note: on Windows, it is recommended to use x64 Native Tools Command Prompt for VS with DISTUTILS_USE_SDK=1. 
 
 For AMD cards, see additional prerequisites below.
 
