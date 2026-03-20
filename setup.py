@@ -401,7 +401,9 @@ setup(
         "transformers",
         "tilelang>=0.1.7.post3",
         "nvidia-cutlass-dsl==4.4.1",
-        "quack-kernels==0.3.1",
+        "quack-kernels==0.3.4",
+        "tilelang",
+        "nvidia-cutlass-dsl",
         # "causal_conv1d>=1.4.0",
     ],
 )
