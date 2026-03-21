@@ -86,7 +86,7 @@ class _Mamba3Function(torch.autograd.Function):
     
     @staticmethod
     def backward(ctx, dout, *args) -> tuple:
-        """Backward pass: compute gradients using Triton backward kernels."""
+        """Backward pass: compute gradients using Tilelang backward kernels."""
         
         if len(ctx.saved_tensors) == 0:
             raise RuntimeError(

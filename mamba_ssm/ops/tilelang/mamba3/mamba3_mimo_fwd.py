@@ -106,7 +106,7 @@ def mamba_mimo_fwd(
 
         Outputs:
             - O: fused forward output activations.
-            - FINAL_STATE: final recurrent states (if return_state is True).
+            - FINAL_STATE: final recurrent states (if return_final_state is True).
             - FINAL_K: final K tensor (if return_state is True, for use in decode)
 
         Notation:

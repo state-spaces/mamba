@@ -399,11 +399,8 @@ setup(
         "einops",
         "triton>=3.5.0",
         "transformers",
-        "tilelang>=0.1.7.post3",
-        "nvidia-cutlass-dsl==4.4.1",
+        "tilelang==0.1.8",
         "quack-kernels==0.3.4",
-        "tilelang",
-        "nvidia-cutlass-dsl",
         # "causal_conv1d>=1.4.0",
     ],
 )
