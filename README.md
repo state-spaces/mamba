@@ -32,6 +32,8 @@ Install PyTorch first, then:
 
 `--no-build-isolation` is required so that pip uses your existing CUDA-enabled PyTorch instead of installing torch-cpu in an isolated build environment.
 
+NOTE: To use Mamba-3, please install from source `MAMBA_FORCE_BUILD=TRUE pip install --no-cache-dir --force-reinstall git+https://github.com/state-spaces/mamba.git --no-build-isolation`.
+
 Other requirements:
 - Linux
 - NVIDIA GPU
@@ -98,6 +100,30 @@ assert y.shape == x.shape
 
 A minimal version of the inner SSD module (Listing 1 from the Mamba-2 paper) with conversion between "discrete" and "continuous" SSM versions
 is at [modules/ssd_minimal.py](mamba_ssm/modules/ssd_minimal.py).
+
+### Mamba-3
+
+The Mamba-3 block is implemented at [modules/mamba3.py](mamba_ssm/modules/mamba3.py).
+
+The usage is as follows:
+``` python
+from mamba_ssm import Mamba3
+batch, length, dim = 2, 2048, 768
+x = torch.randn(batch, length, dim).to(torch.bfloat16).to("cuda")
+model = Mamba3(
+    # This module uses roughly 6 * d_model^2 parameters
+    d_model=dim, # Model dimension d_model
+    d_state=128,  # SSM state size
+    headdim=64, # SSM headdim
+    is_mimo=True, # Use MIMO mode
+    mimo_rank=4, # MIMO rank when is_mimo=True
+    chunk_size=16, # 64/mimo_rank if x is in bf16, else 32/mimo_rank
+    is_outproj_norm=False, # Additional post SSM norm
+    dtype=torch.bfloat16,
+).to("cuda")
+y = model(x)
+assert y.shape == x.shape
+```
 
 ### Mamba Language Model
 

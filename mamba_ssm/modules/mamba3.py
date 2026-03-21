@@ -138,9 +138,6 @@ class Mamba3(nn.Module):
             inference_batch = cu_seqlens.shape[0] - 1 if cu_seqlens is not None else batch
             angle_dt_state, ssm_state, k_state, v_state = self._get_states_from_cache(inference_params, inference_batch)
             if inference_params.seqlen_offset > 0:
-                # The states are updated inplace here; however, due to the current implementation,
-                # setting inplace=True incurs significant overhead. So potentially
-                # faster to call step() directly with inplace=False:
                 out, _, _, _, _ = self.step(u, angle_dt_state, ssm_state, k_state, v_state)
                 return out
 
@@ -235,7 +232,7 @@ class Mamba3(nn.Module):
                 y, last_angle, last_state, last_k, last_v, *rest = y
                 angle_dt_state.copy_(last_angle)
                 ssm_state.copy_(last_state)
-                k_state.copy_(last_k)
+                k_state.copy_(last_k.unsqueeze(1))
                 v_state.copy_(last_v)
             y = rearrange(y, "b l h p -> b l (h p)")
             if self.is_outproj_norm:
@@ -472,7 +469,7 @@ class Mamba3(nn.Module):
                 )
             else:
                 k_state = torch.zeros(
-                    (batch_size, self.nheads, self.d_state),
+                    (batch_size, 1, self.nheads, self.d_state),
                     device=device,
                     dtype=dtype,
                 )

@@ -35,12 +35,21 @@ SEQLEN = 32
 NHEADS = 64
 HDIM = 64
 DSTATE = 128
-MIMO_DIM = 4
-USE_TILELANG = True
 DTYPE = torch.bfloat16
 DEVICE = "cuda"
 RTOL = 0.1
 ATOL = 0.1
+
+@dataclass(frozen=True)
+class VariantConfig:
+    """Captures the SISO/MIMO knobs that used to be mutable globals."""
+    mimo_dim: int
+    use_tilelang: bool
+    is_mimo: bool
+
+
+SISO = VariantConfig(mimo_dim=1, use_tilelang=False, is_mimo=False)
+MIMO = VariantConfig(mimo_dim=4, use_tilelang=True, is_mimo=True)
 
 
 def _require_cuda_and_kernel_deps() -> None:
@@ -93,19 +102,19 @@ class RunOutputs:
     outputs_mixed: Tensor
 
 
-def _case_config(*, is_outproj_norm: bool) -> dict:
+def _case_config(variant: VariantConfig, *, is_outproj_norm: bool) -> dict:
     d_model = NHEADS * HDIM // 2
     return {
         "d_model": d_model,
         "d_state": DSTATE,
         "headdim": HDIM,
-        "is_mimo": True,
-        "mimo_rank": MIMO_DIM,
-        "chunk_size": 64 // MIMO_DIM,
+        "is_mimo": variant.is_mimo,
+        "mimo_rank": variant.mimo_dim,
+        "chunk_size": 64 // variant.mimo_dim,
         "dtype": DTYPE,
         "device": DEVICE,
         "layer_idx": 0,
-        "use_tilelang": USE_TILELANG,
+        "use_tilelang": variant.use_tilelang,
         "is_outproj_norm": is_outproj_norm,
     }
 
@@ -138,14 +147,14 @@ def _assert_close(
         ) from err
 
 
-def _run_case(*, is_outproj_norm: bool) -> RunOutputs:
+def _run_case(variant: VariantConfig, *, is_outproj_norm: bool) -> RunOutputs:
     Mamba3 = _mamba3_cls()
-    cfg = _case_config(is_outproj_norm=is_outproj_norm)
+    cfg = _case_config(variant, is_outproj_norm=is_outproj_norm)
     config_label = (
         f"use_tilelang={cfg['use_tilelang']}, "
         f"is_outproj_norm={cfg['is_outproj_norm']}, "
         f"batch={BATCH}, seqlen={SEQLEN}, "
-        f"nheads={NHEADS}, hdim={HDIM}, dstate={DSTATE}, mimo_dim={MIMO_DIM}"
+        f"nheads={NHEADS}, hdim={HDIM}, dstate={DSTATE}, mimo_dim={variant.mimo_dim}"
     )
 
     torch.manual_seed(42)
@@ -214,6 +223,7 @@ def _run_case(*, is_outproj_norm: bool) -> RunOutputs:
     )
 
 
+@pytest.mark.parametrize("variant", [pytest.param(SISO, id="siso"), pytest.param(MIMO, id="mimo")])
 @pytest.mark.parametrize(
     "is_outproj_norm",
     [
@@ -221,8 +231,8 @@ def _run_case(*, is_outproj_norm: bool) -> RunOutputs:
         pytest.param(True, id="outproj_norm_true"),
     ],
 )
-def test_step_matches_forward_fp32(is_outproj_norm: bool) -> None:
-    outputs = _run_case(is_outproj_norm=is_outproj_norm)
+def test_step_matches_forward_fp32(variant: VariantConfig, is_outproj_norm: bool) -> None:
+    outputs = _run_case(variant, is_outproj_norm=is_outproj_norm)
 
     for t in range(SEQLEN):
         _assert_close(
@@ -250,13 +260,13 @@ def test_step_matches_forward_fp32(is_outproj_norm: bool) -> None:
         )
 
 
-def run_step_benchmark(*, is_outproj_norm: bool) -> None:
+def run_step_benchmark(variant: VariantConfig, *, is_outproj_norm: bool) -> None:
     _require_cuda_and_kernel_deps()
     from triton.testing import do_bench_cudagraph
     Mamba3 = _mamba3_cls()
 
-    cfg = _case_config(is_outproj_norm=is_outproj_norm)
-    rotate_str = "halved" if USE_TILELANG else "pairwise"
+    cfg = _case_config(variant, is_outproj_norm=is_outproj_norm)
+    rotate_str = "halved" if variant.use_tilelang else "pairwise"
 
     torch.manual_seed(42)
     torch.cuda.manual_seed_all(42)
@@ -283,14 +293,14 @@ def run_step_benchmark(*, is_outproj_norm: bool) -> None:
         BATCH * cfg["d_model"] * dtype_size
         + BATCH * NHEADS * HDIM * DSTATE * state_dtype_size
         + BATCH * NHEADS * num_rope_angles * state_dtype_size
-        + BATCH * MIMO_DIM * NHEADS * DSTATE * dtype_size
+        + BATCH * variant.mimo_dim * NHEADS * DSTATE * dtype_size
         + BATCH * NHEADS * HDIM * dtype_size
     )
     bytes_write = (
         BATCH * NHEADS * HDIM * dtype_size
         + BATCH * NHEADS * HDIM * DSTATE * state_dtype_size
         + BATCH * NHEADS * num_rope_angles * state_dtype_size
-        + BATCH * MIMO_DIM * NHEADS * DSTATE * dtype_size
+        + BATCH * variant.mimo_dim * NHEADS * DSTATE * dtype_size
         + BATCH * NHEADS * HDIM * dtype_size
     )
 
@@ -305,7 +315,7 @@ def run_step_benchmark(*, is_outproj_norm: bool) -> None:
     print("=" * 70)
     print(
         f"  batch={BATCH}, d_model={cfg['d_model']}, nheads={NHEADS}, "
-        f"hdim={HDIM}, dstate={DSTATE}, mimo_dim={MIMO_DIM}"
+        f"hdim={HDIM}, dstate={DSTATE}, mimo_dim={variant.mimo_dim}"
     )
     print(f"  Time per step: {ms_full:.4f} ms")
     print(
@@ -317,5 +327,10 @@ def run_step_benchmark(*, is_outproj_norm: bool) -> None:
 
 
 if __name__ == "__main__":
-    run_step_benchmark(is_outproj_norm=False)
-    run_step_benchmark(is_outproj_norm=True)
+    print("Running SISO benchmarks...")
+    run_step_benchmark(SISO, is_outproj_norm=False)
+    run_step_benchmark(SISO, is_outproj_norm=True)
+
+    print("Running MIMO benchmarks...")
+    run_step_benchmark(MIMO, is_outproj_norm=False)
+    run_step_benchmark(MIMO, is_outproj_norm=True)
