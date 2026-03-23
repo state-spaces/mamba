@@ -193,7 +193,7 @@ Note that the result of each task might differ from reported values by 0.1-0.3 d
 
 ## Inference
 
-The script [benchmarks/benchmark_generation_mamba_simple.py](benchmarks/benchmark_generation_mamba_simple.py)
+The script [benchmarks/benchmark_text_generation_latency.py](benchmarks/benchmark_text_generation_latency.py)
 1. autoloads a model from the Hugging Face Hub,
 2. generates completions of a user-specified prompt,
 3. benchmarks the inference speed of this generation.
@@ -205,22 +205,37 @@ Other configurable options include the top-p (nucleus sampling) probability, and
 To test generation latency (e.g. batch size = 1) with different sampling strategies:
 
 ``` sh
-python benchmarks/benchmark_generation_mamba_simple.py --model-name "state-spaces/mamba-2.8b" --prompt "My cat wrote all this CUDA code for a new language model and" --topp 0.9 --temperature 0.7 --repetition-penalty 1.2
-python benchmarks/benchmark_generation_mamba_simple.py --model-name "EleutherAI/pythia-2.8b" --prompt "My cat wrote all this CUDA code for a new language model and" --topp 0.9 --temperature 0.7 --repetition-penalty 1.2
-python benchmarks/benchmark_generation_mamba_simple.py --model-name "state-spaces/mamba-2.8b" --prompt "My cat wrote all this CUDA code for a new language model and" --minp 0.05 --topk 0 --temperature 0.7 --repetition-penalty 1.2
+python benchmarks/benchmark_text_generation_latency.py --model-name "state-spaces/mamba-2.8b" --prompt "My cat wrote all this CUDA code for a new language model and" --topp 0.9 --temperature 0.7 --repetition-penalty 1.2
+python benchmarks/benchmark_text_generation_latency.py --model-name "EleutherAI/pythia-2.8b" --prompt "My cat wrote all this CUDA code for a new language model and" --topp 0.9 --temperature 0.7 --repetition-penalty 1.2
+python benchmarks/benchmark_text_generation_latency.py --model-name "state-spaces/mamba-2.8b" --prompt "My cat wrote all this CUDA code for a new language model and" --minp 0.05 --topk 0 --temperature 0.7 --repetition-penalty 1.2
 ```
 
 To test generation throughput with random prompts (e.g. large batch size):
 ``` sh
-python benchmarks/benchmark_generation_mamba_simple.py --model-name "state-spaces/mamba-2.8b" --batch 64
-python benchmarks/benchmark_generation_mamba_simple.py --model-name "EleutherAI/pythia-2.8b" --batch 64
+python benchmarks/benchmark_text_generation_latency.py --model-name "state-spaces/mamba-2.8b" --batch 64
+python benchmarks/benchmark_text_generation_latency.py --model-name "EleutherAI/pythia-2.8b" --batch 64
 ```
 
 With Mamba-2, you just need to change the model name:
 ``` sh
-python benchmarks/benchmark_generation_mamba_simple.py --model-name "state-spaces/mamba2-2.7b" --prompt "My cat wrote all this CUDA code for a new language model and" --topp 0.9 --temperature 0.7 --repetition-penalty 1.2
+python benchmarks/benchmark_text_generation_latency.py --model-name "state-spaces/mamba2-2.7b" --prompt "My cat wrote all this CUDA code for a new language model and" --topp 0.9 --temperature 0.7 --repetition-penalty 1.2
 ```
 
+
+## Forward/Backward Speed Comparison
+
+The script [benchmarks/benchmark_speed_mamba123.py](benchmarks/benchmark_speed_mamba123.py)
+compares forward and backward pass speed of Mamba1 vs Mamba2 vs Mamba3 on the same workload (same d_model, sequence length, batch size, dtype).
+
+While the inference benchmark above measures text generation latency, this measures the raw computation speed of each architecture's forward and backward pass.
+
+``` sh
+python benchmarks/benchmark_speed_mamba123.py
+```
+
+The script outputs per-module timing (ms) and peak VRAM (GB), and saves a visual comparison chart.
+
+**Note:** Mamba3 MIMO mode requires >100KB shared memory per SM (available on H100/sm_90+). On consumer GPUs like RTX 4080 (sm_89), use SISO mode instead.
 
 ## Troubleshooting
 

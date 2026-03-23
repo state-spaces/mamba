@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Benchmark Mamba1 vs Mamba2 vs Mamba3 on RTX 4080.
+"""Benchmark forward/backward speed: Mamba1 vs Mamba2 vs Mamba3.
 
 Compares all three SSM generations on the same workload (same d_model,
 sequence length, batch size) measuring forward/backward speed and VRAM.
 
 Usage:
     LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6 \
-        .venv/bin/python benchmarks/test_rtx4080_visual.py
+        .venv/bin/python benchmarks/benchmark_speed_mamba123.py
 """
 
 import gc
