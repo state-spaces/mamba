@@ -140,10 +140,16 @@ This example is used in the generation scripts below.
 Try Mamba interactively with [examples/predict_next_token.py](examples/predict_next_token.py). It loads a pretrained model, shows example outputs on launch, then lets you type prompts and see continuations.
 
 ``` sh
+# Mamba-1
 python examples/predict_next_token.py --model "state-spaces/mamba-130m"
+
+# Mamba-2
+python examples/predict_next_token.py --model "state-spaces/mamba2-130m"
 ```
 
-Note: Mamba is a **base language model**, not a chatbot. It predicts the most likely continuation of your text based on its training data (The Pile). Longer, specific prompts work best — short inputs like "hello" may produce random document fragments.
+Available models: `mamba-130m`, `mamba-370m`, `mamba-790m`, `mamba-1.4b`, `mamba-2.8b`, `mamba2-130m`, `mamba2-370m`, `mamba2-780m`, `mamba2-1.3b`, `mamba2-2.7b`.
+
+Note: These are **base language models**, not chatbots. They predict the most likely continuation of your text based on training data (The Pile). Longer, specific prompts work best — short inputs like "hello" may produce random document fragments. Mamba-3 is not supported here as no pretrained language model is available yet.
 
 ## Pretrained Models
 
