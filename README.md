@@ -135,6 +135,16 @@ This is an example of how to integrate Mamba into an end-to-end neural network.
 This example is used in the generation scripts below.
 
 
+### Interactive Next-Token Prediction
+
+Try Mamba interactively with [examples/predict_next_token.py](examples/predict_next_token.py). It loads a pretrained model, shows example outputs on launch, then lets you type prompts and see continuations.
+
+``` sh
+python examples/predict_next_token.py --model "state-spaces/mamba-130m"
+```
+
+Note: Mamba is a **base language model**, not a chatbot. It predicts the most likely continuation of your text based on its training data (The Pile). Longer, specific prompts work best — short inputs like "hello" may produce random document fragments.
+
 ## Pretrained Models
 
 Pretrained models are uploaded to
