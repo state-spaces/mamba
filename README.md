@@ -25,6 +25,16 @@ with an efficient hardware-aware design and implementation in the spirit of [Fla
 
 ## Installation
 
+Other requirements:
+- Linux
+- NVIDIA GPU
+- PyTorch 1.12+
+- CUDA 11.6+
+
+For AMD cards, see additional prerequisites below.
+
+### Option A: pip
+
 Install PyTorch first, then:
 - [Option] `pip install causal-conv1d>=1.4.0 --no-build-isolation`: an efficient implementation of a simple causal Conv1d layer used inside the Mamba block.
 - `pip install mamba-ssm --no-build-isolation`: the core Mamba package.
@@ -34,13 +44,28 @@ Install PyTorch first, then:
 
 NOTE: To use Mamba-3, please install from source `MAMBA_FORCE_BUILD=TRUE pip install --no-cache-dir --force-reinstall git+https://github.com/state-spaces/mamba.git --no-build-isolation`.
 
-Other requirements:
-- Linux
-- NVIDIA GPU
-- PyTorch 1.12+
-- CUDA 11.6+
+### Option B: uv
 
-For AMD cards, see additional prerequisites below.
+[uv](https://docs.astral.sh/uv/) is a fast Python package manager that can be used as an alternative to pip.
+
+``` sh
+# Create a virtual environment
+uv venv --python 3.12
+
+# Install PyTorch with CUDA (adjust cu128 to match your CUDA version)
+uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+
+# Install build dependencies
+uv pip install packaging ninja wheel setuptools
+
+# Install mamba-ssm from source (for Mamba-3 support)
+MAMBA_FORCE_BUILD=TRUE uv pip install -e . --no-build-isolation
+
+# [Option] Install causal-conv1d
+uv pip install causal-conv1d>=1.4.0
+```
+
+Note: `uv pip install` (not `uv add`) is used here because `setup.py` imports `torch` at build time, which requires `--no-build-isolation` and a pre-installed CUDA-enabled PyTorch.
 
 ## Usage
 
