@@ -1,0 +1,53 @@
+{
+    "gpu": {
+        "name": "RTX 4080",
+        "compute_capability": "8.9",
+        "vram_gb": 12,
+        "architecture": "Ada Lovelace"
+    },
+    "models": {
+        "mamba1_130m": {
+            "pretrained": "state-spaces/mamba-130m",
+            "d_model": 768,
+            "n_layer": 24,
+            "dtype": "bfloat16",
+            "note": "Smallest model, fast iteration"
+        },
+        "mamba1_370m": {
+            "pretrained": "state-spaces/mamba-370m",
+            "d_model": 1024,
+            "n_layer": 48,
+            "dtype": "bfloat16",
+            "note": "Good balance of quality and speed"
+        },
+        "mamba1_1.4b": {
+            "pretrained": "state-spaces/mamba-1.4b",
+            "d_model": 2048,
+            "n_layer": 48,
+            "dtype": "bfloat16",
+            "note": "Larger model, fits in 12GB VRAM in bf16"
+        },
+        "mamba1_2.8b": {
+            "pretrained": "state-spaces/mamba-2.8b",
+            "d_model": 2560,
+            "n_layer": 64,
+            "dtype": "bfloat16",
+            "note": "Largest mamba-1, tight fit in 12GB VRAM"
+        },
+        "mamba3_test": {
+            "d_model": 768,
+            "d_state": 128,
+            "n_layer": 12,
+            "headdim": 64,
+            "is_mimo": false,
+            "chunk_size": 64,
+            "dtype": "bfloat16",
+            "note": "Mamba3 SISO mode for RTX 4080 (MIMO backward needs >100KB shared mem, only available on H100+)"
+        }
+    },
+    "defaults": {
+        "dtype": "bfloat16",
+        "max_batch_size": 1,
+        "max_seq_len": 2048
+    }
+}
