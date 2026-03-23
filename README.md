@@ -49,8 +49,9 @@ NOTE: To use Mamba-3, please install from source `MAMBA_FORCE_BUILD=TRUE pip ins
 [uv](https://docs.astral.sh/uv/) is a fast Python package manager that can be used as an alternative to pip.
 
 ``` sh
-# Create a virtual environment
-uv venv --python 3.12
+# Create and activate a virtual environment (requires Python >= 3.10)
+uv venv
+source .venv/bin/activate
 
 # Install PyTorch with CUDA (adjust cu128 to match your CUDA version)
 uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
