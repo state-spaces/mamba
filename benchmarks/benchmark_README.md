@@ -4,23 +4,37 @@
 
 | Script | Purpose |
 |---|---|
-| `benchmark_text_generation_latency.py` | How fast can the model write text? |
-| `benchmark_speed_mamba123.py` | Which Mamba generation computes fastest? |
+| `benchmark_generation_mamba_simple.py` | How fast can one model generate text? (single model, full CLI) |
+| `benchmark_text_generation_latency_visual.py` | Compare generation latency across model sizes (visual chart) |
+| `benchmark_speed_mamba123.py` | Which Mamba generation computes fastest? (visual chart) |
 
-## benchmark_text_generation_latency.py
+## benchmark_generation_mamba_simple.py
 
-Loads a pretrained model (Mamba or Transformer), feeds a prompt, generates tokens, and measures the total time.
+Loads a single pretrained model (Mamba or Transformer), feeds a prompt, generates tokens, and measures the total time. Full CLI with sampling options.
 
 - **Measures:** End-to-end latency — prompt processing + token-by-token decoding (ms)
-- **Models:** One pretrained model at a time (e.g. `state-spaces/mamba-2.8b`)
+- **Models:** One pretrained model at a time (Mamba or HuggingFace Transformer)
 - **Includes backward?** No (inference only)
-- **Use case:** Evaluating deployment/serving performance
+- **Use case:** Evaluating deployment/serving performance for a specific model
 
 ```sh
-python benchmarks/benchmark_text_generation_latency.py \
+python benchmarks/benchmark_generation_mamba_simple.py \
     --model-name "state-spaces/mamba-2.8b" \
     --prompt "My cat wrote all this CUDA code for a new language model and" \
     --topp 0.9 --temperature 0.7
+```
+
+## benchmark_text_generation_latency_visual.py
+
+Loads multiple pretrained Mamba models, generates tokens, and produces a visual comparison chart of throughput, latency, and VRAM usage.
+
+- **Measures:** Throughput (tok/s), latency (ms), VRAM (GB) across model sizes
+- **Models:** Multiple Mamba models side by side (mamba-130m, mamba-370m)
+- **Includes backward?** No (inference only)
+- **Use case:** Comparing generation performance across model sizes
+
+```sh
+python benchmarks/benchmark_text_generation_latency_visual.py
 ```
 
 ## benchmark_speed_mamba123.py
