@@ -148,7 +148,8 @@ def plot_results(results):
     bwd_vram = [results[n]["bwd_vram_gb"] for n in names]
     ax.bar([p - w / 2 for p in x_pos], fwd_vram, w, label="Forward", color="#4C78A8")
     ax.bar([p + w / 2 for p in x_pos], bwd_vram, w, label="Fwd+Backward", color="#E45756")
-    ax.axhline(y=11.6, color="red", linestyle="--", alpha=0.4, label="VRAM limit (11.6 GB)")
+    vram_total = torch.cuda.get_device_properties(0).total_memory / GB
+    ax.axhline(y=vram_total, color="red", linestyle="--", alpha=0.4, label=f"VRAM limit ({vram_total:.1f} GB)")
     ax.set_ylabel("GB")
     ax.set_title("Peak VRAM Usage")
     ax.set_xticks(list(x_pos))

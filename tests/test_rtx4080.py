@@ -2,7 +2,7 @@
 """Test Mamba models on RTX 4080 (sm_89, 12GB VRAM).
 
 Usage:
-    uv run --no-project --python .venv/bin/python tests/test_rtx4080.py [--model MODEL] [--config CONFIG]
+    python tests/test_rtx4080.py [--model MODEL] [--config CONFIG]
 
 Models: mamba1_130m, mamba1_370m, mamba1_1.4b, mamba1_2.8b, mamba3_test
 """
