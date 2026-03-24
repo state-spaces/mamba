@@ -9,13 +9,20 @@ import torch.nn.functional as F
 
 from mamba_ssm.ops.triton.layernorm_gated import RMSNorm as RMSNormGated
 
-from mamba_ssm.ops.tilelang.mamba3.mamba3_mimo import mamba3_mimo as mamba3_mimo_combined
+try:
+    from mamba_ssm.ops.tilelang.mamba3.mamba3_mimo import mamba3_mimo as mamba3_mimo_combined
+except ImportError:
+    mamba3_mimo_combined = None
+
 from mamba_ssm.ops.triton.angle_cumsum import angle_dt
 from mamba_ssm.ops.triton.mamba3.mamba3_siso_combined import mamba3_siso_combined
 
 from mamba_ssm.ops.triton.mamba3.mamba3_mimo_rotary_step import apply_rotary_qk_inference_fwd
 
-from mamba_ssm.ops.cute.mamba3.mamba3_step_fn import mamba3_step_fn
+try:
+    from mamba_ssm.ops.cute.mamba3.mamba3_step_fn import mamba3_step_fn
+except ImportError:    
+    mamba3_step_fn = None
 
 class Mamba3(nn.Module):
     def __init__(
@@ -59,6 +66,8 @@ class Mamba3(nn.Module):
         self.mimo_rank = mimo_rank
         if not self.is_mimo:
             self.mimo_rank = 1
+        else:
+            assert mamba3_mimo_combined is not None, "Fails to import Mamba-3 MIMO kernels. Please ensure you installed the necessary dependencies, such as TileLang."
 
         self.d_inner = int(self.expand * self.d_model)
         assert self.d_inner % self.headdim == 0
@@ -298,6 +307,7 @@ class Mamba3(nn.Module):
             nxt_k_state: (batch, R, nheads, d_state), where R = mimo_rank (R=1 if not MIMO)
             nxt_v_state: (batch, nheads, headdim)
         """
+        assert mamba3_step_fn is not None, "Cute Mamba-3 step function is not available. Please ensure you installed the necessary dependencies, such as nvidia-cutlass-dsl and quack-kernels."
 
         # in_proj
         zxBCdt = self.in_proj(u)
