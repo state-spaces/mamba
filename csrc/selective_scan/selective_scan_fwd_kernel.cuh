@@ -102,8 +102,8 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     const int64_t batch_id = blockIdx.x;
     const int64_t dim_id = blockIdx.y;
     const int64_t group_id = dim_id / (params.dim_ngroups_ratio);
-    input_t *u = reinterpret_cast<input_t *>(params.u_ptr) + (int64_t)batch_id * params.u_batch_stride
-        + (int64_t)dim_id * kNRows * params.u_d_stride;
+    input_t *u = reinterpret_cast<input_t *>(params.u_ptr) + batch_id * params.u_batch_stride
+        + dim_id * kNRows * params.u_d_stride;
     input_t *delta = reinterpret_cast<input_t *>(params.delta_ptr) + batch_id * params.delta_batch_stride
         + dim_id * kNRows * params.delta_d_stride;
     weight_t *A = reinterpret_cast<weight_t *>(params.A_ptr) + dim_id * kNRows * params.A_d_stride;
