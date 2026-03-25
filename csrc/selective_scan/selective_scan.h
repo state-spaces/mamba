@@ -7,7 +7,7 @@
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 struct SSMScanParamsBase {
-    using index_t = uint32_t;
+    using index_t = uint64_t;
 
     int batch, seqlen, n_chunks;
     index_t a_batch_stride;

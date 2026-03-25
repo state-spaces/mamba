@@ -102,8 +102,8 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     const int batch_id = blockIdx.x;
     const int dim_id = blockIdx.y;
     const int group_id = dim_id / (params.dim_ngroups_ratio);
-    input_t *u = reinterpret_cast<input_t *>(params.u_ptr) + batch_id * params.u_batch_stride
-        + dim_id * kNRows * params.u_d_stride;
+    input_t *u = reinterpret_cast<input_t *>(params.u_ptr) + (int64_t)batch_id * params.u_batch_stride
+        + (int64_t)dim_id * kNRows * params.u_d_stride;
     input_t *delta = reinterpret_cast<input_t *>(params.delta_ptr) + batch_id * params.delta_batch_stride
         + dim_id * kNRows * params.delta_d_stride;
     weight_t *A = reinterpret_cast<weight_t *>(params.A_ptr) + dim_id * kNRows * params.A_d_stride;
@@ -254,7 +254,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                 // There's a syncthreads in the scan op, so we don't need to sync here.
                 // Unless there's only 1 warp, but then it's the same thread (0) reading and writing.
                 if (threadIdx.x == 0) {
-                    smem_running_prefix[state_idx] = prefix_op.running_prefix;
+                    smem_running_prefix[state_idx + r * MAX_DSTATE] = prefix_op.running_prefix;
                     x[(r * params.n_chunks + chunk) * params.dstate + state_idx] = prefix_op.running_prefix;
                 }
                 #pragma unroll
