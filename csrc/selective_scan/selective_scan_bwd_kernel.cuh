@@ -114,9 +114,9 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
     weight_t *smem_da = reinterpret_cast<weight_t *>(smem_running_postfix + MAX_DSTATE);
     weight_t *smem_dbc = reinterpret_cast<weight_t *>(smem_da + MAX_DSTATE);
 
-    const int batch_id = blockIdx.x;
-    const int dim_id = blockIdx.y;
-    const int group_id = dim_id / (params.dim_ngroups_ratio);
+    const int64_t batch_id = blockIdx.x;
+    const int64_t dim_id = blockIdx.y;
+    const int64_t group_id = dim_id / (params.dim_ngroups_ratio);
     input_t *u = reinterpret_cast<input_t *>(params.u_ptr) + batch_id * params.u_batch_stride
         + dim_id * params.u_d_stride;
     input_t *delta = reinterpret_cast<input_t *>(params.delta_ptr) + batch_id * params.delta_batch_stride
