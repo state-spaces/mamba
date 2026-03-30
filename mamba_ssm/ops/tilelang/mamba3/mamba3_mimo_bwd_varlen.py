@@ -24,8 +24,8 @@ The backward pass is split into two TileLang kernels (same as non-varlen):
        DMIMO_V, DD, DANGLES, DDA, DFACTOR, DGAMMA_DIAG, …).
 
 Public API:
-    tilelang_bwd_combined_varlen(..., cu_seqlens=None) — combined backward;
-        falls back to the non-varlen ``tilelang_bwd_combined`` when
+    mamba_mimo_bwd_combined_varlen(..., cu_seqlens=None) — combined backward;
+        falls back to the non-varlen ``mamba_mimo_bwd_combined`` when
         cu_seqlens is None.
 
 Copyright (c) 2026, Dao AI Lab, Goombalab

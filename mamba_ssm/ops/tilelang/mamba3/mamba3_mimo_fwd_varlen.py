@@ -21,7 +21,7 @@ share the same mathematical kernel; the differences are:
   the non-varlen shapes).
 
 Public API:
-    tl_fused_chunk_fwd(..., cu_seqlens=None) — forward pass; falls back to
+    mamba_mimo_forward_varlen(..., cu_seqlens=None) — forward pass; falls back to
         the non-varlen path when cu_seqlens is None.
 
 Copyright (c) 2026, Dao AI Lab, Goombalab
