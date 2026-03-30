@@ -139,8 +139,6 @@ class Mamba3(nn.Module):
         Returns: same shape as u
         """
         batch, seqlen, dim = u.shape
-        if cu_seqlens is not None:
-            raise NotImplementedError("Currently does not support varlen in Mamba-3 (MIMO).")
 
         angle_dt_state, ssm_state, k_state, v_state  = None, None, None, None
         if inference_params is not None:
@@ -205,6 +203,7 @@ class Mamba3(nn.Module):
                 rotary_dim_divisor=self.rotary_dim_divisor,
                 dtype=x.dtype,
                 return_state=ssm_state is not None,
+                cu_seqlens=cu_seqlens,
             )
             if ssm_state is not None:
                 y, last_angle, last_state, last_k, last_v, *rest = y
@@ -236,6 +235,7 @@ class Mamba3(nn.Module):
                 chunk_size=self.chunk_size,
                 Input_States=None,
                 return_final_states=ssm_state is not None,
+                cu_seqlens=cu_seqlens,
             )
             if ssm_state is not None:
                 y, last_angle, last_state, last_k, last_v, *rest = y
