@@ -186,6 +186,8 @@ if not SKIP_CUDA_BUILD:
         cc_flag.append("arch=compute_87,code=sm_87")
         if bare_metal_version >= Version("11.8"):
             cc_flag.append("-gencode")
+            cc_flag.append("arch=compute_89,code=sm_89")
+            cc_flag.append("-gencode")
             cc_flag.append("arch=compute_90,code=sm_90")
         if bare_metal_version >= Version("12.8"):
             cc_flag.append("-gencode")

@@ -6,7 +6,7 @@ authors = [
     { name = "Tri Dao", email = "tri@tridao.me" },
     { name = "Albert Gu", email = "agu@cs.cmu.edu" }
 ]
-requires-python = ">= 3.9"
+requires-python = ">= 3.10"
 dynamic = ["version"]
 license = { file = "LICENSE" }  # Include a LICENSE file in your repo
 keywords = ["cuda", "pytorch", "state-space model"]
@@ -18,7 +18,7 @@ classifiers = [
 dependencies = [
     "torch",
     "tilelang==0.1.8",
-    "quack-kernels==0.3.1",
+    "quack-kernels==0.3.4",
     "triton>=3.5.0",
     "ninja",
     "einops",
