@@ -268,7 +268,6 @@ class Mamba(nn.Module):
     def _get_states_from_cache(self, inference_params, batch_size, initialize_states=False):
         assert self.layer_idx is not None
         if self.layer_idx not in inference_params.key_value_memory_dict:
-            batch_shape = (batch_size,)
             conv_state = torch.zeros(
                 batch_size,
                 self.d_model * self.expand,
