@@ -270,8 +270,18 @@ class MambaInnerFn(torch.autograd.Function):
         ctx.c_rms_weight = c_rms_weight
         ctx.dt_rms_weight = dt_rms_weight
         ctx.b_c_dt_rms_eps = b_c_dt_rms_eps
+        ctx.B_proj_bias = B_proj_bias
+        ctx.C_proj_bias = C_proj_bias
         if checkpoint_lvl >= 1:  # Will recompute conv1d_out and delta in the backward pass
             conv1d_out, delta = None, None
+            # Also discard already-normalized B and C so they get properly
+            # recomputed (and normalized only once) in backward, matching the
+            # pattern used for delta above.  Without this, backward would
+            # apply rmsnorm a second time to the already-normalized values.
+            if b_rms_weight is not None and ctx.is_variable_B:
+                B = None
+            if c_rms_weight is not None and ctx.is_variable_C:
+                C = None
         ctx.save_for_backward(xz, conv1d_weight, conv1d_bias, x_dbl, x_proj_weight,
                               delta_proj_weight, out_proj_weight, conv1d_out, delta,
                               A, B, C, D, delta_bias, scan_intermediates, b_rms_weight, c_rms_weight, dt_rms_weight, out)
@@ -300,15 +310,31 @@ class MambaInnerFn(torch.autograd.Function):
                 delta = rearrange(delta, "b d l -> (b l) d", l=L).contiguous()
                 delta = rms_norm_forward(delta, ctx.dt_rms_weight, None, ctx.b_c_dt_rms_eps)
                 delta = rearrange(delta, "(b l) d -> b d l", l=L).contiguous()
-            if b_rms_weight is not None:
-                # Recompute & RMSNorm B
+            if b_rms_weight is not None and ctx.is_variable_B:
+                # B was set to None before saving to avoid double-normalization.
+                # Recompute B from x_dbl (pre-normalization), then apply rmsnorm once.
+                B = x_dbl[:, delta_rank:delta_rank + d_state]  # (bl dstate)
+                if not ctx.B_proj_bias_is_None:
+                    B = B + ctx.B_proj_bias.to(dtype=B.dtype)
+                if not A.is_complex():
+                    B = rearrange(B, "(b l) dstate -> b 1 dstate l", l=L).contiguous()
+                else:
+                    B = rearrange(B, "(b l) (dstate two) -> b 1 dstate (l two)", l=L, two=2).contiguous()
                 B = rearrange(B, "b 1 dstate l -> (b l) dstate", l=L).contiguous()
                 B = rms_norm_forward(
                     B, ctx.b_rms_weight, None, ctx.b_c_dt_rms_eps
                 )
                 B = rearrange(B, "(b l) dstate -> b 1 dstate l", l=L).contiguous()
-            if c_rms_weight is not None:
-                # Recompute & RMSNorm C
+            if c_rms_weight is not None and ctx.is_variable_C:
+                # C was set to None before saving to avoid double-normalization.
+                # Recompute C from x_dbl (pre-normalization), then apply rmsnorm once.
+                C = x_dbl[:, -d_state:]  # (bl dstate)
+                if not ctx.C_proj_bias_is_None:
+                    C = C + ctx.C_proj_bias.to(dtype=C.dtype)
+                if not A.is_complex():
+                    C = rearrange(C, "(b l) dstate -> b 1 dstate l", l=L).contiguous()
+                else:
+                    C = rearrange(C, "(b l) (dstate two) -> b 1 dstate (l two)", l=L, two=2).contiguous()
                 C = rearrange(C, "b 1 dstate l -> (b l) dstate", l=L).contiguous()
                 C = rms_norm_forward(
                     C, ctx.c_rms_weight, None, ctx.b_c_dt_rms_eps
