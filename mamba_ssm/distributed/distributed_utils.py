@@ -105,10 +105,10 @@ all_reduce = AllReduceFunc.apply
 def sync_shared_params(model: torch.nn.Module, process_group: ProcessGroup):
     # We want to iterate over parameters with _shared_params=True in the same order,
     # as different ranks might have different number of parameters (e.g., only rank 0 has bias).
-    pamams_shared = {
+    params_shared = {
         name: p for name, p in model.named_parameters() if getattr(p, "_shared_params", False)
     }
-    for _, p in sorted(pamams_shared.items()):
+    for _, p in sorted(params_shared.items()):
         with torch.no_grad():
             # Broadcast needs src to be global rank, not group rank
             torch.distributed.broadcast(
