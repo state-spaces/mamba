@@ -358,8 +358,8 @@ class Mamba3Step():
         trap_val = Float32(mTrap[bidb, bidh])
 
         # Load X and Xstate, these are small so we want to kick them off first
-        tXrX = cute.make_fragment_like(tXgX)
-        tXrXstate = cute.make_fragment_like(tXgXstate)
+        tXrX = cute.make_rmem_tensor_like(tXgX)
+        tXrXstate = cute.make_rmem_tensor_like(tXgXstate)
         copy_elems_x = cute.size(tXgX.shape[0][0])
         assert cute.size(tXgX.shape) == copy_elems_x  # Only 1 load instruction
         num_loads_X = const_expr(self.tile_D // copy_elems_x)
@@ -385,10 +385,10 @@ class Mamba3Step():
         cute.copy(gmem_tiled_copy_state, tSgS, tSsS_g2s)
         cute.arch.cp_async_commit_group()
 
-        alpha_val = cute.arch.exp(A_val * dt_val)
+        alpha_val = cute.math.exp(A_val * dt_val, fastmath=True)
         # Transform X and Xstate by multiplying with gamma and beta, then write to smem
         if warp_idx == 0:
-            tXrX_f32 = cute.make_fragment_like(tXrX, Float32)
+            tXrX_f32 = cute.make_rmem_tensor_like(tXrX, Float32)
             tXrX_f32.store(tXrX.load().to(Float32))
             if not need_bound_check_X or lane_idx < num_loads_X:
                 cute.autovec_copy(tXrX_f32, tXsX)
@@ -398,7 +398,7 @@ class Mamba3Step():
                 cute.autovec_copy(tXrX_f32, tXsXgamma)
         if warp_idx == 1:
             beta_val = (1.0 - trap_val) * dt_val * alpha_val
-            tXrXstate_f32 = cute.make_fragment_like(tXgXstate, Float32)
+            tXrXstate_f32 = cute.make_rmem_tensor_like(tXgXstate, Float32)
             tXrXstate_f32.store(tXrXstate.load().to(Float32) * beta_val)
             if not need_bound_check_X or lane_idx < num_loads_X:
                 cute.autovec_copy(tXrXstate_f32, tXsXstate)
@@ -416,13 +416,13 @@ class Mamba3Step():
         # ((vecsize_dstate, 1), mimo, 1) -> ((vecsize_dstate, 1), mimo)
         tSsB = smem_thr_copy_B.partition_S(sB)[None, None, 0]
         tSsBstate = smem_thr_copy_B.partition_S(sBstate)[None, None, 0]
-        tSrB = cute.make_fragment_like(tSsB)
-        tSrBstate = cute.make_fragment_like(tSsBstate)
+        tSrB = cute.make_rmem_tensor_like(tSsB)
+        tSrBstate = cute.make_rmem_tensor_like(tSsBstate)
         cute.autovec_copy(tSsB, tSrB)
         cute.autovec_copy(tSsBstate, tSrBstate)
-        tSrB_f32 = cute.make_fragment_like(tSrB, Float32)
+        tSrB_f32 = cute.make_rmem_tensor_like(tSrB, Float32)
         tSrB_f32.store(tSrB.load().to(Float32))
-        tSrBstate_f32 = cute.make_fragment_like(tSrBstate, Float32)
+        tSrBstate_f32 = cute.make_rmem_tensor_like(tSrBstate, Float32)
         tSrBstate_f32.store(tSrBstate.load().to(Float32))
         # Loading x and xstate, at most 1 val per thread
         x_val = Float32(0.0)
@@ -433,7 +433,7 @@ class Mamba3Step():
         if lane_idx < lanes_per_D:
             x_state_val = sXstate[warp_idx * lanes_per_D + lane_idx]
 
-        new_state = cute.make_fragment((vecsize_dstate, lanes_per_D), Float32)
+        new_state = cute.make_rmem_tensor((vecsize_dstate, lanes_per_D), Float32)
         for r in cutlass.range_constexpr(self.mimo):
             x_proj_val = Float32(0.0)
             if lane_idx < lanes_per_D:
@@ -455,12 +455,12 @@ class Mamba3Step():
         thr_copy_state_s2r = tiled_copy_state_s2r.get_slice(tidx)
         # ((vecsize_state, lanes_per_D), 1, 1)
         tSsS = thr_copy_state_s2r.partition_S(sState)
-        tSrS = cute.make_fragment_like(tSsS)
+        tSrS = cute.make_rmem_tensor_like(tSsS)
         cute.autovec_copy(tSsS, tSrS)
 
         # ((vecsize_state, lanes_per_D), 1, 1)
-        # tSrS_f32 = cute.make_fragment_like(tSrS, Float32)
-        tSrS_f32 = cute.make_fragment(((vecsize_dstate, 1), lanes_per_D, 1), Float32)
+        # tSrS_f32 = cute.make_rmem_tensor_like(tSrS, Float32)
+        tSrS_f32 = cute.make_rmem_tensor(((vecsize_dstate, 1), lanes_per_D, 1), Float32)
         assert cute.size(tSrS.shape) == cute.size(tSrS_f32.shape)
         tSrS_f32.store(tSrS.load().to(Float32))
         for v in cutlass.range(cute.size(tSrS_f32), unroll_full=True):
@@ -489,11 +489,11 @@ class Mamba3Step():
         cute.arch.sync_threads()
         # ((vecsize_dstate, 1), mimo, 1) -> ((vecsize_dstate, 1), 1, mimo)
         tSsC = select(smem_thr_copy_B.partition_S(sC), mode=[0, 2, 1])
-        tSrC = cute.make_fragment_like(tSsC)
+        tSrC = cute.make_rmem_tensor_like(tSsC)
         cute.autovec_copy(tSsC, tSrC)
-        tSrC_f32 = cute.make_fragment_like(tSrC, Float32)
+        tSrC_f32 = cute.make_rmem_tensor_like(tSrC, Float32)
         tSrC_f32.store(tSrC.load().to(Float32))
-        out_expanded = cute.make_fragment((lanes_per_D, self.mimo), Float32)
+        out_expanded = cute.make_rmem_tensor((lanes_per_D, self.mimo), Float32)
         # tSrS_f32 has shape ((vecsize_dstate, 1), lanes_per_D, 1)
         # tSrC has shape ((vecsize_dstate, 1), mimo)
         out_expanded.store(
