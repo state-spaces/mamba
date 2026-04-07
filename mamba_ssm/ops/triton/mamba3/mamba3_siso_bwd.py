@@ -21,10 +21,11 @@ from mamba_ssm.ops.triton.mamba3.utils import cos_approx, sin_approx, sigmoid_ap
 
 @triton.autotune(
     configs=[
-        triton.Config({"CHUNK_SIZE": cs}, num_stages=s, num_warps=w)
+        triton.Config({"CHUNK_SIZE": cs}, num_stages=s, num_warps=w, maxnreg=r)
         for cs in [32, 64]
         for s in [1, 2, 3]
         for w in [2, 4, 8]
+        for r in [None, 128, 256]
     ],
     key=["HEADDIM_V"]
 )
@@ -192,9 +193,10 @@ def compute_dzdo(
 
 @triton.autotune(
     configs=[
-        triton.Config({}, num_stages=s, num_warps=w)
+        triton.Config({}, num_stages=s, num_warps=w, maxnreg=r)
         for s in [1, 2, 3]
         for w in [2, 4, 8]
+        for r in [None, 128, 256]
     ],
     key=["CHUNK_SIZE", "HEADDIM_QK", "HEADDIM_V", "IS_VARLEN"]
 )
@@ -801,9 +803,10 @@ def compute_dqkv(
 
 @triton.autotune(
     configs=[
-        triton.Config({}, num_stages=s, num_warps=w)
+        triton.Config({}, num_stages=s, num_warps=w, maxnreg=r)
         for s in [1, 2, 3]
         for w in [2, 4, 8]
+        for r in [None, 128, 256]
     ],
     key=["CHUNK_SIZE", "BLOCK_HEADDIM_QK", "HEADDIM_QK", "GQA_RATIO"]
 )
@@ -1407,10 +1410,11 @@ def apply_dk_state_post(
 # =============================================================================
 @triton.autotune(
     configs=[
-        triton.Config({"CHUNK_SIZE": cs}, num_stages=s, num_warps=w)
+        triton.Config({"CHUNK_SIZE": cs}, num_stages=s, num_warps=w, maxnreg=r)
         for cs in [64, 128, 256]
         for s in [1, 2, 3]
         for w in [2, 4, 8]
+        for r in [None, 128, 256]
     ],
     key=["HEADDIM_V", "HEADDIM_QK", "HAS_INPUT_STATE", "IS_VARLEN"]
 )
