@@ -17,9 +17,10 @@ from mamba_ssm.ops.triton.mamba3.utils import cos_approx, sin_approx, tanh_appro
 
 @triton.autotune(
     configs=[
-        triton.Config({}, num_stages=s, num_warps=w)
+        triton.Config({}, num_stages=s, num_warps=w, maxnreg=r)
         for s in [1, 2, 3]
         for w in [2, 4, 8]
+        for r in [None, 128, 256]
     ],
     key=[
         "CHUNK_SIZE", "HEADDIM_QK", "HEADDIM_V", "STORE_SSM_STATES_ADT_OUTV", "HAS_D", 
