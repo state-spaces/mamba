@@ -17,7 +17,18 @@ except ImportError:
 
 from mamba_ssm.ops.triton.layer_norm import _layer_norm_fwd
 
-import selective_scan_cuda
+try:
+    import selective_scan_cuda
+except ImportError:
+    selective_scan_cuda = None
+
+
+def _check_selective_scan_cuda():
+    if selective_scan_cuda is None:
+        raise RuntimeError(
+            "selective_scan_cuda is not installed. To use Mamba-1, reinstall with:\n"
+            "  MAMBA_KEEP_CUDA_BUILD=TRUE pip install mamba-ssm --no-build-isolation"
+        )
 
 
 class SelectiveScanFn(torch.autograd.Function):
@@ -25,6 +36,7 @@ class SelectiveScanFn(torch.autograd.Function):
     @staticmethod
     def forward(ctx, u, delta, A, B, C, D=None, z=None, delta_bias=None, delta_softplus=False,
                 return_last_state=False):
+        _check_selective_scan_cuda()
         if u.stride(-1) != 1:
             u = u.contiguous()
         if delta.stride(-1) != 1:
@@ -192,6 +204,7 @@ class MambaInnerFn(torch.autograd.Function):
         """
              xz: (batch, dim, seqlen)
         """
+        _check_selective_scan_cuda()
         assert causal_conv1d_fwd_function is not None, "causal_conv1d_cuda is not available. Please install causal-conv1d."
         assert checkpoint_lvl in [0, 1]
         L = xz.shape[-1]

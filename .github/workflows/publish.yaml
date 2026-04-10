@@ -138,8 +138,6 @@ jobs:
           pip install torch --index-url https://download.pytorch.org/whl/cpu
 
       - name: Build core package
-        env:
-          MAMBA_SKIP_CUDA_BUILD: "TRUE"
         run: |
           python setup.py sdist --dist-dir=dist
 
