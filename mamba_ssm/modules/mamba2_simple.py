@@ -117,7 +117,8 @@ class Mamba2Simple(nn.Module):
 
         # Extra normalization layer right before output projection
         assert RMSNormGated is not None
-        self.norm = RMSNormGated(self.d_inner, eps=1e-5, norm_before_gate=False, **factory_kwargs)
+        self.norm = RMSNormGated(self.d_inner, eps=1e-5, norm_before_gate=False,
+                                 group_size=self.d_inner // ngroups, **factory_kwargs)
 
         self.out_proj = nn.Linear(self.d_inner, self.d_model, bias=bias, **factory_kwargs)
 
