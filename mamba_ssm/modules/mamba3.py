@@ -14,7 +14,6 @@ try:
 except ImportError:
     mamba3_mimo_combined = None
 
-from mamba_ssm.ops.triton.angle_cumsum import angle_dt
 from mamba_ssm.ops.triton.mamba3.mamba3_siso_combined import mamba3_siso_combined
 
 from mamba_ssm.ops.triton.mamba3.mamba3_mimo_rotary_step import apply_rotary_qk_inference_fwd
@@ -174,8 +173,8 @@ class Mamba3(nn.Module):
         DT = rearrange(DT, "b l n -> b n l")
         ADT = rearrange(ADT, "b l n -> b n l")
 
-        # Compute angle
-        angles = angles.unsqueeze(-2).expand(-1, -1, self.nheads, -1) # (B, L, N, S)
+        # Compute angle — cast to float32 as required by the MIMO/SISO kernels
+        angles = angles.unsqueeze(-2).expand(-1, -1, self.nheads, -1).to(torch.float32) # (B, L, N, S)
 
         # Apply RMS Norm on B and C
         B = self.B_norm(B)
@@ -183,7 +182,6 @@ class Mamba3(nn.Module):
         
         # Apply Mamba-3 kernel
         if self.is_mimo:
-            angles = angle_dt(angles, DT.transpose(-1, -2)) # (B, L, N, S)
             y = mamba3_mimo_combined(
                 Q=C,
                 K=B,
