@@ -254,7 +254,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                 // There's a syncthreads in the scan op, so we don't need to sync here.
                 // Unless there's only 1 warp, but then it's the same thread (0) reading and writing.
                 if (threadIdx.x == 0) {
-                    smem_running_prefix[state_idx] = prefix_op.running_prefix;
+                    smem_running_prefix[state_idx + r * MAX_DSTATE] = prefix_op.running_prefix;
                     x[(r * params.n_chunks + chunk) * params.dstate + state_idx] = prefix_op.running_prefix;
                 }
                 #pragma unroll
