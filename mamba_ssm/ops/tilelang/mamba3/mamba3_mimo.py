@@ -14,6 +14,7 @@ from torch import Tensor
 
 # Import kernels
 from mamba_ssm.ops.triton.mamba3.mamba3_mimo_utils import compute_dacs_segsum_triton, compute_dacs_segsum_triton_varlen
+from mamba_ssm.ops.triton.mamba3.angle_dt import angle_dt_fwd, angle_dt_bwd
 
 from mamba_ssm.ops.tilelang.mamba3.mamba3_mimo_fwd import mamba_mimo_forward
 from mamba_ssm.ops.tilelang.mamba3.mamba3_mimo_fwd_varlen import mamba_mimo_forward_varlen
@@ -62,13 +63,26 @@ class _Mamba3Function(torch.autograd.Function):
                 Q, K, V, ADT, DT, Trap, Q_bias, K_bias, MIMO_V, MIMO_Z, MIMO_Out, Angles, D, Z,
             )
         )
+        # Kernels require cu_seqlens as int32; torch.cumsum promotes int32→int64 on CUDA
+        if cu_seqlens is not None and cu_seqlens.dtype != torch.int32:
+            cu_seqlens = cu_seqlens.to(torch.int32)
+
+        # Compute cumulative angles (varlen-aware)
+        Angles_Cumsum, angle_output_state = angle_dt_fwd(
+            Angles, DT,
+            chunk_size=chunk_size,
+            return_output_state=True,
+            cu_seqlens=cu_seqlens,
+        )
+        if return_state:
+            Final_Angle = torch.remainder(angle_output_state, 2 * torch.pi).contiguous().detach()
 
         if cu_seqlens is not None:
             DA_CS, DA_CS_REV, Segsum = compute_dacs_segsum_triton_varlen(ADT, chunk_size, cu_seqlens=cu_seqlens)
             Out, Final_SSM_State, Final_K = mamba_mimo_forward_varlen(
                 Q, K, V, Q_bias, K_bias, MIMO_V, MIMO_Out,
-                Z, D, MIMO_Z, Angles,
-                DA_CS, DA_CS_REV, DT, Trap, Segsum, 
+                Z, D, MIMO_Z, Angles_Cumsum,
+                DA_CS, DA_CS_REV, DT, Trap, Segsum,
                 cu_seqlens=cu_seqlens,
                 return_state=return_state,
                 chunk_size=chunk_size, rotary_dim_divisor=rotary_dim_divisor,
@@ -79,8 +93,8 @@ class _Mamba3Function(torch.autograd.Function):
             DA_CS, DA_CS_REV, Segsum = compute_dacs_segsum_triton(ADT, chunk_size)
             Out, Final_SSM_State, Final_K = mamba_mimo_forward(
                 Q, K, V, Q_bias, K_bias, MIMO_V, MIMO_Out,
-                Z, D, MIMO_Z, Angles,
-                DA_CS, DA_CS_REV, DT, Trap, Segsum, 
+                Z, D, MIMO_Z, Angles_Cumsum,
+                DA_CS, DA_CS_REV, DT, Trap, Segsum,
                 return_state=return_state,
                 chunk_size=chunk_size, rotary_dim_divisor=rotary_dim_divisor,
                 dtype=dtype,
@@ -88,7 +102,7 @@ class _Mamba3Function(torch.autograd.Function):
 
         ctx.chunk_size = chunk_size
         ctx.save_for_backward(
-            Q, K, V, ADT, DT, Trap, Q_bias, K_bias, Angles,
+            Q, K, V, ADT, DT, Trap, Q_bias, K_bias, Angles, Angles_Cumsum,
             D, Z,
             MIMO_V, MIMO_Out, MIMO_Z,
             cu_seqlens,
@@ -97,7 +111,6 @@ class _Mamba3Function(torch.autograd.Function):
         if not return_state:
             return Out
         else:
-            Final_Angle = torch.remainder(Angles[:, -1, :, :], 2 * torch.pi).contiguous().detach()
             Final_SSM_State = Final_SSM_State.permute(0, 1, 3, 2).contiguous().detach()
             Final_K = Final_K.contiguous().detach()
             Final_V = V[:, -1, :, :].contiguous().detach()
@@ -115,29 +128,29 @@ class _Mamba3Function(torch.autograd.Function):
             )
         dout = dout.contiguous()
 
-        (Q, K, V, ADT, DT, Trap, Q_bias, K_bias, Angles,
+        (Q, K, V, ADT, DT, Trap, Q_bias, K_bias, Angles, Angles_Cumsum,
             D, Z,
             MIMO_V, MIMO_Out, MIMO_Z,
             cu_seqlens
             ) = ctx.saved_tensors
-    
+
         if cu_seqlens is not None:
             DA_CS, DA_CS_REV, Segsum = compute_dacs_segsum_triton_varlen(ADT, ctx.chunk_size, cu_seqlens=cu_seqlens)
-            (dQ, dK, dV, 
+            (dQ, dK, dV,
                 dADT, dDT, dTrap, dQ_bias, dK_bias,
-                dMIMO_V, dMIMO_Z, dMIMO_Out, dAngles, 
+                dMIMO_V, dMIMO_Z, dMIMO_Out, dAngles_Cumsum,
                 dD, dZ) = mamba_mimo_bwd_combined_varlen(
                     dout,
-                    Q, 
-                    K, 
-                    V, 
+                    Q,
+                    K,
+                    V,
                     Q_bias,
                     K_bias,
-                    MIMO_V, 
+                    MIMO_V,
                     MIMO_Out,
                     Z,
                     MIMO_Z,
-                    Angles,
+                    Angles_Cumsum,
                     DA_CS,
                     DA_CS_REV,
                     DT,
@@ -151,21 +164,21 @@ class _Mamba3Function(torch.autograd.Function):
                 )
         else:
             DA_CS, DA_CS_REV, Segsum = compute_dacs_segsum_triton(ADT, ctx.chunk_size)
-            (dQ, dK, dV, 
+            (dQ, dK, dV,
                 dADT, dDT, dTrap, dQ_bias, dK_bias,
-                dMIMO_V, dMIMO_Z, dMIMO_Out, dAngles, 
+                dMIMO_V, dMIMO_Z, dMIMO_Out, dAngles_Cumsum,
                 dD, dZ) = mamba_mimo_bwd_combined(
                     dout,
-                    Q, 
-                    K, 
-                    V, 
+                    Q,
+                    K,
+                    V,
                     Q_bias,
                     K_bias,
-                    MIMO_V, 
+                    MIMO_V,
                     MIMO_Out,
                     Z,
                     MIMO_Z,
-                    Angles,
+                    Angles_Cumsum,
                     DA_CS,
                     DA_CS_REV,
                     DT,
@@ -176,6 +189,17 @@ class _Mamba3Function(torch.autograd.Function):
                     ctx.rotary_dim_divisor,
                     ctx.dtype,
                 )
+
+        # Backprop through angle_dt cumsum (varlen-aware)
+        dAngles, dDT_angle, _ = angle_dt_bwd(
+            grad_out=dAngles_Cumsum,
+            angle=Angles,
+            dt=DT,
+            has_init_state=False,
+            chunk_size=ctx.chunk_size,
+            cu_seqlens=cu_seqlens,
+        )
+        dDT = dDT + dDT_angle
 
         return (
             dQ,

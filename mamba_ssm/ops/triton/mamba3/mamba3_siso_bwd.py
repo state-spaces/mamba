@@ -680,13 +680,21 @@ def compute_dqkv(
     if D is not None:
         assert D.shape == (nheads,)
     
-    # Ensure all tensors are contiguous for optimal memory access
-    # Check if tensors have expected strides (innermost dimension stride = 1)
-    if q.stride(-1) != 1:
+    # Ensure all tensors satisfy TMA alignment constraints.
+    #
+    # TMA 2D requires the global stride (seqlen dimension, in bytes) to be a
+    # multiple of 16.  For bfloat16 data this means stride_seqlen % 8 == 0.
+    # Tensors that come from saved ctx.saved_tensors in the backward (e.g. V
+    # extracted from a fused projection) can be non-contiguous with strides
+    # that violate this constraint.  The safest fix is to make them contiguous.
+    #
+    # We always use .contiguous() for tensors that are passed through TMA
+    # descriptors; other tensors just need innermost stride == 1.
+    if not q.is_contiguous():
         q = q.contiguous()
-    if k.stride(-1) != 1:
+    if not k.is_contiguous():
         k = k.contiguous()
-    if v.stride(-1) != 1:
+    if not v.is_contiguous():
         v = v.contiguous()
     if da_cs.stride(-1) != 1:
         da_cs = da_cs.contiguous()
@@ -694,21 +702,21 @@ def compute_dqkv(
         da_cs_sum = da_cs_sum.contiguous()
     if qk_dot.stride(-1) != 1:
         qk_dot = qk_dot.contiguous()
-    if SSM_States.stride(-1) != 1:
+    if not SSM_States.is_contiguous():
         SSM_States = SSM_States.contiguous()
-    if do.stride(-1) != 1:
+    if not do.is_contiguous():
         do = do.contiguous()
     if D is not None and D.stride(-1) != 1:
         D = D.contiguous()
-    if d_ossm_state is not None and d_ossm_state.stride(-1) != 1:
+    if d_ossm_state is not None and not d_ossm_state.is_contiguous():
         d_ossm_state = d_ossm_state.contiguous()
-    if d_ov_state is not None and d_ov_state.stride(-1) != 1:
+    if d_ov_state is not None and not d_ov_state.is_contiguous():
         d_ov_state = d_ov_state.contiguous()
     
     # Allocate output tensors
     dq = torch.empty((batch, seqlen, nheads, headdim_qk), dtype=q.dtype, device=q.device)
     dk = torch.empty((batch, seqlen, nheads, headdim_qk), dtype=k.dtype, device=k.device)
-    dv = torch.empty_like(v)
+    dv = torch.empty((batch, seqlen, nheads, headdim_v), dtype=v.dtype, device=v.device)
     dAdt = torch.empty_like(da_cs)
     dQK = torch.empty_like(da_cs)
     dD = torch.empty((num_sequences, nheads), dtype=torch.float32, device=q.device) if D is not None else None
