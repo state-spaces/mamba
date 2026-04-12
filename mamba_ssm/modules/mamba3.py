@@ -308,7 +308,8 @@ class Mamba3(nn.Module):
         assert mamba3_step_fn is not None, "Cute Mamba-3 step function is not available. Please ensure you installed the necessary dependencies, such as nvidia-cutlass-dsl and quack-kernels."
 
         # in_proj
-        zxBCdt = self.in_proj(u)
+        assert u.shape[1] == 1, "Only support decoding with 1 token at a time for now"
+        zxBCdt = self.in_proj(u.squeeze(1))
         z, x, B, C, dd_dt, dd_A, trap, angles = torch.split(
             zxBCdt,
             [
