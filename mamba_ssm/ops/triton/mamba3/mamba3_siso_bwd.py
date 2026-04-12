@@ -13,7 +13,7 @@ from einops import rearrange, repeat
 
 import triton
 import triton.language as tl
-from mamba_ssm.ops.triton.mamba3.utils import cos_approx, sin_approx, sigmoid_approx
+from mamba_ssm.ops.triton.mamba3.utils import cos_approx, sin_approx, sigmoid_approx, _maxnreg
 
 # =============================================================================
 # dZ Kernel
@@ -21,14 +21,14 @@ from mamba_ssm.ops.triton.mamba3.utils import cos_approx, sin_approx, sigmoid_ap
 
 @triton.autotune(
     configs=[
-        triton.Config({"CHUNK_SIZE": cs}, num_stages=s, num_warps=w, maxnreg=r)
+        triton.Config({"CHUNK_SIZE": cs}, num_stages=s, num_warps=w, **_maxnreg(r))
         for cs in [32, 64]
         for s in [1, 2, 3]
         for w in [2, 4, 8]
         for r in [None, 128, 256]
     ] + [
         # Smaller configs for GPUs with limited register files (e.g. AMD RDNA4).
-        triton.Config({"CHUNK_SIZE": cs}, num_stages=1, num_warps=1, maxnreg=r)
+        triton.Config({"CHUNK_SIZE": cs}, num_stages=1, num_warps=1, **_maxnreg(r))
         for cs in [16, 32]
         for r in [None, 64, 128]
     ],
@@ -198,13 +198,13 @@ def compute_dzdo(
 
 @triton.autotune(
     configs=[
-        triton.Config({}, num_stages=s, num_warps=w, maxnreg=r)
+        triton.Config({}, num_stages=s, num_warps=w, **_maxnreg(r))
         for s in [1, 2, 3]
         for w in [2, 4, 8]
         for r in [None, 128, 256]
     ] + [
         # Smaller configs for GPUs with limited register files (e.g. AMD RDNA4).
-        triton.Config({}, num_stages=1, num_warps=1, maxnreg=r)
+        triton.Config({}, num_stages=1, num_warps=1, **_maxnreg(r))
         for r in [None, 64, 128]
     ],
     key=["CHUNK_SIZE", "HEADDIM_QK", "HEADDIM_V", "IS_VARLEN"]
@@ -820,13 +820,13 @@ def compute_dqkv(
 
 @triton.autotune(
     configs=[
-        triton.Config({}, num_stages=s, num_warps=w, maxnreg=r)
+        triton.Config({}, num_stages=s, num_warps=w, **_maxnreg(r))
         for s in [1, 2, 3]
         for w in [2, 4, 8]
         for r in [None, 128, 256]
     ] + [
         # Smaller configs for GPUs with limited register files (e.g. AMD RDNA4).
-        triton.Config({}, num_stages=1, num_warps=1, maxnreg=r)
+        triton.Config({}, num_stages=1, num_warps=1, **_maxnreg(r))
         for r in [None, 64, 128]
     ],
     key=["CHUNK_SIZE", "BLOCK_HEADDIM_QK", "HEADDIM_QK", "GQA_RATIO"]
@@ -1431,14 +1431,14 @@ def apply_dk_state_post(
 # =============================================================================
 @triton.autotune(
     configs=[
-        triton.Config({"CHUNK_SIZE": cs}, num_stages=s, num_warps=w, maxnreg=r)
+        triton.Config({"CHUNK_SIZE": cs}, num_stages=s, num_warps=w, **_maxnreg(r))
         for cs in [64, 128, 256]
         for s in [1, 2, 3]
         for w in [2, 4, 8]
         for r in [None, 128, 256]
     ] + [
         # Smaller configs for GPUs with limited register files (e.g. AMD RDNA4).
-        triton.Config({"CHUNK_SIZE": cs}, num_stages=1, num_warps=1, maxnreg=r)
+        triton.Config({"CHUNK_SIZE": cs}, num_stages=1, num_warps=1, **_maxnreg(r))
         for cs in [32, 64]
         for r in [None, 64, 128]
     ],

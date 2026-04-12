@@ -16,6 +16,13 @@ def _is_hip():
         return False
 
 
+def _maxnreg(value):
+    """Return maxnreg kwarg dict, empty on HIP where it is unsupported."""
+    if value is None or _is_hip():
+        return {}
+    return {"maxnreg": value}
+
+
 # ---------------------------------------------------------------------------
 # Backend-conditional trig/activation helpers.
 #
