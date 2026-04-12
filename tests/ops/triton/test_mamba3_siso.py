@@ -903,19 +903,21 @@ def test_mamba3_siso_step_ref_vs_fwd_ref(nheads_qk=4, has_Z=True, has_D=True):
 # ==================================================================
 
 def test_mamba3_portable_math_utils():
-    """Test that portable trig/activation utils match PyTorch references.
+    """Test that trig/activation utils match PyTorch references.
 
     The Triton helper functions cos_approx, sin_approx, tanh_approx, and
     sech2_approx must produce results close to their PyTorch equivalents.
     This test exercises the functions through a trivial Triton kernel to
     ensure they compile and run correctly on the current GPU backend
-    (NVIDIA *and* AMD).
+    (NVIDIA *and* AMD).  On NVIDIA the backend-conditional code selects
+    PTX SFU instructions; on AMD it selects portable Triton builtins.
     """
     import triton
     import triton.language as tl
     from mamba_ssm.ops.triton.mamba3.utils import (
-        cos_approx, sin_approx, tanh_approx, sech2_approx,
+        cos_approx, sin_approx, tanh_approx, sech2_approx, _is_hip,
     )
+    print(f"  Backend: {'HIP/ROCm' if _is_hip() else 'CUDA/NVIDIA'}")
 
     @triton.jit
     def _math_utils_test_kernel(
