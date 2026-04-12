@@ -15,9 +15,38 @@ import triton
 import triton.language as tl
 from mamba_ssm.ops.triton.mamba3.utils import cos_approx, sin_approx, tanh_approx, silu, sigmoid_approx
 
+try:
+    from triton.tools.tensor_descriptor import TensorDescriptor
+except ImportError:
+    TensorDescriptor = None
+
+
+def _siso_fwd_descriptor_pre_hook(nargs):
+    """Set block_shape on host TensorDescriptors before each autotuned config trial."""
+    if TensorDescriptor is None:
+        return
+    chunk_size = nargs["CHUNK_SIZE"]
+    headdim_qk = nargs["HEADDIM_QK"]
+    headdim_v = nargs["HEADDIM_V"]
+    desc_blocks = {
+        "Q": [1, chunk_size, 1, headdim_qk],
+        "K": [1, chunk_size, 1, headdim_qk],
+        "V": [1, chunk_size, 1, headdim_v],
+        "Z": [1, chunk_size, 1, headdim_v],
+        "Out": [1, chunk_size, 1, headdim_v],
+        "Q_store": [1, chunk_size, 1, headdim_qk],
+        "K_store": [1, chunk_size, 1, headdim_qk],
+        "SSM_States": [1, 1, headdim_v, headdim_qk],
+    }
+    for name, block_shape in desc_blocks.items():
+        arg = nargs.get(name)
+        if isinstance(arg, TensorDescriptor):
+            arg.block_shape = block_shape
+
+
 @triton.autotune(
     configs=[
-        triton.Config({}, num_stages=s, num_warps=w, maxnreg=r)
+        triton.Config({}, num_stages=s, num_warps=w, maxnreg=r, pre_hook=_siso_fwd_descriptor_pre_hook)
         for s in [1, 2, 3]
         for w in [2, 4, 8]
         for r in [None, 128, 256]
@@ -28,8 +57,8 @@ from mamba_ssm.ops.triton.mamba3.utils import cos_approx, sin_approx, tanh_appro
 )
 @triton.jit
 def mamba3_siso_fwd_kernel(
-    # Inputs
-    Q, K, V, ADT, DT, Trap, Q_bias, K_bias, Angles, D, Z, 
+    # Inputs (TensorDescriptor on Blackwell, raw tensor pointer otherwise)
+    Q, K, V, ADT, DT, Trap, Q_bias, K_bias, Angles, D, Z,
     Initial_SSM_State, Initial_K_State, Initial_V_State, Cu_Seqlens,
     # Outputs
     Out, Out_v, SSM_States, DA_CS_Store, DA_CS_SUM_Store, Q_store, K_store, QK_store,
@@ -152,46 +181,49 @@ def mamba3_siso_fwd_kernel(
         seq_idx = pid_batch
         seq_offset = 0
         chunk_offset = 0
-    
+
     num_chunks = tl.cdiv(seqlen, CHUNK_SIZE)
 
     # Compute head index for Q/K (supports Grouped Query Attention)
     nheads = tl.num_programs(0)
     head_idx_qk = pid_head // (nheads // nheads_qk)
 
-    # Setup input pointers
-    q_ptr = Q + pid_batch * stride_q_batch + head_idx_qk * stride_q_head + seq_offset * stride_q_seqlen
-    k_ptr = K + pid_batch * stride_k_batch + head_idx_qk * stride_k_head + seq_offset * stride_k_seqlen
-    v_ptr = V + pid_batch * stride_v_batch + pid_head * stride_v_head + seq_offset * stride_v_seqlen
+    # Host TMA descriptors
+    q_desc = Q
+    k_desc = K
+    v_desc = V
+    o_desc = Out
+    q_store_desc = Q_store
+    k_store_desc = K_store
+    if HAS_Z:
+        z_desc = Z
+    if STORE_SSM_STATES_ADT_OUTV:
+        ssm_states_desc = SSM_States
+
+    # Non-TMA pointer setup
     adt_ptr = ADT + pid_batch * stride_adt_batch + pid_head * stride_adt_head + seq_offset * stride_adt_seqlen
     dt_ptr = DT + pid_batch * stride_dt_batch + pid_head * stride_dt_head + seq_offset * stride_dt_seqlen
     trap_ptr = Trap + pid_batch * stride_trap_batch + pid_head * stride_trap_head + seq_offset * stride_trap_seqlen
     q_bias_ptr = Q_bias + pid_head * stride_q_bias_head
     k_bias_ptr = K_bias + pid_head * stride_k_bias_head
     angle_ptr = Angles + pid_batch * stride_angles_batch + pid_head * stride_angles_head + seq_offset * stride_angles_seqlen
-    
+
     if HAS_D:
         D_ptr = D + pid_head * stride_d_head
         D_val = tl.load(D_ptr).to(tl.float32)
-    if HAS_Z:
-        z_ptr = Z + pid_batch * stride_z_batch + pid_head * stride_z_head + seq_offset * stride_z_seqlen
-    
+
     # State pointers use seq_idx (unified for batched and varlen)
     if HAS_INITIAL_STATES:
         init_ssm_state_ptr = Initial_SSM_State + seq_idx * stride_init_ssm_state_seq + pid_head * stride_init_ssm_state_head
         init_k_state_ptr = Initial_K_State + seq_idx * stride_init_k_state_seq + pid_head * stride_init_k_state_head
         init_v_state_ptr = Initial_V_State + seq_idx * stride_init_v_state_seq + pid_head * stride_init_v_state_head
 
-    # Setup output pointers
-    o_ptr = Out + pid_batch * stride_o_batch + pid_head * stride_o_head + seq_offset * stride_o_seqlen
+    # Non-TMA output pointers
     if STORE_SSM_STATES_ADT_OUTV:
         out_v_ptr = Out_v + pid_batch * stride_o_v_batch + pid_head * stride_o_v_head + seq_offset * stride_o_v_seqlen
-        ssm_states_ptr = SSM_States + pid_batch * stride_ssm_states_batch + pid_head * stride_ssm_states_head + chunk_offset * HEADDIM_QK * stride_ssm_states_qkdim
         da_cs_store_ptr = DA_CS_Store + pid_batch * stride_da_cs_store_batch + pid_head * stride_da_cs_store_head + seq_offset * stride_da_cs_store_seqlen
         da_cs_sum_store_ptr = DA_CS_SUM_Store + pid_batch * stride_da_cs_sum_store_batch + pid_head * stride_da_cs_sum_store_head + chunk_offset * stride_da_cs_sum_store_seqlen
 
-    q_store_ptr = Q_store + pid_batch * stride_q_store_batch + pid_head * stride_q_store_head + seq_offset * stride_q_store_seqlen
-    k_store_ptr = K_store + pid_batch * stride_k_store_batch + pid_head * stride_k_store_head + seq_offset * stride_k_store_seqlen
     qk_store_ptr = QK_store + pid_batch * stride_qk_store_batch + pid_head * stride_qk_store_head + seq_offset * stride_qk_store_seqlen
     scale_store_ptr = Scale_store + pid_batch * stride_scale_store_batch + pid_head * stride_scale_store_head + seq_offset * stride_scale_store_seqlen
     gamma_store_ptr = Gamma_store + pid_batch * stride_gamma_store_batch + pid_head * stride_gamma_store_head + seq_offset * stride_gamma_store_seqlen
@@ -200,59 +232,6 @@ def mamba3_siso_fwd_kernel(
         final_ssm_state_ptr = Final_SSM_State + seq_idx * stride_final_ssm_state_seq + pid_head * stride_final_ssm_state_head
         final_k_state_ptr = Final_K_State + seq_idx * stride_final_k_state_seq + pid_head * stride_final_k_state_head
 
-    # Create TMA tensor descriptors
-    q_desc = tl.make_tensor_descriptor(
-        q_ptr,
-        shape=[seqlen, headdim_qk],
-        strides=[stride_q_seqlen, stride_q_qkdim],
-        block_shape=[CHUNK_SIZE, HEADDIM_QK],
-    )
-    k_desc = tl.make_tensor_descriptor(
-        k_ptr,
-        shape=[seqlen, headdim_qk],
-        strides=[stride_k_seqlen, stride_k_qkdim],
-        block_shape=[CHUNK_SIZE, HEADDIM_QK],
-    )
-    v_desc = tl.make_tensor_descriptor(
-        v_ptr,
-        shape=[seqlen, headdim_v],
-        strides=[stride_v_seqlen, stride_v_vdim],
-        block_shape=[CHUNK_SIZE, HEADDIM_V],
-    )
-    if HAS_Z:
-        z_desc = tl.make_tensor_descriptor(
-            z_ptr,
-            shape=[seqlen, headdim_v],
-            strides=[stride_z_seqlen, stride_z_vdim],
-            block_shape=[CHUNK_SIZE, HEADDIM_V],
-        )
-    
-    q_store_desc = tl.make_tensor_descriptor(
-        q_store_ptr,
-        shape=[seqlen, headdim_qk],
-        strides=[stride_q_store_seqlen, stride_q_store_qkdim],
-        block_shape=[CHUNK_SIZE, HEADDIM_QK],
-    )
-    k_store_desc = tl.make_tensor_descriptor(
-        k_store_ptr,
-        shape=[seqlen, headdim_qk],
-        strides=[stride_k_store_seqlen, stride_k_store_qkdim],
-        block_shape=[CHUNK_SIZE, HEADDIM_QK],
-    )
-    o_desc = tl.make_tensor_descriptor(
-        o_ptr,
-        shape=[seqlen, headdim_v],
-        strides=[stride_o_seqlen, stride_o_vdim],
-        block_shape=[CHUNK_SIZE, HEADDIM_V],
-    )
-    if STORE_SSM_STATES_ADT_OUTV:
-        ssm_states_desc = tl.make_tensor_descriptor(
-            ssm_states_ptr,
-            shape=[headdim_v, num_chunks * headdim_qk],
-            strides=[stride_ssm_states_vdim, stride_ssm_states_qkdim],
-            block_shape=[HEADDIM_V, HEADDIM_QK],
-        )
-
     # Phase 1: Preprocessing - Apply bias, rotary embeddings, compute QK dots.
     for chunk_idx in range(num_chunks):
         chunk_start = chunk_idx * CHUNK_SIZE
@@ -260,9 +239,9 @@ def mamba3_siso_fwd_kernel(
         offs_hd = tl.arange(0, HEADDIM_QK)
         offs_hdr = tl.arange(0, HEADDIM_QK // 2)
 
-        # Load Q and K blocks via TMA
-        q_pre_block = q_desc.load([chunk_start, 0])
-        k_pre_block = k_desc.load([chunk_start, 0])
+        # Load Q and K blocks via TMA (host 4D descriptors)
+        q_pre_block = tl.reshape(q_desc.load([pid_batch, seq_offset + chunk_start, head_idx_qk, 0]), [CHUNK_SIZE, HEADDIM_QK])
+        k_pre_block = tl.reshape(k_desc.load([pid_batch, seq_offset + chunk_start, head_idx_qk, 0]), [CHUNK_SIZE, HEADDIM_QK])
         
         # Load rotary angles
         angle_block = tl.load(
@@ -322,14 +301,14 @@ def mamba3_siso_fwd_kernel(
                 mask=(offs_hd[None, :] < headdim_qk))
             
         k_pre_block *= scale[:, None]
-        k_store_desc.store([chunk_start, 0], k_pre_block)
+        k_store_desc.store([pid_batch, seq_offset + chunk_start, pid_head, 0], tl.reshape(k_pre_block, [1, CHUNK_SIZE, 1, HEADDIM_QK]))
 
         # Apply rotary embeddings to Q
         q0, q1 = tl.split(tl.reshape(q_pre_block, [CHUNK_SIZE, HEADDIM_QK // 2, 2]))
         qo0 = q0 * cos_block - q1 * sin_block
         qo1 = q0 * sin_block + q1 * cos_block
         q_pre_block = tl.reshape(tl.join(qo0, qo1), [CHUNK_SIZE, HEADDIM_QK]).to(q_pre_block.dtype)
-        q_store_desc.store([chunk_start, 0], q_pre_block)
+        q_store_desc.store([pid_batch, seq_offset + chunk_start, pid_head, 0], tl.reshape(q_pre_block, [1, CHUNK_SIZE, 1, HEADDIM_QK]))
 
     # Phase 2: Main computation and output generation.
     if HAS_INITIAL_STATES:
@@ -366,12 +345,12 @@ def mamba3_siso_fwd_kernel(
         adt_ptrs = adt_ptr + offs_seqlen * stride_adt_seqlen
         da = tl.load(adt_ptrs, mask=offs_seqlen < seqlen, other=0.0) * 1.44269504089  # log2(e)
 
-        # Load preprocessed Q, K, V blocks
-        q_block = q_store_desc.load([chunk_start, 0])
-        k_block = k_store_desc.load([chunk_start, 0])
-        v_block = v_desc.load([chunk_start, 0])
+        # Load preprocessed Q, K, V blocks (host 4D descriptors)
+        q_block = tl.reshape(q_store_desc.load([pid_batch, seq_offset + chunk_start, pid_head, 0]), [CHUNK_SIZE, HEADDIM_QK])
+        k_block = tl.reshape(k_store_desc.load([pid_batch, seq_offset + chunk_start, pid_head, 0]), [CHUNK_SIZE, HEADDIM_QK])
+        v_block = tl.reshape(v_desc.load([pid_batch, seq_offset + chunk_start, pid_head, 0]), [CHUNK_SIZE, HEADDIM_V])
         if HAS_Z:
-            z_block = z_desc.load([chunk_start, 0])
+            z_block = tl.reshape(z_desc.load([pid_batch, seq_offset + chunk_start, pid_head, 0]), [CHUNK_SIZE, HEADDIM_V])
 
         # Compute cumulative decay for this chunk
         da_cs = tl.cumsum(da)
@@ -412,10 +391,13 @@ def mamba3_siso_fwd_kernel(
             acc_o = acc_o * silu(z_block.to(tl.float32))
 
         # Store output
-        o_desc.store([chunk_start, 0], acc_o)
+        o_desc.store([pid_batch, seq_offset + chunk_start, pid_head, 0], tl.reshape(acc_o, [1, CHUNK_SIZE, 1, HEADDIM_V]))
 
         if STORE_SSM_STATES_ADT_OUTV:
-            ssm_states_desc.store([0, chunk_idx * headdim_qk], acc_ssm_states.to(ssm_states_desc.dtype))
+            ssm_states_desc.store(
+                [pid_batch, pid_head, 0, (chunk_offset + chunk_idx) * headdim_qk],
+                tl.reshape(acc_ssm_states.to(ssm_states_desc.dtype), [1, 1, HEADDIM_V, HEADDIM_QK]),
+            )
 
         # Update recurrent states
         scale = tl.math.exp2(da_cs_rev)
@@ -610,13 +592,26 @@ def mamba3_siso_fwd(
     else:
         grid = (nheads, batch)
 
+    # Create host TMA descriptors
+    def _make_desc(t, block_shape):
+        return TensorDescriptor(t, shape=list(t.shape), strides=list(t.stride()), block_shape=block_shape)
+
+    Q_desc = _make_desc(Q, [1, chunk_size, 1, HEADDIM_QK])
+    K_desc = _make_desc(K, [1, chunk_size, 1, HEADDIM_QK])
+    V_desc = _make_desc(V, [1, chunk_size, 1, HEADDIM_V])
+    Out_desc = _make_desc(Out, [1, chunk_size, 1, HEADDIM_V])
+    Q_store_desc = _make_desc(Q_store, [1, chunk_size, 1, HEADDIM_QK])
+    K_store_desc = _make_desc(K_store, [1, chunk_size, 1, HEADDIM_QK])
+    Z_desc = _make_desc(Z, [1, chunk_size, 1, HEADDIM_V]) if Z is not None else Z
+    SSM_States_desc = _make_desc(SSM_States, [1, 1, HEADDIM_V, HEADDIM_QK]) if SSM_States is not None else SSM_States
+
     mamba3_siso_fwd_kernel[grid](
-        # Inputs
-        Q, K, V, ADT, DT, Trap, Q_bias, K_bias, Angles, D, Z, 
+        # Inputs (host TMA descriptors)
+        Q_desc, K_desc, V_desc, ADT, DT, Trap, Q_bias, K_bias, Angles, D, Z_desc,
         Init_SSM_State, Init_K_State, Init_V_State, cu_seqlens,
-        # Outputs
-        Out, Out_v, SSM_States, DA_CS_Store, DA_CS_SUM_Store, 
-        Q_store, K_store, QK_store, Scale_store, Gamma_store,
+        # Outputs (host TMA descriptors)
+        Out_desc, Out_v, SSM_States_desc, DA_CS_Store, DA_CS_SUM_Store,
+        Q_store_desc, K_store_desc, QK_store, Scale_store, Gamma_store,
         Final_SSM_State, Final_K_State,
         # Input strides
         Q.stride(0), Q.stride(1), Q.stride(2), Q.stride(3),
