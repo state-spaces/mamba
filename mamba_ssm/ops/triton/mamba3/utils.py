@@ -7,127 +7,82 @@ Copyright (c) 2025, Dao AI Lab, Goombalab
 import triton
 import triton.language as tl
 
-# We use PTX approximations instead of triton built-in functions
-# to trade off a bit of accuracy for much faster speed.
+# Portable trig/activation helpers using Triton builtins.
+# These compile to platform-appropriate instructions on both NVIDIA and AMD.
 
 @triton.jit
 def cos_approx(x):
     """
-    (Fast) Cosine approximation using PTX inline assembly.
+    Cosine via Triton builtin (portable across NVIDIA and AMD backends).
 
     Args:
         x: Input triton tensor (any shape) in float32
     Returns:
-        Approximate cosine values in float32
+        Cosine values in float32
     """
-    return tl.inline_asm_elementwise(
-        "cos.approx.f32 $0, $1;",
-        constraints="=f,f",
-        args=[x],
-        dtype=tl.float32,
-        is_pure=True,
-        pack=1,
-    )
+    return tl.cos(x)
 
 
 @triton.jit
 def sin_approx(x):
     """
-    (Fast) Sine approximation using PTX inline assembly.
+    Sine via Triton builtin (portable across NVIDIA and AMD backends).
 
     Args:
         x: Input triton tensor (any shape) in float32
     Returns:
-        Approximate sine values in float32
+        Sine values in float32
     """
-    return tl.inline_asm_elementwise(
-        "sin.approx.f32 $0, $1;",
-        constraints="=f,f",
-        args=[x],
-        dtype=tl.float32,
-        is_pure=True,
-        pack=1,
-    )
+    return tl.sin(x)
 
 @triton.jit
 def tanh_approx(x):
     """
-    (Fast) hyperbolic tangent approximation using PTX inline assembly.
+    Hyperbolic tangent computed as 2*sigmoid(2x) - 1.
+
+    Mathematically equivalent to tanh(x). Uses tl.sigmoid which is
+    portable across all Triton backends.
 
     Args:
         x: Input triton tensor (any shape) in float32
     Returns:
-        Approximate tanh values in float32
+        Tanh values in float32
     """
-    return tl.inline_asm_elementwise(
-        "tanh.approx.f32 $0, $1;",
-        constraints="=f,f",
-        args=[x],
-        dtype=tl.float32,
-        is_pure=True,
-        pack=1,
-    )
+    return 2.0 * tl.sigmoid(2.0 * x) - 1.0
 
 @triton.jit
 def sech2_approx(x):
     """
-    (Fast) square of the hyperbolic secant approximation using PTX inline assembly.
+    Square of hyperbolic secant: sech^2(x) = 1 - tanh^2(x).
 
     Args:
         x: Input triton tensor (any shape) in float32
     Returns:
-        Approximate sech^2 values in float32
+        sech^2 values in float32
     """
-    tanh_x = tl.inline_asm_elementwise(
-        "tanh.approx.f32 $0, $1;",
-        constraints="=f,f",
-        args=[x],
-        dtype=tl.float32,
-        is_pure=True,
-        pack=1,
-    )
+    tanh_x = 2.0 * tl.sigmoid(2.0 * x) - 1.0
     return 1.0 - tanh_x * tanh_x
 
 @triton.jit
 def sigmoid_approx(x):
     """
-    (Fast) Sigmoid approximation using PTX inline assembly.
-
-    Formula: sigmoid(x) = 0.5 * (1 + tanh(0.5 * x))
-    Leverages fast tanh approximation for speed.
+    Sigmoid via Triton builtin.
 
     Args:
         x: Input triton tensor (any shape) in float32
     Returns:
-        Approximate sigmoid values in float32
+        Sigmoid values in float32
     """
-    # tanh_half_x = tl.inline_asm_elementwise(
-    #     "tanh.approx.f32 $0, $1;",
-    #     constraints="=f,f",
-    #     args=[0.5 * x],
-    #     dtype=tl.float32,
-    #     is_pure=True,
-    #     pack=1,
-    # )
-    # return 0.5 * (1.0 + tanh_half_x)
-    # NOTE: We ended up using the built-in sigmoid for better performance, as the PTX approximation was not faster in this case.
     return tl.sigmoid(x)
 
 @triton.jit
 def silu(x):
     """
-    SiLU (Swish) activation function: x * sigmoid(x).
+    SiLU (Swish) activation: x * sigmoid(x).
 
-    Formula: silu(x) = 0.5*x * (1 + tanh(0.5*x)) + 0.5*x.
-    Leverages fast tanh_approx for speed.
-    
     Args:
         x: Input triton tensor (any shape) in float32
-    
     Returns:
         SiLU activation output in float32
     """
-    # x_half = 0.5 * x
-    # return x_half * tanh_approx(x_half) + x_half
-    # NOTE: We ended up using the built-in sigmoid for better performance, as the PTX approximation was not faster in this case.
-    return x*tl.sigmoid(x)
+    return x * tl.sigmoid(x)

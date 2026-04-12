@@ -898,8 +898,75 @@ def test_mamba3_siso_step_ref_vs_fwd_ref(nheads_qk=4, has_Z=True, has_D=True):
         print(f"Final_{state_name}_State error: {err:.2e}")
 
 
+# ==================================================================
+# Portable Math Utils Test
+# ==================================================================
+
+def test_mamba3_portable_math_utils():
+    """Test that portable trig/activation utils match PyTorch references.
+
+    The Triton helper functions cos_approx, sin_approx, tanh_approx, and
+    sech2_approx must produce results close to their PyTorch equivalents.
+    This test exercises the functions through a trivial Triton kernel to
+    ensure they compile and run correctly on the current GPU backend
+    (NVIDIA *and* AMD).
+    """
+    import triton
+    import triton.language as tl
+    from mamba_ssm.ops.triton.mamba3.utils import (
+        cos_approx, sin_approx, tanh_approx, sech2_approx,
+    )
+
+    @triton.jit
+    def _math_utils_test_kernel(
+        X_ptr, COS_ptr, SIN_ptr, TANH_ptr, SECH2_ptr,
+        N: tl.constexpr,
+    ):
+        offs = tl.arange(0, N)
+        x = tl.load(X_ptr + offs).to(tl.float32)
+        tl.store(COS_ptr + offs, cos_approx(x))
+        tl.store(SIN_ptr + offs, sin_approx(x))
+        tl.store(TANH_ptr + offs, tanh_approx(x))
+        tl.store(SECH2_ptr + offs, sech2_approx(x))
+
+    device = "cuda"
+    N = 1024
+    x = torch.linspace(-4 * math.pi, 4 * math.pi, N, device=device, dtype=torch.float32)
+    cos_out = torch.empty_like(x)
+    sin_out = torch.empty_like(x)
+    tanh_out = torch.empty_like(x)
+    sech2_out = torch.empty_like(x)
+
+    _math_utils_test_kernel[(1,)](x, cos_out, sin_out, tanh_out, sech2_out, N=N)
+
+    cos_ref = torch.cos(x)
+    sin_ref = torch.sin(x)
+    tanh_ref = torch.tanh(x)
+    sech2_ref = 1.0 - torch.tanh(x) ** 2
+
+    # Allow ~1e-3 tolerance for fast approximations.
+    atol = 2e-3
+    assert torch.allclose(cos_out, cos_ref, atol=atol), (
+        f"cos max error: {(cos_out - cos_ref).abs().max().item():.2e}"
+    )
+    assert torch.allclose(sin_out, sin_ref, atol=atol), (
+        f"sin max error: {(sin_out - sin_ref).abs().max().item():.2e}"
+    )
+    assert torch.allclose(tanh_out, tanh_ref, atol=atol), (
+        f"tanh max error: {(tanh_out - tanh_ref).abs().max().item():.2e}"
+    )
+    assert torch.allclose(sech2_out, sech2_ref, atol=atol), (
+        f"sech2 max error: {(sech2_out - sech2_ref).abs().max().item():.2e}"
+    )
+    print("All portable math util tests passed.")
+
+
 # Main function
 if __name__ == "__main__":
+    print("Running portable math utils test...")
+    test_mamba3_portable_math_utils()
+    print("="*100)
+
     print("Running Mamba-3 step reference vs forward reference test...")
     test_mamba3_siso_step_ref_vs_fwd_ref()
     print("="*100)

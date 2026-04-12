@@ -21,9 +21,15 @@ from mamba_ssm.ops.triton.mamba3.utils import cos_approx, sin_approx, tanh_appro
         for s in [1, 2, 3]
         for w in [2, 4, 8]
         for r in [None, 128, 256]
+    ] + [
+        # Configs targeting GPUs with smaller register files (e.g. AMD RDNA4).
+        # num_warps=1 halves per-wavefront register demand; num_stages=1 avoids
+        # extra live-range overlap from software pipelining.
+        triton.Config({}, num_stages=1, num_warps=1, maxnreg=r)
+        for r in [None, 64, 128]
     ],
     key=[
-        "CHUNK_SIZE", "HEADDIM_QK", "HEADDIM_V", "STORE_SSM_STATES_ADT_OUTV", "HAS_D", 
+        "CHUNK_SIZE", "HEADDIM_QK", "HEADDIM_V", "STORE_SSM_STATES_ADT_OUTV", "HAS_D",
         "HAS_Z", "HAS_INITIAL_STATES", "RETURN_FINAL_STATES", "IS_VARLEN"],
 )
 @triton.jit
