@@ -9,18 +9,40 @@ import triton.language as tl
 
 
 def _is_hip():
-    """Detect whether the active Triton backend is AMD HIP/ROCm."""
+    """Detect whether the active GPU backend is AMD HIP/ROCm.
+
+    Checks torch.version.hip first (set at PyTorch build time, always
+    available) then falls back to querying the Triton runtime.  This
+    avoids depending on the Triton driver being fully initialized at
+    import time.
+    """
+    try:
+        import torch
+        if hasattr(torch.version, "hip") and torch.version.hip is not None:
+            return True
+    except ImportError:
+        pass
     try:
         return triton.runtime.driver.active.get_current_target().backend == "hip"
     except Exception:
         return False
 
 
+_IS_HIP: bool = _is_hip()   # evaluated once at import time
+
+
 def _maxnreg(value):
     """Return maxnreg kwarg dict, empty on HIP where it is unsupported."""
-    if value is None or _is_hip():
+    if value is None or _IS_HIP:
         return {}
     return {"maxnreg": value}
+
+
+# maxnreg values to sweep in autotune config generators.
+# On HIP all values collapse to {} so only [None] is needed to avoid
+# generating duplicate configs that waste autotuning time.
+MAXNREG_VALUES = [None] if _IS_HIP else [None, 128, 256]
+MAXNREG_VALUES_SMALL = [None] if _IS_HIP else [None, 64, 128]
 
 
 # ---------------------------------------------------------------------------
@@ -39,7 +61,7 @@ def _maxnreg(value):
 # (the original authors found no speed benefit from PTX for those).
 # ---------------------------------------------------------------------------
 
-if _is_hip():
+if _IS_HIP:
     @triton.jit
     def cos_approx(x):
         """Cosine via portable Triton builtin (AMD/ROCm path)."""

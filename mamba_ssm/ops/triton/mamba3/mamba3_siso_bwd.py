@@ -13,7 +13,10 @@ from einops import rearrange, repeat
 
 import triton
 import triton.language as tl
-from mamba_ssm.ops.triton.mamba3.utils import cos_approx, sin_approx, sigmoid_approx, _maxnreg
+from mamba_ssm.ops.triton.mamba3.utils import (
+    cos_approx, sin_approx, sigmoid_approx,
+    _maxnreg, MAXNREG_VALUES, MAXNREG_VALUES_SMALL,
+)
 
 # =============================================================================
 # dZ Kernel
@@ -25,12 +28,12 @@ from mamba_ssm.ops.triton.mamba3.utils import cos_approx, sin_approx, sigmoid_ap
         for cs in [32, 64]
         for s in [1, 2, 3]
         for w in [2, 4, 8]
-        for r in [None, 128, 256]
+        for r in MAXNREG_VALUES
     ] + [
         # Smaller configs for GPUs with limited register files (e.g. AMD RDNA4).
         triton.Config({"CHUNK_SIZE": cs}, num_stages=1, num_warps=1, **_maxnreg(r))
         for cs in [16, 32]
-        for r in [None, 64, 128]
+        for r in MAXNREG_VALUES_SMALL
     ],
     key=["HEADDIM_V"]
 )
@@ -201,11 +204,11 @@ def compute_dzdo(
         triton.Config({}, num_stages=s, num_warps=w, **_maxnreg(r))
         for s in [1, 2, 3]
         for w in [2, 4, 8]
-        for r in [None, 128, 256]
+        for r in MAXNREG_VALUES
     ] + [
         # Smaller configs for GPUs with limited register files (e.g. AMD RDNA4).
         triton.Config({}, num_stages=1, num_warps=1, **_maxnreg(r))
-        for r in [None, 64, 128]
+        for r in MAXNREG_VALUES_SMALL
     ],
     key=["CHUNK_SIZE", "HEADDIM_QK", "HEADDIM_V", "IS_VARLEN"]
 )
@@ -823,11 +826,11 @@ def compute_dqkv(
         triton.Config({}, num_stages=s, num_warps=w, **_maxnreg(r))
         for s in [1, 2, 3]
         for w in [2, 4, 8]
-        for r in [None, 128, 256]
+        for r in MAXNREG_VALUES
     ] + [
         # Smaller configs for GPUs with limited register files (e.g. AMD RDNA4).
         triton.Config({}, num_stages=1, num_warps=1, **_maxnreg(r))
-        for r in [None, 64, 128]
+        for r in MAXNREG_VALUES_SMALL
     ],
     key=["CHUNK_SIZE", "BLOCK_HEADDIM_QK", "HEADDIM_QK", "GQA_RATIO"]
 )
@@ -1435,12 +1438,12 @@ def apply_dk_state_post(
         for cs in [64, 128, 256]
         for s in [1, 2, 3]
         for w in [2, 4, 8]
-        for r in [None, 128, 256]
+        for r in MAXNREG_VALUES
     ] + [
         # Smaller configs for GPUs with limited register files (e.g. AMD RDNA4).
         triton.Config({"CHUNK_SIZE": cs}, num_stages=1, num_warps=1, **_maxnreg(r))
         for cs in [32, 64]
-        for r in [None, 64, 128]
+        for r in MAXNREG_VALUES_SMALL
     ],
     key=["HEADDIM_V", "HEADDIM_QK", "HAS_INPUT_STATE", "IS_VARLEN"]
 )
