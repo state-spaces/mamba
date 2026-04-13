@@ -18,6 +18,7 @@ classifiers = [
 dependencies = [
     "torch",
     "tilelang==0.1.8",
+    "apache-tvm-ffi<=0.1.9",
     "quack-kernels>=0.3.4",
     "triton>=3.5.0",
     "ninja",
@@ -45,6 +46,7 @@ dev = [
 #   pip install mamba-ssm --no-build-isolation
 requires = [
     "setuptools>=61.0.0",
+    "torch",
     "wheel",
     "packaging",
     "ninja",
