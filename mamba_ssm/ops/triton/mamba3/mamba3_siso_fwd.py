@@ -200,6 +200,42 @@ def mamba3_siso_fwd_kernel(
         final_ssm_state_ptr = Final_SSM_State + seq_idx * stride_final_ssm_state_seq + pid_head * stride_final_ssm_state_head
         final_k_state_ptr = Final_K_State + seq_idx * stride_final_k_state_seq + pid_head * stride_final_k_state_head
 
+    if seqlen == 0:
+        if RETURN_FINAL_STATES:
+            offs_v = tl.arange(0, HEADDIM_V)
+            offs_qk = tl.arange(0, HEADDIM_QK)
+            state_mask = (offs_v[:, None] < headdim_v) & (offs_qk[None, :] < headdim_qk)
+            k_mask = offs_qk < headdim_qk
+
+            if HAS_INITIAL_STATES:
+                init_ssm_state = tl.load(
+                    init_ssm_state_ptr + offs_v[:, None] * stride_init_ssm_state_vdim
+                    + offs_qk[None, :] * stride_init_ssm_state_qkdim,
+                    mask=state_mask, other=0.0).to(tl.float32)
+                init_k_state = tl.load(
+                    init_k_state_ptr + offs_qk * stride_init_k_state_qkdim,
+                    mask=k_mask, other=0.0).to(tl.float32)
+                tl.store(
+                    final_ssm_state_ptr + offs_v[:, None] * stride_final_ssm_state_vdim
+                    + offs_qk[None, :] * stride_final_ssm_state_qkdim,
+                    init_ssm_state,
+                    mask=state_mask)
+                tl.store(
+                    final_k_state_ptr + offs_qk * stride_final_k_state_qkdim,
+                    init_k_state,
+                    mask=k_mask)
+            else:
+                tl.store(
+                    final_ssm_state_ptr + offs_v[:, None] * stride_final_ssm_state_vdim
+                    + offs_qk[None, :] * stride_final_ssm_state_qkdim,
+                    0.0,
+                    mask=state_mask)
+                tl.store(
+                    final_k_state_ptr + offs_qk * stride_final_k_state_qkdim,
+                    0.0,
+                    mask=k_mask)
+        return
+
     # Create TMA tensor descriptors
     q_desc = tl.make_tensor_descriptor(
         q_ptr,
@@ -691,7 +727,8 @@ def mamba3_siso_fwd(
     if return_final_states:
         if is_varlen:
             seq_lens = cu_seqlens[1:] - cu_seqlens[:-1]
-            last_chunk_pos = (seq_lens - 1) % chunk_size 
+            is_empty = seq_lens == 0
+            last_chunk_pos = torch.clamp(seq_lens - 1, min=0).remainder(chunk_size).to(torch.long)
 
             final_k = Final_K_State[
                 torch.arange(num_sequences, device=device),
@@ -699,9 +736,19 @@ def mamba3_siso_fwd(
                 last_chunk_pos,
                 :
             ]
-            
-            last_token_idx = cu_seqlens[1:] - 1
-            final_v = V[0, last_token_idx]
+
+            safe_last_token_idx = torch.clamp(cu_seqlens[1:] - 1, min=0).to(torch.long)
+            last_v = V[0, safe_last_token_idx]
+
+            if Initial_States is not None:
+                empty_k = Init_K_State.to(final_k.dtype)
+                empty_v = Init_V_State.to(last_v.dtype)
+            else:
+                empty_k = torch.zeros((num_sequences, nheads, headdim_qk), device=device, dtype=final_k.dtype)
+                empty_v = torch.zeros((num_sequences, nheads, headdim_v), device=device, dtype=last_v.dtype)
+
+            final_k = torch.where(is_empty[:, None, None], empty_k, final_k)
+            final_v = torch.where(is_empty[:, None, None], empty_v, last_v)
         else:
             k_state_idx = (seqlen - 1) % chunk_size
             final_k = Final_K_State[:, :, k_state_idx, :]
