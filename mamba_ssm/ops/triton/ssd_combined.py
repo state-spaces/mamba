@@ -668,7 +668,6 @@ def mamba_chunk_scan(x, dt, A, B, C, chunk_size, D=None, z=None, dt_bias=None, d
     if dt_softplus:
         dt = F.softplus(dt)
     dA = dt * rearrange(A, "h -> h 1 1")
-    dA = dt * rearrange(A, "h -> h 1 1")
     dA_cumsum = torch.cumsum(dA, dim=-1)
     # 1. Compute the state for each chunk
     states = chunk_state(B, x, dt, dA_cumsum, states_in_fp32=True)
