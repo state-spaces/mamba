@@ -197,6 +197,23 @@ inline __device__ void load_input(typename Ktraits::input_t *u,
 }
 
 template<typename Ktraits>
+inline __device__ void load_pos_ids(typename Ktraits::pos_t *u,
+                                  typename Ktraits::pos_t (&u_vals)[Ktraits::kNItems],
+                                  typename Ktraits::BlockLoadPosIdsT::TempStorage &smem_load_pos_ids,
+                                  int seqlen) {
+    if constexpr (Ktraits::kIsEvenLen) {
+        auto& smem_load_pos_ids_vec = reinterpret_cast<typename Ktraits::BlockLoadPosIdsVecT::TempStorage&>(smem_load_pos_ids);
+        using pos_vec_t = typename Ktraits::pos_vec_t;
+        Ktraits::BlockLoadPosIdsVecT(smem_load_pos_ids_vec).Load(
+            reinterpret_cast<pos_vec_t*>(u),
+            reinterpret_cast<pos_vec_t(&)[Ktraits::kNLoadsPos]>(u_vals)
+       );
+    } else {
+        Ktraits::BlockLoadPosIdsT(smem_load_pos_ids).Load(u, u_vals, seqlen, 0.f);
+    }
+}
+
+template<typename Ktraits>
 inline __device__ void load_weight(typename Ktraits::input_t *Bvar,
                                    typename Ktraits::weight_t (&B_vals)[Ktraits::kNItems],
                                    typename Ktraits::BlockLoadWeightT::TempStorage &smem_load_weight,
