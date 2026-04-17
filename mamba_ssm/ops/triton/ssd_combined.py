@@ -766,7 +766,7 @@ def ssd_selective_scan(x, dt, A, B, C, D=None, z=None, dt_bias=None, dt_softplus
             dt = F.softplus(dt)
         dt = dt.clamp(min=dt_limit[0], max=dt_limit[1]).to(x.dtype)
         dt_bias = None
-        dt_softplus = None
+        dt_softplus = False
     out = selective_scan_fn(x, dt, A, B, C, D=D, z=z, delta_bias=dt_bias, delta_softplus=dt_softplus)
     return rearrange(out, "b (h p) l -> b l h p", p=headdim)
 
