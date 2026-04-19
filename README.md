@@ -134,6 +134,21 @@ Source: [models/mixer_seq_simple.py](mamba_ssm/models/mixer_seq_simple.py).
 This is an example of how to integrate Mamba into an end-to-end neural network.
 This example is used in the generation scripts below.
 
+### Interactive Next-Token Prediction
+
+Try Mamba interactively with [examples/predict_next_token.py](examples/predict_next_token.py). It loads a pretrained model, shows example outputs on launch, then lets you type prompts and see continuations.
+
+``` sh
+# Mamba-1
+python examples/predict_next_token.py --model "state-spaces/mamba-130m"
+
+# Mamba-2
+python examples/predict_next_token.py --model "state-spaces/mamba2-130m"
+```
+
+Available models: `mamba-130m`, `mamba-370m`, `mamba-790m`, `mamba-1.4b`, `mamba-2.8b`, `mamba2-130m`, `mamba2-370m`, `mamba2-780m`, `mamba2-1.3b`, `mamba2-2.7b`.
+
+Note: These are **base language models**, not chatbots. They predict the most likely continuation of your text based on training data (The Pile). Longer, specific prompts work best — short inputs like "hello" may produce random document fragments. Mamba-3 is not supported here as no pretrained language model is available yet.
 
 ## Pretrained Models
 
@@ -221,6 +236,21 @@ With Mamba-2, you just need to change the model name:
 python benchmarks/benchmark_generation_mamba_simple.py --model-name "state-spaces/mamba2-2.7b" --prompt "My cat wrote all this CUDA code for a new language model and" --topp 0.9 --temperature 0.7 --repetition-penalty 1.2
 ```
 
+
+## Forward/Backward Speed Comparison
+
+The script [benchmarks/benchmark_speed_mamba123.py](benchmarks/benchmark_speed_mamba123.py)
+compares forward and backward pass speed of Mamba1 vs Mamba2 vs Mamba3 on the same workload (same d_model, sequence length, batch size, dtype).
+
+While the inference benchmark above measures text generation latency, this measures the raw computation speed of each architecture's forward and backward pass.
+
+``` sh
+python benchmarks/benchmark_speed_mamba123.py
+```
+
+The script outputs per-module timing (ms) and peak VRAM (GB), and saves a visual comparison chart.
+
+**Note:** Mamba3 MIMO mode requires >100KB shared memory per SM (available on H100/sm_90+). On consumer GPUs like RTX 4080 (sm_89), use SISO mode instead.
 
 ## Troubleshooting
 
