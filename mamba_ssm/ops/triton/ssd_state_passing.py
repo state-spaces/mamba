@@ -240,7 +240,7 @@ def _state_passing_bwd(
         assert seq_idx.shape == (batch, seqlen)
     dstates = torch.empty_like(dout, dtype=dstates_dtype if dstates_dtype is not None else dout.dtype)
     if states_dtype is not None and states_dtype != states.dtype:
-        states_converted = torch.empty_like(states, dtype=dstates_dtype if dstates_dtype is not None else dout.dtype)
+        states_converted = torch.empty_like(states, dtype=states_dtype)
         assert states_converted.stride() == states.stride()
     else:
         states_converted = None
