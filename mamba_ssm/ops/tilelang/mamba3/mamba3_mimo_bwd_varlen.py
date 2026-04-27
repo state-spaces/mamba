@@ -1317,10 +1317,15 @@ def mamba_mimo_bwd_combined_varlen(
     qk_dot = torch.zeros([B, H, S, R, R], dtype=q.dtype, device=q.device)
 
     bwd_fwd_kernel = mamba_mimo_bwd_fwd(
-        B, S, H, G, N, P, R,
+        T.dynamic("B"),
+        T.dynamic("S"), 
+        T.dynamic("H"), 
+        T.dynamic("G"), 
+        N, P, R,
         z is not None, D is not None, reduceO,
-        NS, chunk_size, rotary_dim_divisor, dtype_str,
+        T.dynamic("NS"), chunk_size, rotary_dim_divisor, dtype_str,
         bf_threads, bf_num_stages)
+
     bwd_fwd_kernel(
         dout, q, k, v, q_bias, k_bias, mimo_v, mimo_o,
         dmimo_o, states,
@@ -1345,10 +1350,15 @@ def mamba_mimo_bwd_combined_varlen(
     ddA_cs = torch.zeros([B, H, S], dtype=torch.float32, device=dt.device)
 
     bwd_bwd_kernel = mamba_mimo_bwd_bwd(
-        B, S, H, G, N, P, R,
+        T.dynamic("B"),
+        T.dynamic("S"), 
+        T.dynamic("H"), 
+        T.dynamic("G"),
+        N, P, R,
         z is not None, D is not None, reduceO,
-        NS, chunk_size, rotary_dim_divisor, dtype_str,
+        T.dynamic("NS"), chunk_size, rotary_dim_divisor, dtype_str,
         bb_threads, bb_num_stages)
+
     bwd_bwd_kernel(
         dout, q, k, v, q_bias, k_bias, mimo_v, mimo_o,
         dk_tilelang.view(B, S * R, H, N),

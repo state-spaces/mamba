@@ -599,17 +599,21 @@ def mamba_mimo_forward_varlen(q, k, v,
         NS = 1
 
     reduceO = mimo_o is not None
-    kernel = mamba_mimo_fwd(B, S, H, G, N, P, R, 
-                                       z is not None, 
-                                       D is not None, 
-                                       reduceO,
-                                       NS=NS if cu_seqlens is not None else 1,
-                                       return_final_state=return_state,
-                                       chunk_size=chunk_size, 
-                                       rotary_dim_divisor=rotary_dim_divisor, 
-                                       dtype=tl_dtype, 
-                                       threads=threads, 
-                                       num_stages=num_stages)
+    kernel = mamba_mimo_fwd(T.dynamic("B"),
+                            T.dynamic("S"), 
+                            T.dynamic("H"), 
+                            T.dynamic("G"),
+                            N, P, R, 
+                            z is not None, 
+                            D is not None, 
+                            reduceO,
+                            NS=T.dynamic("NS"), 
+                            return_final_state=return_state,
+                            chunk_size=chunk_size, 
+                            rotary_dim_divisor=rotary_dim_divisor, 
+                            dtype=tl_dtype,
+                            threads=threads,
+                            num_stages=num_stages)
     # print(kernel.get_kernel_source()) # NOTE: prints compiled CUDA code
     if reduceO:
         o = torch.empty((B, S, H, P), device='cuda', dtype=dtype)
