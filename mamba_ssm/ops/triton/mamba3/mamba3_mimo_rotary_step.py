@@ -201,7 +201,7 @@ def apply_rotary_qk_inference_fwd(
 
     grid = lambda META: (nheads, batch)  # noqa
     with torch.cuda.device(q.device.index):
-        torch.library.wrap_triton(rotary_qk_inference_kernel)[grid](
+        rotary_qk_inference_kernel[grid](
             output_q,  # data ptrs
             output_k,
             output_angle_state,
