@@ -14,6 +14,7 @@ import torch.nn.functional as F
 from einops import rearrange, repeat
 
 from mamba_ssm.ops.triton.mamba3.mamba3_siso_combined import mamba3_siso_combined
+from mamba_ssm.ops.triton.mamba3.mamba3_siso_fwd import mamba3_siso_fwd
 from mamba_ssm.ops.triton.mamba3.mamba3_siso_step import mamba3_siso_step
 
 
@@ -478,6 +479,112 @@ def create_mamba3_siso_inputs(
         'Q_bias': Q_bias, 'K_bias': K_bias, 'Angles': Angles,
         'D': D, 'Z': Z, 'Input_States': Input_States,
     }
+
+
+# ==================================================================
+# Empty Varlen Sequence Tests
+# ==================================================================
+
+def test_mamba3_siso_fwd_varlen_empty_final_states_preserve_initial():
+    """Empty varlen sequences should return their initial SSM/K/V states."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
+    device = "cuda"
+    dtype = torch.bfloat16
+    torch.random.manual_seed(42)
+
+    seq_lengths = [0, 3, 0, 2, 0]
+    total_seqlen = sum(seq_lengths)
+    cu_seqlens = torch.tensor(
+        [0] + list(torch.cumsum(torch.tensor(seq_lengths), dim=0).tolist()),
+        dtype=torch.int32,
+        device=device,
+    )
+
+    batch = 1
+    nheads = 4
+    nheads_qk = 2
+    headdim_qk = 128
+    headdim_v = 64
+    chunk_size = 64
+
+    inputs = create_mamba3_siso_inputs(
+        batch, total_seqlen, nheads, nheads_qk, headdim_qk, headdim_v,
+        dtype, device, has_D=False, has_Z=False, has_input_states=True,
+        cu_seqlens=cu_seqlens, requires_grad=False,
+    )
+    _, init_ssm, init_k, init_v = inputs["Input_States"]
+
+    outputs = mamba3_siso_fwd(
+        inputs["Q"], inputs["K"], inputs["V"],
+        inputs["ADT"], inputs["DT"], inputs["Trap"],
+        inputs["Q_bias"], inputs["K_bias"], inputs["Angles"],
+        D=None, Z=None, Initial_States=(init_ssm, init_k, init_v),
+        chunk_size=chunk_size,
+        store_states_adt_outv=False,
+        return_final_states=True,
+        cu_seqlens=cu_seqlens,
+    )
+    final_ssm, final_k, final_v = outputs[-1]
+
+    empty_idx = torch.tensor([0, 2, 4], device=device)
+    torch.testing.assert_close(final_ssm[empty_idx], init_ssm[empty_idx], rtol=0, atol=0)
+    torch.testing.assert_close(final_k[empty_idx], init_k[empty_idx], rtol=0, atol=0)
+    torch.testing.assert_close(final_v[empty_idx], init_v[empty_idx].to(final_v.dtype), rtol=0, atol=0)
+
+    torch.testing.assert_close(final_v[1], inputs["V"][0, 2], rtol=0, atol=0)
+    torch.testing.assert_close(final_v[3], inputs["V"][0, 4], rtol=0, atol=0)
+
+
+def test_mamba3_siso_combined_varlen_empty_final_states_preserve_initial():
+    """The public combined API should preserve all states for empty sequences."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
+    device = "cuda"
+    dtype = torch.bfloat16
+    torch.random.manual_seed(42)
+
+    seq_lengths = [0, 3, 0, 2, 0]
+    total_seqlen = sum(seq_lengths)
+    cu_seqlens = torch.tensor(
+        [0] + list(torch.cumsum(torch.tensor(seq_lengths), dim=0).tolist()),
+        dtype=torch.int32,
+        device=device,
+    )
+
+    batch = 1
+    nheads = 4
+    nheads_qk = 2
+    headdim_qk = 128
+    headdim_v = 64
+    chunk_size = 64
+
+    inputs = create_mamba3_siso_inputs(
+        batch, total_seqlen, nheads, nheads_qk, headdim_qk, headdim_v,
+        dtype, device, has_D=False, has_Z=False, has_input_states=True,
+        cu_seqlens=cu_seqlens, requires_grad=False,
+    )
+    init_angle, init_ssm, init_k, init_v = inputs["Input_States"]
+
+    _, final_angle, final_ssm, final_k, final_v = mamba3_siso_combined(
+        inputs["Q"], inputs["K"], inputs["V"],
+        inputs["ADT"], inputs["DT"], inputs["Trap"],
+        inputs["Q_bias"], inputs["K_bias"], inputs["Angles"],
+        D=None, Z=None, Input_States=(init_angle, init_ssm, init_k, init_v),
+        chunk_size=chunk_size,
+        return_final_states=True,
+        cu_seqlens=cu_seqlens,
+    )
+
+    empty_idx = torch.tensor([0, 2, 4], device=device)
+    torch.testing.assert_close(
+        final_angle[empty_idx], init_angle[empty_idx].to(final_angle.dtype), rtol=0, atol=0
+    )
+    torch.testing.assert_close(final_ssm[empty_idx], init_ssm[empty_idx], rtol=0, atol=0)
+    torch.testing.assert_close(final_k[empty_idx], init_k[empty_idx], rtol=0, atol=0)
+    torch.testing.assert_close(final_v[empty_idx], init_v[empty_idx].to(final_v.dtype), rtol=0, atol=0)
 
 
 # ================================================================== 
