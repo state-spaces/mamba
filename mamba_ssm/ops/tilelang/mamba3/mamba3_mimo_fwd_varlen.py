@@ -68,6 +68,7 @@ def mamba_mimo_fwd(
     hasD,
     reduceO,
     NS: int = 1,
+    isVarlen: bool = True,
     return_final_state=False,
     chunk_size: int = 16,
     rotary_dim_divisor = 4,
@@ -98,7 +99,7 @@ def mamba_mimo_fwd(
     # Block sizes for K and V dimensions - use full dimensions (no tiling)
     # assert S % chunk_size == 0, "Sequence length must be divisible by chunk_size"
 
-    if NS > 1:
+    if isVarlen:
         max_nchunks = (S//chunk_size) + NS
         Final_State_shape = (NS, H, N, P)
         Final_K_shape = (NS, R, H, N)
@@ -239,7 +240,7 @@ def mamba_mimo_fwd(
             seq_end = T.alloc_var(T.int32)
             full_nchunks = T.alloc_var(T.int32)
             tail_len = T.alloc_var(T.int32)
-            if NS > 1:
+            if isVarlen:
                 start_seq_ind = CU_SEQLENS[i_ns]
                 start_chunk_ind = (start_seq_ind // chunk_size) + i_ns
                 seq_len = CU_SEQLENS[i_ns + 1] - CU_SEQLENS[i_ns]
@@ -367,7 +368,7 @@ def mamba_mimo_fwd(
 
                 if return_final_state and i == full_nchunks - 1:
                     seq_boundary = seq_end - chunk_start
-                    if NS > 1:
+                    if isVarlen:
                         for csr, n in T.Parallel(fused_chunk_size, N):
                             if csr >= (seq_boundary - 1) * R and csr < seq_boundary * R:  # Only copy the last chunk's R rows to FINAL_K
                                 FINAL_K[i_ns, csr % R, i_h, n] = k_shared[csr, n]
@@ -516,7 +517,7 @@ def mamba_mimo_fwd(
             
             # --- Save Last State (if applicable) ---
             if return_final_state:
-                if NS > 1:
+                if isVarlen:
                     T.copy(states_frag, FINAL_STATE[i_ns, i_h, :, :])
                 else:
                     T.copy(states_frag, FINAL_STATE[i_b, i_h, :, :])
@@ -599,17 +600,22 @@ def mamba_mimo_forward_varlen(q, k, v,
         NS = 1
 
     reduceO = mimo_o is not None
-    kernel = mamba_mimo_fwd(B, S, H, G, N, P, R, 
-                                       z is not None, 
-                                       D is not None, 
-                                       reduceO,
-                                       NS=NS if cu_seqlens is not None else 1,
-                                       return_final_state=return_state,
-                                       chunk_size=chunk_size, 
-                                       rotary_dim_divisor=rotary_dim_divisor, 
-                                       dtype=tl_dtype, 
-                                       threads=threads, 
-                                       num_stages=num_stages)
+    kernel = mamba_mimo_fwd(T.dynamic("B"),
+                            T.dynamic("S"), 
+                            T.dynamic("H"), 
+                            T.dynamic("G"),
+                            N, P, R, 
+                            z is not None, 
+                            D is not None, 
+                            reduceO,
+                            NS=T.dynamic("NS"),
+                            isVarlen=cu_seqlens is not None,
+                            return_final_state=return_state,
+                            chunk_size=chunk_size, 
+                            rotary_dim_divisor=rotary_dim_divisor, 
+                            dtype=tl_dtype,
+                            threads=threads,
+                            num_stages=num_stages)
     # print(kernel.get_kernel_source()) # NOTE: prints compiled CUDA code
     if reduceO:
         o = torch.empty((B, S, H, P), device='cuda', dtype=dtype)
