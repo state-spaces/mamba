@@ -37,8 +37,10 @@ class Mamba3(nn.Module):
         dt_min=0.001,
         dt_max=0.1,
         dt_init_floor=1e-4,
-        A_floor=1e-4,
-        is_outproj_norm=False,
+        # Improves Mamba-3 stability at larger scale and higher LRs. Disable for state-tracking experiments.
+        is_safe_A=True,
+        # Headwise pre-gate norm is turned on by default for better OOD performance and stability.
+        is_outproj_norm=True,
         is_mimo=False,
         mimo_rank=4,
         #-------------------------------------------
@@ -57,9 +59,9 @@ class Mamba3(nn.Module):
         self.d_state = d_state
         self.expand = expand
         self.headdim = headdim
+        self.is_safe_A = is_safe_A
         self.chunk_size = chunk_size
         self.layer_idx = layer_idx
-        self.A_floor = A_floor
         self.is_outproj_norm=is_outproj_norm
         self.is_mimo = is_mimo
         self.mimo_rank = mimo_rank
@@ -167,7 +169,8 @@ class Mamba3(nn.Module):
 
         # Compute ADT, DT
         _A = -F.softplus(dd_A.to(torch.float32)) # (B, L, N)
-        _A = torch.clamp(_A, max=-self.A_floor)            
+        if self.is_safe_A:
+            _A = _A - 1
         DT = F.softplus(dd_dt + self.dt_bias) # (B, L, N)
         ADT = _A * DT
         DT = rearrange(DT, "b l n -> b n l")
@@ -252,7 +255,8 @@ class Mamba3(nn.Module):
 
     def _preprocess(self, A_proj, dd_dt, B, C, x, z, trap_proj, angle_proj):
         _A = -F.softplus(A_proj.to(torch.float32))
-        _A = torch.clamp(_A, max=-self.A_floor)
+        if self.is_safe_A:
+            _A = _A - 1
         DT = F.softplus(dd_dt + self.dt_bias)
         trap = torch.sigmoid(trap_proj)
 
