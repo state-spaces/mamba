@@ -1,0 +1,6 @@
+# python 3.12
+torch==2.5.1
+torchvision==0.20.1
+timm>=1.0.0
+coremltools==9.0 
+numpy>=1.26,<2.0
