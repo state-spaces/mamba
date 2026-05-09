@@ -1,0 +1,48 @@
+name: Build wheels in a container (scheduled)
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1"
+
+jobs:
+  compute_matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      runners: ${{ steps.compute.outputs.RUNNERS }}
+      container-images: ${{ steps.compute.outputs.IMAGES }}
+      release-versions: ${{ steps.compute.outputs.RELEASES }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check for NGC PyTorch images
+        run: bash ./.github/scripts/check_for_ngc_images.sh
+
+      - name: Check for upstream releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPSTREAM_REPO: state-spaces/mamba
+        run: bash ./.github/scripts/check_for_releases.sh
+
+      - name: Build matrix outputs
+        id: compute
+        run: |
+          echo "RUNNERS=$(jq -cn '["ubuntu-22.04","ubuntu-22.04-arm"]')" | tee -a "$GITHUB_OUTPUT"
+          echo "IMAGES=$(jq -cr . ngc_images.json)" | tee -a "$GITHUB_OUTPUT"
+          echo "RELEASES=$(jq -cr . releases.json)" | tee -a "$GITHUB_OUTPUT"
+
+  build-wheels:
+    needs: [compute_matrix]
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: ${{ fromJson(needs.compute_matrix.outputs.runners) }}
+        container-image: ${{ fromJson(needs.compute_matrix.outputs.container-images) }}
+        release-version: ${{ fromJson(needs.compute_matrix.outputs.release-versions) }}
+    uses: ./.github/workflows/_build_in_container.yml
+    with:
+      runs-on: ${{ matrix.runner }}
+      container-image: ${{ matrix.container-image }}
+      upload-to-release: false
+      release-version: ${{ matrix.release-version }}
