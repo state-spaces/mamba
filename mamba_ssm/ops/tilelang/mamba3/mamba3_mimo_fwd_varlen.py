@@ -57,17 +57,12 @@ from typing import Optional, Tuple
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     })
 def mamba_mimo_fwd(
-    B,
-    S,
-    H,
-    G,
     N,
     P,
     R,
     hasZ,
     hasD,
     reduceO,
-    NS: int = 1,
     isVarlen: bool = True,
     return_final_state=False,
     chunk_size: int = 16,
@@ -93,6 +88,14 @@ def mamba_mimo_fwd(
     When NS == 1 (or cu_seqlens is None) the kernel degenerates to the
     non-varlen behaviour.
     """
+    # Dynamic dimensions declared inside the factory to avoid TileLang
+    # cache-key churn when batch/sequence/head/sequence-count dimensions
+    # vary at runtime (tile-ai/tilelang#1934).
+    B = T.dynamic("B")
+    S = T.dynamic("S")
+    H = T.dynamic("H")
+    G = T.dynamic("G")
+    NS = T.dynamic("NS")
 
     accum_dtype = 'float32'
 
@@ -600,15 +603,10 @@ def mamba_mimo_forward_varlen(q, k, v,
         NS = 1
 
     reduceO = mimo_o is not None
-    kernel = mamba_mimo_fwd(T.dynamic("B"),
-                            T.dynamic("S"), 
-                            T.dynamic("H"), 
-                            T.dynamic("G"),
-                            N, P, R, 
+    kernel = mamba_mimo_fwd(N, P, R, 
                             z is not None, 
                             D is not None, 
                             reduceO,
-                            NS=T.dynamic("NS"),
                             isVarlen=cu_seqlens is not None,
                             return_final_state=return_state,
                             chunk_size=chunk_size, 

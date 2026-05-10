@@ -36,10 +36,6 @@ from typing import Optional, Tuple
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     })
 def mamba_mimo_fwd(
-    B,
-    S,
-    H,
-    G,
     N,
     P,
     R,
@@ -53,6 +49,15 @@ def mamba_mimo_fwd(
     threads: int = 128,
     num_stages: int = 0,
 ) -> torch.Tensor:
+    # Dynamic dimensions are declared inside the factory so they are NOT
+    # included in TileLang's cache key.  Passing them as Python arguments
+    # would cause a distinct cache entry for every (B, S, H, G) combination
+    # even though the generated PrimFunc is structurally identical, leading
+    # to cache churn / recompilation warnings (tile-ai/tilelang#1934).
+    B = T.dynamic("B")
+    S = T.dynamic("S")
+    H = T.dynamic("H")
+    G = T.dynamic("G")
 
     accum_dtype = 'float32'
 
@@ -436,11 +441,7 @@ def mamba_mimo_forward(q, k, v,
     else:
         tl_dtype = dtype
     reduceO = mimo_o is not None
-    kernel = mamba_mimo_fwd(T.dynamic("B"),
-                            T.dynamic("S"), 
-                            T.dynamic("H"), 
-                            T.dynamic("G"), 
-                            N, P, R, 
+    kernel = mamba_mimo_fwd(N, P, R, 
                             z is not None, 
                             D is not None, 
                             reduceO,
