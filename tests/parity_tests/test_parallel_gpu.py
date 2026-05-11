@@ -139,12 +139,12 @@ golden = {
     'outputs_fp16':     torch.stack(outs_fp16),
 }
 for L in [64, 256, 1024]:
-    u = torch.randn(1, L, D_MODEL, generator=torch.Generator().manual_seed(SEED))
+    u = torch.randn(1, L, D_MODEL, device=DEVICE, generator=torch.Generator(device=DEVICE).manual_seed(SEED))
     from mamba_ssm.modules.mamba3 import Mamba3 as _Mamba3
     og_raw = _Mamba3(d_model=D_MODEL, d_state=64, expand=2, headdim=64,
                      ngroups=1, rope_fraction=0.5, is_mimo=False,
-                     is_outproj_norm=False, layer_idx=0).float().eval()
-    portable_raw = Mamba3ParallelPortable(d_model=D_MODEL).float().eval()
+                     is_outproj_norm=False, layer_idx=0).to(DEVICE).float().eval()
+    portable_raw = Mamba3ParallelPortable(d_model=D_MODEL).to(DEVICE).float().eval()
     portable_raw.load_from_original(og_raw)
     with torch.no_grad():
         golden[f'raw_input_{L}']  = u.cpu()
