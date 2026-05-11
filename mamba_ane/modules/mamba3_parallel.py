@@ -100,6 +100,9 @@ class Mamba3ParallelPortable(nn.Module):
         """u: (B, L, d_model) → (B, L, d_model)"""
         B, L, _ = u.shape
 
+        # causal mask (lower-triangular) — constant at trace time
+        causal = torch.tril(torch.ones(L, L, device=u.device, dtype=u.dtype))
+
         # Stage 1: in_proj + explicit slices
         proj       = self.in_proj(u)
         z_raw      = proj[..., :self._s0]                   # (B, L, d_inner)
@@ -128,7 +131,14 @@ class Mamba3ParallelPortable(nn.Module):
         # Stage 4: RoPE — cumulative angle along sequence
         angles      = angles_raw.unsqueeze(2).expand(-1, -1, self.nheads, -1)
         delta_theta = torch.tanh(angles) * math.pi * DT.unsqueeze(-1)
-        theta       = torch.cumsum(delta_theta, dim=1)      # (B, L, H, num_rope_angles)
+        # theta = torch.cumsum(delta_theta, dim=1)      # (B, L, H, num_rope_angles)
+        # ANE doesn't support cumsum, but we can do the same with a matmul of the cumulative sum's defining matrix:
+        # 4D version — flatten trailing dims, matmul, unflatten.
+        B_, L_, H_, S_ = delta_theta.shape
+        theta = torch.matmul(
+            causal, delta_theta.reshape(B_, L_, H_ * S_)
+        ).reshape(B_, L_, H_, S_)
+
         cos_t, sin_t = torch.cos(theta), torch.sin(theta)
         K_rot = self.apply_rope(K_pre, cos_t, sin_t)        # (B, L, H, d_state)
         Q_rot = self.apply_rope(Q_pre, cos_t, sin_t)
@@ -136,21 +146,23 @@ class Mamba3ParallelPortable(nn.Module):
         # Stage 5: discretization coefficients
         gamma     = lam * DT                                # (B, L, H)
         # beta_next[b,r,h] = (1-lam[b,r+1,h]) * DT[b,r+1,h]; zero at last position
-        beta_next = torch.zeros_like(gamma)
-        beta_next[:, :-1, :] = (1.0 - lam[:, 1:, :]) * DT[:, 1:, :]
+        beta_per_pos = (1.0 - lam) * DT                              # (B, L, H)
+        beta_next    = F.pad(beta_per_pos[:, 1:, :], (0, 0, 0, 1))   # shift left, zero-pad tail
 
         # Stage 6: L-matrix (vectorised across all heads)
         # cum_log_alpha: (B, L, H)
-        cum = torch.cumsum(ADT, dim=1)
+        # cum = torch.cumsum(ADT, dim=1) Doesn't work on ANE
+        # Cumsum along dim 1. (L, L) @ (B, L, H) broadcasts cleanly.
+        cum = torch.matmul(causal, ADT)                 # (B, L, H)
 
         # decay_mat[b,t,r,h] = exp(cum[b,t,h] - cum[b,r,h])
         # shape broadcast: (B, L, 1, H) - (B, 1, L, H) = (B, L, L, H)
         log_decay = cum.unsqueeze(2) - cum.unsqueeze(1)
-
-        # causal mask (lower-triangular) — constant at trace time
-        causal = torch.tril(torch.ones(L, L, device=u.device, dtype=u.dtype))
         # apply mask in log-space before exp: prevents inf overflow (exp(+large)*0 = NaN)
-        log_decay = log_decay + (1.0 - causal).unsqueeze(-1) * (-1e9)
+        # exp(-1e4) underflows to 0 in fp16 long before we hit fp16 range limits.
+        # No reason to ever go to -1e9 here.
+        NEG_LARGE = u.new_tensor(-1e4)   # explicit dtype-matched tensor
+        log_decay = log_decay + (1.0 - causal).unsqueeze(-1) * NEG_LARGE
         decay_mat = torch.exp(log_decay) * causal.unsqueeze(-1)        # (B, L, L, H)
 
         # g_col = gamma + beta_next; diagonal needs gamma only
