@@ -600,67 +600,52 @@ def mamba_mimo_bwd_bwd(
             i_h_qk = i_h // (H // G)
 
             # --- Buffer Allocation ---
-            dstates_shared = T.alloc_shared([N, P], dtype)
+            # [MEMORY ALIASING OPTIMIZATION]
+            # To support consumer GPUs (e.g. RTX 4090 / 50-series) which have a strict 
+            # 100KB dynamic shared memory limit per block on Ada Lovelace architecture,
+            # we alias buffers that have strictly disjoint lifetimes within the chunk loop.
+            # This reduces the shared memory footprint by ~32KB, preventing TVM InternalErrors.
+            
+            # Aliased: dstates and states (temporally disjoint)
+            dstates__or__states_shared = T.alloc_shared([N, P], dtype)
             dstates_frag = T.alloc_fragment([N, P], accum_dtype)
 
             dout_shared = T.alloc_shared([chunk_size, P], dtype)
             dPhiO_shared = T.alloc_shared([fused_chunk_size, P], dtype)
 
             q_shared = T.alloc_shared([fused_chunk_size, N], dtype)
-
             k_shared = T.alloc_shared([fused_chunk_size, N], dtype)
             v_shared = T.alloc_shared([chunk_size, P], dtype)
 
-            states_shared = T.alloc_shared([N, P], dtype)
+            # Aliased: lkq_masked and dkq_masked (temporally disjoint)
             lkq_masked__or__dkq_masked_shared = T.alloc_shared([fused_chunk_size, fused_chunk_size], dtype)
 
             dPsiV_combined_shared = T.alloc_shared([fused_chunk_size, P], dtype)
-
             dqk_from_diag_shared = T.alloc_shared([fused_chunk_size, fused_chunk_size], accum_dtype)
 
             q_pre_rot_shared = T.alloc_shared([fused_chunk_size, N], dtype)
             k_pre_rot_shared = T.alloc_shared([fused_chunk_size, N], dtype)
 
             dk_shared = T.alloc_shared([fused_chunk_size, N], dtype)
-            dq_shared = T.alloc_shared([fused_chunk_size, N], dtype)
-
             qk_dot_shared = T.alloc_shared([chunk_size, R, R], dtype)
+            trap_scale_shared = T.alloc_shared([chunk_size], dtype)
 
-            k_pre_trap_shared = T.alloc_shared([fused_chunk_size, N], dtype)
+            # Aliased: k_pre_trap and dq (temporally disjoint)
+            k_pre_trap__or__dq_shared = T.alloc_shared([fused_chunk_size, N], dtype)
 
+            # Aliased: dangle_dk and dangle_dq (temporally disjoint)
             dangle_dk__or__dq_shared = T.alloc_shared([fused_chunk_size, N//rotary_dim_divisor], T.float32)
 
             # --- Swizzling Annotation ---
             noswizzle_annot = threads == 256 and (N <= 32 or P >= 128) # NOTE: heuristics for when swizzling annotation causes kernel hang, needs more investigation
             if not noswizzle_annot:
-                T.annotate_layout({
-                    dstates_shared: tilelang.layout.make_swizzled_layout(dstates_shared),
-                    dout_shared: tilelang.layout.make_swizzled_layout(dout_shared),
-                    q_shared: tilelang.layout.make_swizzled_layout(q_shared),
-
-                    k_shared: tilelang.layout.make_swizzled_layout(k_shared),
-                    v_shared: tilelang.layout.make_swizzled_layout(v_shared),
-                    states_shared: tilelang.layout.make_swizzled_layout(states_shared),
-                    lkq_masked__or__dkq_masked_shared: tilelang.layout.make_swizzled_layout(lkq_masked__or__dkq_masked_shared),
-
-                    dPsiV_combined_shared: tilelang.layout.make_swizzled_layout(dPsiV_combined_shared),
-                    dqk_from_diag_shared: tilelang.layout.make_swizzled_layout(dqk_from_diag_shared),
-
-                    k_pre_rot_shared: tilelang.layout.make_swizzled_layout(k_pre_rot_shared),
-                    q_pre_rot_shared: tilelang.layout.make_swizzled_layout(q_pre_rot_shared),
-
-                    dk_shared: tilelang.layout.make_swizzled_layout(dk_shared),
-                    dq_shared: tilelang.layout.make_swizzled_layout(dq_shared),
-
-                    k_pre_trap_shared: tilelang.layout.make_swizzled_layout(k_pre_trap_shared),
-                    dangle_dk__or__dq_shared: tilelang.layout.make_swizzled_layout(dangle_dk__or__dq_shared),
-                })
-            T.use_swizzle(10, "row")
+                pass
+            #T.use_swizzle(10, "row")
             T.no_set_max_nreg()
 
             # --- Per-Head Constants / Running State ---
             T.clear(dstates_frag)
-            T.clear(dstates_shared)
+            T.clear(dstates__or__states_shared)
 
             if reduceO:
                 Phi_frag = T.alloc_fragment([R, P], dtype)
@@ -718,7 +703,6 @@ def mamba_mimo_bwd_bwd(
                 trap_scale_frag = T.alloc_fragment([chunk_size], dtype)
                 for cs in T.Parallel(chunk_size):
                     trap_scale_frag[cs] = gamma_frag[cs] + shifted_gamma_frag[cs]
-                trap_scale_shared = T.alloc_shared([chunk_size], dtype)
                 T.copy(trap_scale_frag, trap_scale_shared)
 
                 # --- DOUT Projection and Optional Z / D Paths ---
@@ -780,7 +764,7 @@ def mamba_mimo_bwd_bwd(
                     q_shared[cs*R + r, N//2 + n] = T.sin(angles_frag[cs, n]) * q_first_half_frag[cs, r, n] + T.cos(angles_frag[cs, n]) * q_second_half_frag[cs, r, n]
 
                 # Load k and apply k_bias to it:
-                k_reshaped_shared = T.view(k_pre_trap_shared, shape=[chunk_size, R, N])
+                k_reshaped_shared = T.view(k_pre_trap__or__dq_shared, shape=[chunk_size, R, N])
                 T.copy(K[i_b, chunk_start:chunk_start+chunk_size, :, i_h_qk, :], k_reshaped_shared)
                 k_frag = T.alloc_fragment([chunk_size, R, N], dtype)
                 T.copy(k_reshaped_shared, k_frag)
@@ -789,7 +773,7 @@ def mamba_mimo_bwd_bwd(
                 T.copy(k_frag, k_reshaped_shared)
                 # Save pre-rotated k for later:
                 for csr, n in T.Parallel(fused_chunk_size, N):
-                    k_pre_rot_shared[csr, n] = k_pre_trap_shared[csr, n]
+                    k_pre_rot_shared[csr, n] = k_pre_trap__or__dq_shared[csr, n]
                 # Apply rotary to k:
                 k_first_half_frag = T.alloc_fragment([chunk_size, R, N//rotary_dim_divisor], dtype)
                 k_second_half_frag = T.alloc_fragment([chunk_size, R, N//rotary_dim_divisor], dtype)
@@ -801,14 +785,14 @@ def mamba_mimo_bwd_bwd(
                     k_reshaped_shared[cs, r, N//2 + n] = T.sin(angles_frag[cs, n]) * k_first_half_frag[cs, r, n] + T.cos(angles_frag[cs, n]) * k_second_half_frag[cs, r, n]
                 # Apply Trap-specific scaling:
                 k_trap_scaled_frag = T.alloc_fragment([fused_chunk_size, N], dtype)
-                T.copy(k_pre_trap_shared, k_trap_scaled_frag)
+                T.copy(k_pre_trap__or__dq_shared, k_trap_scaled_frag)
                 for csr, n in T.Parallel(fused_chunk_size, N):
                     k_trap_scaled_frag[csr, n] *= trap_scale_shared[csr//R]
                 T.copy(k_trap_scaled_frag, k_shared)
 
                 # Apply the effect of interchunk (state update):
                 dPsiV_frag = T.alloc_fragment([fused_chunk_size, P], accum_dtype)
-                T.gemm(k_shared, dstates_shared, dPsiV_frag, clear_accum=True)
+                T.gemm(k_shared, dstates__or__states_shared, dPsiV_frag, clear_accum=True)
                 dA_cs_rev_frag = T.alloc_fragment([chunk_size], T.float32)
                 dA_cs_rev_shared = T.alloc_shared([chunk_size], T.float32)
                 T.copy(DA_CS_REV[i_b, i_h, chunk_start:chunk_start+chunk_size], dA_cs_rev_shared)
@@ -927,7 +911,7 @@ def mamba_mimo_bwd_bwd(
 
                 # --- dK Path + ddA Terms ---
                 dk_frag = T.alloc_fragment([fused_chunk_size, N], accum_dtype)
-                T.gemm(PsiV_shared, dstates_shared, dk_frag, transpose_B=True, clear_accum=True)
+                T.gemm(PsiV_shared, dstates__or__states_shared, dk_frag, transpose_B=True, clear_accum=True)
 
                 # Compute contribution to ddA from KV part of state update (part 1 of 4)
                 ddA_state_kv_prereduce_frag = T.alloc_fragment([fused_chunk_size, N], accum_dtype)
@@ -980,7 +964,7 @@ def mamba_mimo_bwd_bwd(
                 T.gemm(lkq_masked__or__dkq_masked_shared, q_shared, dk_nodiag_frag, clear_accum=False) # Adding dk_interchunk to dkq_intrachunk @ q
                 # Compute dfactor, using dk_nodiag_frag:
                 k_factor_frag = T.alloc_fragment([chunk_size, R, N], accum_dtype)
-                T.copy(k_pre_trap_shared, T.view(k_factor_frag, shape=[fused_chunk_size, N]))
+                T.copy(k_pre_trap__or__dq_shared, T.view(k_factor_frag, shape=[fused_chunk_size, N]))
                 dfactor_prereduce_frag = T.alloc_fragment([chunk_size, R, N], accum_dtype)
                 for cs, r, n in T.Parallel(chunk_size, R, N):
                     dfactor_prereduce_frag[cs, r, n] = k_factor_frag[cs, r, n] * dk_nodiag_frag[cs*R + r, n]
@@ -995,10 +979,10 @@ def mamba_mimo_bwd_bwd(
                 T.copy(dk_nodiag_frag, dk_shared)
 
                 # --- State-Passing ddA Terms + Interchunk dQ ---
-                T.copy(STATES[i_b, i_h, chunk_idx, :, :], states_shared) # Load cached states from bwd_fwd
+                T.copy(STATES[i_b, i_h, chunk_idx, :, :], dstates__or__states_shared) # Load cached states from bwd_fwd
                 # NOTE: Compute the contribution of state passing (part 3 of 4)
                 states_frag = T.alloc_fragment([N, P], T.float32)
-                T.copy(states_shared, states_frag)
+                T.copy(dstates__or__states_shared, states_frag)
                 ddA_state_passing = T.alloc_fragment([1], T.float32)
                 ddA_state_passing_prereduce_frag = T.alloc_fragment([N, P], T.float32)
                 da_cs_sum = T.alloc_var(T.float32)
@@ -1023,7 +1007,7 @@ def mamba_mimo_bwd_bwd(
                 T.copy(dda_frag, DDA[i_b, i_h, chunk_start:chunk_start+chunk_size])
 
                 dq_frag = T.alloc_fragment([fused_chunk_size, N], accum_dtype)
-                T.gemm(dPhiO_shared, states_shared, dq_frag, transpose_B=True, clear_accum=True)
+                T.gemm(dPhiO_shared, dstates__or__states_shared, dq_frag, transpose_B=True, clear_accum=True)
                 # NOTE: Compute the contribution to ddA from applying it to q*state (part 4 of 4)
                 dda_cs_prereduce_frag = T.alloc_fragment([fused_chunk_size, N], accum_dtype)
                 T.copy(q_shared, dda_cs_prereduce_frag)
@@ -1044,11 +1028,11 @@ def mamba_mimo_bwd_bwd(
                     dq_frag[csr, n] *= T.exp(dA_cs_dq_frag[csr//R])
                 # NOTE: Unable to reuse dk_intrachunk_frag_dtype due to layout issue
                 # (we do gemm with the transpose of dk_intrachunk_frag_dtype)
-                T.copy(dq_frag, dq_shared)
+                T.copy(dq_frag, k_pre_trap__or__dq_shared)
                 dq_combined_frag = T.alloc_fragment([fused_chunk_size, N], accum_dtype)
-                T.copy(dq_shared, dq_combined_frag)
+                T.copy(k_pre_trap__or__dq_shared, dq_combined_frag)
                 T.gemm(lkq_masked__or__dkq_masked_shared, k_shared, dq_combined_frag, transpose_A=True, clear_accum=False)
-                T.copy(dq_combined_frag, dq_shared)
+                T.copy(dq_combined_frag, k_pre_trap__or__dq_shared)
 
                 # --- Inverse Rotary for dK and dQ + dAngles ---
                 angles_dk_frag = T.alloc_fragment([chunk_size, N//rotary_dim_divisor], T.float32)
@@ -1094,8 +1078,8 @@ def mamba_mimo_bwd_bwd(
                 dq_first_half_frag = T.alloc_fragment([chunk_size, R, N//rotary_dim_divisor], dtype)
                 dq_second_half_frag = T.alloc_fragment([chunk_size, R, N//rotary_dim_divisor], dtype)
                 for cs, r, n in T.Parallel(chunk_size, R, N//rotary_dim_divisor):
-                    dq_first_half_frag[cs, r, n] = dq_shared[cs*R + r, n]
-                    dq_second_half_frag[cs, r, n] = dq_shared[cs*R + r, N//2 + n]
+                    dq_first_half_frag[cs, r, n] = k_pre_trap__or__dq_shared[cs*R + r, n]
+                    dq_second_half_frag[cs, r, n] = k_pre_trap__or__dq_shared[cs*R + r, N//2 + n]
                 
                 # Compute the contribution of dq to dangle:
                 q_prerot_first_half_frag = T.alloc_fragment([chunk_size, R, N//rotary_dim_divisor], dtype)
@@ -1117,9 +1101,9 @@ def mamba_mimo_bwd_bwd(
                 T.copy(dangle_frag_reduced, DANGLES[i_b, chunk_start:chunk_start+chunk_size, i_h, :])
                 # Rotate dq_shared:
                 for cs, r, n in T.Parallel(chunk_size, R, N//rotary_dim_divisor):
-                    dq_shared[cs*R + r, n] = T.cos(angles_dk_frag[cs, n]) * dq_first_half_frag[cs, r, n] + T.sin(angles_dk_frag[cs, n]) * dq_second_half_frag[cs, r, n]
-                    dq_shared[cs*R + r, N//2 + n] = -T.sin(angles_dk_frag[cs, n]) * dq_first_half_frag[cs, r, n] + T.cos(angles_dk_frag[cs, n]) * dq_second_half_frag[cs, r, n]
-                T.copy(dq_shared, dq_frag)
+                    k_pre_trap__or__dq_shared[cs*R + r, n] = T.cos(angles_dk_frag[cs, n]) * dq_first_half_frag[cs, r, n] + T.sin(angles_dk_frag[cs, n]) * dq_second_half_frag[cs, r, n]
+                    k_pre_trap__or__dq_shared[cs*R + r, N//2 + n] = -T.sin(angles_dk_frag[cs, n]) * dq_first_half_frag[cs, r, n] + T.cos(angles_dk_frag[cs, n]) * dq_second_half_frag[cs, r, n]
+                T.copy(k_pre_trap__or__dq_shared, dq_frag)
 
                 # Compute the effect of dqk_from_diag
                 for csr_out, n in T.Parallel(fused_chunk_size, N):
@@ -1146,7 +1130,7 @@ def mamba_mimo_bwd_bwd(
                     # DA_CS applies chunk-level decay to the passed gradient state.
                     dPhiO_scaled_frag[csr, p] *= T.exp(dA_cs_dPhiO_frag[csr//R])
                 T.gemm(q_shared, dPhiO_scaled_frag, dstates_frag, transpose_A=True, clear_accum=False)
-                T.copy(dstates_frag, dstates_shared)
+                T.copy(dstates_frag, dstates__or__states_shared)
 
             T.copy(dPsi_acc, DMIMO_V[i_b, i_h, :, :])
             if hasD:
