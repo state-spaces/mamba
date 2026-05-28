@@ -16,8 +16,14 @@ from tilelang.autotuner import autotune
 
 import itertools
 import argparse
+import functools
 from einops import rearrange
 from typing import Optional, Tuple
+
+@functools.lru_cache(maxsize=None)
+def _get_dynamic(name):
+    import tilelang.language as T
+    return T.dynamic(name)
 
 from mamba_ssm.ops.triton.mamba3.mamba3_mimo_utils import bwd_dadt_fused_triton, bwd_dtrap_ddt_triton
 
@@ -1187,10 +1193,10 @@ def mamba_mimo_bwd_combined(
     else:
         dtype_str = dtype
     bwd_fwd_kernel = mamba_mimo_bwd_fwd(
-        T.dynamic("B"),
-        T.dynamic("S"), 
-        T.dynamic("H"), 
-        T.dynamic("G"), 
+        _get_dynamic("B"),
+        _get_dynamic("S"), 
+        _get_dynamic("H"), 
+        _get_dynamic("G"), 
         N, P, R, 
         z is not None,
         D is not None,
@@ -1245,10 +1251,10 @@ def mamba_mimo_bwd_combined(
     
     
     bwd_bwd_kernel = mamba_mimo_bwd_bwd(
-        T.dynamic("B"),
-        T.dynamic("S"), 
-        T.dynamic("H"), 
-        T.dynamic("G"), 
+        _get_dynamic("B"),
+        _get_dynamic("S"), 
+        _get_dynamic("H"), 
+        _get_dynamic("G"), 
         N, P, R, 
         z is not None,
         D is not None,

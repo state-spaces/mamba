@@ -14,7 +14,13 @@ from tilelang.autotuner import autotune
 
 import itertools
 import argparse
+import functools
 from typing import Optional, Tuple
+
+@functools.lru_cache(maxsize=None)
+def _get_dynamic(name):
+    import tilelang.language as T
+    return T.dynamic(name)
 
 
 # NOTE: Uncomment the following to autotune:
@@ -436,10 +442,10 @@ def mamba_mimo_forward(q, k, v,
     else:
         tl_dtype = dtype
     reduceO = mimo_o is not None
-    kernel = mamba_mimo_fwd(T.dynamic("B"),
-                            T.dynamic("S"), 
-                            T.dynamic("H"), 
-                            T.dynamic("G"), 
+    kernel = mamba_mimo_fwd(_get_dynamic("B"),
+                            _get_dynamic("S"), 
+                            _get_dynamic("H"), 
+                            _get_dynamic("G"), 
                             N, P, R, 
                             z is not None, 
                             D is not None, 
