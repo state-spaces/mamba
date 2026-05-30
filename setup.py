@@ -5,7 +5,7 @@ import os
 import re
 import ast
 from pathlib import Path
-from packaging.version import parse, Version
+from packaging.version import parse, InvalidVersion, Version
 import platform
 import shutil
 
@@ -337,7 +337,11 @@ class CachedWheelsCommand(_bdist_wheel):
         if FORCE_BUILD:
             return super().run()
 
-        wheel_url, wheel_filename = get_wheel_url()
+        try:
+            wheel_url, wheel_filename = get_wheel_url()
+        except InvalidVersion:
+            print("Could not determine wheel URL (non-PEP 440 version). Building from source...")
+            return super().run()
         print("Guessing wheel URL: ", wheel_url)
         try:
             urllib.request.urlretrieve(wheel_url, wheel_filename)
