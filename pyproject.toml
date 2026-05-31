@@ -16,7 +16,7 @@ classifiers = [
     "Operating System :: Unix"
 ]
 dependencies = [
-    "torch",
+    "torch==2.12.0",
     "tilelang==0.1.8",
     "apache-tvm-ffi<=0.1.9",
     "quack-kernels>=0.3.4",
