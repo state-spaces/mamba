@@ -40,10 +40,6 @@ from mamba_ssm.ops.triton.mamba3.mamba3_mimo_utils import bwd_dadt_fused_triton,
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     })
 def mamba_mimo_bwd_fwd(
-    B,
-    S,
-    H,
-    G,
     N,
     P,
     R,
@@ -56,6 +52,13 @@ def mamba_mimo_bwd_fwd(
     threads: int = 128,
     num_stages: int = 0,
 ) -> torch.Tensor:
+    # Dynamic dimensions declared inside the factory to avoid TileLang
+    # cache-key churn when batch/sequence/head dimensions vary at runtime
+    # (tile-ai/tilelang#1934).
+    B = T.dynamic("B")
+    S = T.dynamic("S")
+    H = T.dynamic("H")
+    G = T.dynamic("G")
 
     accum_dtype = 'float32'
 
@@ -503,10 +506,6 @@ def mamba_mimo_bwd_fwd(
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     })
 def mamba_mimo_bwd_bwd(
-    B,
-    S,
-    H,
-    G,
     N,
     P,
     R,
@@ -519,6 +518,13 @@ def mamba_mimo_bwd_bwd(
     threads: int = 256,
     num_stages: int = 0,
 ) -> torch.Tensor:
+    # Dynamic dimensions declared inside the factory to avoid TileLang
+    # cache-key churn when batch/sequence/head dimensions vary at runtime
+    # (tile-ai/tilelang#1934).
+    B = T.dynamic("B")
+    S = T.dynamic("S")
+    H = T.dynamic("H")
+    G = T.dynamic("G")
 
     accum_dtype = 'float32'
 
@@ -1203,10 +1209,6 @@ def mamba_mimo_bwd_combined(
     else:
         dtype_str = dtype
     bwd_fwd_kernel = mamba_mimo_bwd_fwd(
-        T.dynamic("B"),
-        T.dynamic("S"), 
-        T.dynamic("H"), 
-        T.dynamic("G"), 
         N, P, R, 
         z is not None,
         D is not None,
@@ -1261,10 +1263,6 @@ def mamba_mimo_bwd_combined(
     
     
     bwd_bwd_kernel = mamba_mimo_bwd_bwd(
-        T.dynamic("B"),
-        T.dynamic("S"), 
-        T.dynamic("H"), 
-        T.dynamic("G"), 
         N, P, R, 
         z is not None,
         D is not None,
