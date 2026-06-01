@@ -23,6 +23,23 @@ try:
 except ImportError:    
     mamba3_step_fn = None
 
+
+def heavy_tail_activation(x: torch.Tensor) -> torch.Tensor:
+    """
+    Heavy-tail activation for data-dependent A.
+
+    Using this activation can improve stability during WSD training and at
+    higher learning rates.
+
+        f(x) = 1 + x        if x >= 0
+            = 1 / (1 - x)  if x < 0
+
+    The function is positive, continuous, and differentiable at x = 0.
+    """
+    neg = x.clamp_max(0)
+    pos = x.clamp_min(0)
+    return pos + torch.reciprocal(1 - neg)
+
 class Mamba3(nn.Module):
     def __init__(
         self,
@@ -166,7 +183,7 @@ class Mamba3(nn.Module):
         trap = rearrange(trap, "b l h -> b h l")
 
         # Compute ADT, DT
-        _A = -F.softplus(dd_A.to(torch.float32)) # (B, L, N)
+        _A = -heavy_tail_activation(dd_A.to(torch.float32)) # (B, L, N)
         _A = torch.clamp(_A, max=-self.A_floor)            
         DT = F.softplus(dd_dt + self.dt_bias) # (B, L, N)
         ADT = _A * DT
@@ -251,7 +268,7 @@ class Mamba3(nn.Module):
     
 
     def _preprocess(self, A_proj, dd_dt, B, C, x, z, trap_proj, angle_proj):
-        _A = -F.softplus(A_proj.to(torch.float32))
+        _A = -heavy_tail_activation(A_proj.to(torch.float32))
         _A = torch.clamp(_A, max=-self.A_floor)
         DT = F.softplus(dd_dt + self.dt_bias)
         trap = torch.sigmoid(trap_proj)
