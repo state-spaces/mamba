@@ -93,6 +93,11 @@ def mamba_mimo_fwd(
     When NS == 1 (or cu_seqlens is None) the kernel degenerates to the
     non-varlen behaviour.
     """
+    B = T.dynamic("B")
+    S = T.dynamic("S")
+    H = T.dynamic("H")
+    G = T.dynamic("G")
+    NS = T.dynamic("NS")
 
     accum_dtype = 'float32'
 
@@ -600,15 +605,10 @@ def mamba_mimo_forward_varlen(q, k, v,
         NS = 1
 
     reduceO = mimo_o is not None
-    kernel = mamba_mimo_fwd(T.dynamic("B"),
-                            T.dynamic("S"), 
-                            T.dynamic("H"), 
-                            T.dynamic("G"),
-                            N, P, R, 
+    kernel = mamba_mimo_fwd(N, P, R, 
                             z is not None, 
                             D is not None, 
                             reduceO,
-                            NS=T.dynamic("NS"),
                             isVarlen=cu_seqlens is not None,
                             return_final_state=return_state,
                             chunk_size=chunk_size, 
