@@ -60,6 +60,9 @@ from mamba_ssm.ops.tilelang.mamba3.mamba3_mimo_bwd import mamba_mimo_bwd_combine
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     })
 def mamba_mimo_bwd_fwd(
+    B,
+    H,
+    G,
     N,
     P,
     R,
@@ -91,10 +94,7 @@ def mamba_mimo_bwd_fwd(
     * STATES shape: ``[B, H, max_nchunks, N, P]`` with
       ``max_nchunks = (S // chunk_size) + NS``.
     """
-    B = T.dynamic("B")
     S = T.dynamic("S")
-    H = T.dynamic("H")
-    G = T.dynamic("G")
     NS = T.dynamic("NS")
 
     accum_dtype = 'float32'
@@ -544,6 +544,9 @@ def mamba_mimo_bwd_fwd(
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     })
 def mamba_mimo_bwd_bwd(
+    B,
+    H,
+    G,
     N,
     P,
     R,
@@ -574,10 +577,7 @@ def mamba_mimo_bwd_bwd(
     * DSSDA shape: ``[B, H, max_nchunks, C, C]`` with
       ``max_nchunks = (S // chunk_size) + NS``.
     """
-    B = T.dynamic("B")
     S = T.dynamic("S")
-    H = T.dynamic("H")
-    G = T.dynamic("G")
     NS = T.dynamic("NS")
 
     accum_dtype = 'float32'
@@ -1321,6 +1321,7 @@ def mamba_mimo_bwd_combined_varlen(
     qk_dot = torch.zeros([B, H, S, R, R], dtype=q.dtype, device=q.device)
 
     bwd_fwd_kernel = mamba_mimo_bwd_fwd(
+        B, H, G,
         N, P, R,
         z is not None, D is not None, reduceO,
         isVarlen=cu_seqlens is not None,
@@ -1351,6 +1352,7 @@ def mamba_mimo_bwd_combined_varlen(
     ddA_cs = torch.zeros([B, H, S], dtype=torch.float32, device=dt.device)
 
     bwd_bwd_kernel = mamba_mimo_bwd_bwd(
+        B, H, G,
         N, P, R,
         z is not None, D is not None, reduceO,
         isVarlen=cu_seqlens is not None,

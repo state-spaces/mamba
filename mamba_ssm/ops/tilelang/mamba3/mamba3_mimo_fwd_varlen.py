@@ -58,7 +58,6 @@ from typing import Optional, Tuple
     })
 def mamba_mimo_fwd(
     B,
-    S,
     H,
     G,
     N,
@@ -67,7 +66,6 @@ def mamba_mimo_fwd(
     hasZ,
     hasD,
     reduceO,
-    NS: int = 1,
     isVarlen: bool = True,
     return_final_state=False,
     chunk_size: int = 16,
@@ -93,10 +91,7 @@ def mamba_mimo_fwd(
     When NS == 1 (or cu_seqlens is None) the kernel degenerates to the
     non-varlen behaviour.
     """
-    B = T.dynamic("B")
     S = T.dynamic("S")
-    H = T.dynamic("H")
-    G = T.dynamic("G")
     NS = T.dynamic("NS")
 
     accum_dtype = 'float32'
@@ -605,7 +600,8 @@ def mamba_mimo_forward_varlen(q, k, v,
         NS = 1
 
     reduceO = mimo_o is not None
-    kernel = mamba_mimo_fwd(N, P, R, 
+    kernel = mamba_mimo_fwd(B, H, G, 
+                            N, P, R, 
                             z is not None, 
                             D is not None, 
                             reduceO,
