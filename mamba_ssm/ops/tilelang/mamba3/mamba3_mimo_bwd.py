@@ -645,8 +645,23 @@ def mamba_mimo_bwd_bwd(
             # --- Swizzling Annotation ---
             noswizzle_annot = threads == 256 and (N <= 32 or P >= 128) # NOTE: heuristics for when swizzling annotation causes kernel hang, needs more investigation
             if not noswizzle_annot:
+                """T.annotate_layout({
+                    dstates__or__states_shared: tilelang.layout.make_swizzled_layout(dstates__or__states_shared),
+                    dout_shared: tilelang.layout.make_swizzled_layout(dout_shared),
+                    q_shared: tilelang.layout.make_swizzled_layout(q_shared),
+                    k_shared: tilelang.layout.make_swizzled_layout(k_shared),
+                    v_shared: tilelang.layout.make_swizzled_layout(v_shared),
+                    lkq_masked__or__dkq_masked_shared: tilelang.layout.make_swizzled_layout(lkq_masked__or__dkq_masked_shared),
+                    dPsiV_combined_shared: tilelang.layout.make_swizzled_layout(dPsiV_combined_shared),
+                    dqk_from_diag_shared: tilelang.layout.make_swizzled_layout(dqk_from_diag_shared),
+                    k_pre_rot_shared: tilelang.layout.make_swizzled_layout(k_pre_rot_shared),
+                    q_pre_rot_shared: tilelang.layout.make_swizzled_layout(q_pre_rot_shared),
+                    dk_shared: tilelang.layout.make_swizzled_layout(dk_shared),
+                    k_pre_trap__or__dq_shared: tilelang.layout.make_swizzled_layout(k_pre_trap__or__dq_shared),
+                    dangle_dk__or__dq_shared: tilelang.layout.make_swizzled_layout(dangle_dk__or__dq_shared),
+                })
+                T.use_swizzle(10, "row")"""
                 pass
-            #T.use_swizzle(10, "row")
             T.no_set_max_nreg()
 
             # --- Per-Head Constants / Running State ---
