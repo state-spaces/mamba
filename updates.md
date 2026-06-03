@@ -24,7 +24,7 @@ By injecting temporally disjoint memory aliasing (`dstates__or__states`, `lkq__o
 | **Blackwell / Lovelace** | `> 140.00 KB` | **`100.64 KB`** | `102.40 KB` | ✅ **Stable** (Fits perfectly) |
 | **Ampere / Older** | `> 140.00 KB` | **`100.64 KB`** | `~48.00 KB` | ❌ *Fails (Handled by Auto-Fallback)* |
 
-> [!TIP]
+> [!Note]
 > **Dynamic Fallback:** This fork includes a runtime detector that automatically reduces the `mimo_rank` parameter from 4 down to 2 if it calculates the tensors will exceed your specific GPU's maximum SMEM.
 
 ### 2. Speed Of Light: Adapted Swizzling
