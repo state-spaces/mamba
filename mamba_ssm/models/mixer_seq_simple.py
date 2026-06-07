@@ -133,6 +133,11 @@ class MixerModel(nn.Module):
         device=None,
         dtype=None,
     ) -> None:
+        # Ensure head dimension does not exceed hardware limits
+        max_head_dim = 256  # Example limit, adjust based on hardware
+        if d_model > max_head_dim:
+            print(f"Warning: d_model ({d_model}) exceeds the hardware limit. Adjusting to {max_head_dim}.")
+            d_model = max_head_dim
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
         self.residual_in_fp32 = residual_in_fp32
@@ -221,6 +226,11 @@ class MambaLMHeadModel(nn.Module, GenerationMixin):
         device=None,
         dtype=None,
     ) -> None:
+        # Ensure head dimension does not exceed hardware limits
+        max_head_dim = 256  # Example limit, adjust based on hardware
+        if d_model > max_head_dim:
+            print(f"Warning: d_model ({d_model}) exceeds the hardware limit. Adjusting to {max_head_dim}.")
+            d_model = max_head_dim
         self.config = config
         d_model = config.d_model
         n_layer = config.n_layer
