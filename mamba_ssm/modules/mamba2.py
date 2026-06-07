@@ -316,7 +316,10 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
             dBx = torch.einsum("bh,bn,bhp->bhpn", dt, B, x)
             ssm_state.copy_(ssm_state * rearrange(dA, "b h -> b h 1 1") + dBx)
             y = torch.einsum("bhpn,bn->bhp", ssm_state.to(dtype), C)
-            y = y + rearrange(self.D.to(dtype), "h -> h 1") * x
+            if self.D_has_hdim:
+                y = y + rearrange(self.D.to(dtype), "(h p) -> h p", p=self.headdim) * x
+            else:
+                y = y + rearrange(self.D.to(dtype), "h -> h 1") * x
             y = rearrange(y, "b h p -> b (h p)")
             if not self.rmsnorm:
                 y = y * self.act(z)  # (B D)
@@ -324,7 +327,10 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
             A = repeat(A, "h -> h p n", p=self.headdim, n=self.d_state).to(dtype=torch.float32)
             dt = repeat(dt, "b h -> b h p", p=self.headdim)
             dt_bias = repeat(self.dt_bias, "h -> h p", p=self.headdim)
-            D = repeat(self.D, "h -> h p", p=self.headdim)
+            if self.D_has_hdim:
+                D = rearrange(self.D, "(h p) -> h p", p=self.headdim)
+            else:
+                D = repeat(self.D, "h -> h p", p=self.headdim)
             B = rearrange(B, "b (g n) -> b g n", g=self.ngroups)
             C = rearrange(C, "b (g n) -> b g n", g=self.ngroups)
             x_reshaped = rearrange(x, "b (h p) -> b h p", p=self.headdim)
