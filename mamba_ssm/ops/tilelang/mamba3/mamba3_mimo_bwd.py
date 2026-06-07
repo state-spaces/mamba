@@ -19,6 +19,10 @@ import argparse
 from einops import rearrange
 from typing import Optional, Tuple
 
+from mamba_ssm.ops.triton.mamba3.mamba3_mimo_utils import (
+    bwd_dadt_fused_triton,
+    bwd_dtrap_ddt_triton,
+)
 from mamba_ssm.ops.triton.mamba3.grouped_head_reduction import (
     reduce_grouped_qk_grads_and_bias_triton,
 )
