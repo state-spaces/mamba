@@ -29,10 +29,23 @@ from mamba_ssm.distributed.tensor_parallel import ColumnParallelLinear, RowParal
 from mamba_ssm.distributed.distributed_utils import all_reduce, reduce_scatter
 
 from mamba_ssm.ops.triton.ssd_combined import mamba_chunk_scan_combined
+from mamba_ssm.ops.triton.ssd_combined_cp import mamba_split_conv1d_scan_combined as mamba_split_conv1d_scan_combined_cp
 from mamba_ssm.ops.triton.ssd_combined import mamba_split_conv1d_scan_combined
+
+from mamba_ssm.modules.context_parallel import ContextParallelMixerLayer
+
 
 from huggingface_hub import PyTorchModelHubMixin
 
+
+import torch.distributed as dist
+
+# Context Parallel - split input sequence
+# Going to want to shard this outside of Mamba2 class, so it can run over multiple layers...
+# auto_shard_seq = not force_ring_reduce_off and self.auto_shard_seq and is_distributed()
+# mask = None
+# (u, _), batch_sizes, num_sharded_batches = sharded_batch_to_sharded_seq(u, mask, self.ring_seq_size)
+# End Context Parallel
 
 class Mamba2(nn.Module, PyTorchModelHubMixin):
     def __init__(
@@ -61,6 +74,7 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
         layer_idx=None,  # Absorb kwarg for general module
         process_group=None,
         sequence_parallel=True,
+        context_parallel=False,
         device=None,
         dtype=None,
     ):
@@ -73,13 +87,14 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
         self.expand = expand
         self.process_group = process_group
         self.sequence_parallel = sequence_parallel
-        self.world_size = 1 if process_group is None else process_group.size()
-        self.local_rank = 0 if process_group is None else process_group.rank()
+        #FIXME this is probably for sequence parallel For context parallel we just replace it later - we odn't want to divide innder dimensions by world size since we don't shard that - but we probably could...
+        self.world_size = 1 #if process_group is None else process_group.size()
+        self.local_rank = 0 #if process_group is None else process_group.rank()
         self.d_inner = (self.expand * self.d_model) // self.world_size
         assert self.d_inner * self.world_size == self.expand * self.d_model
         self.headdim = headdim
         self.d_ssm = self.d_inner if d_ssm is None else d_ssm // self.world_size
-        assert ngroups % self.world_size == 0
+        assert ngroups % self.world_size == 0 
         self.ngroups = ngroups // self.world_size
         assert self.d_ssm % self.headdim == 0
         self.nheads = self.d_ssm // self.headdim
@@ -91,12 +106,26 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
         self.chunk_size = chunk_size
         self.use_mem_eff_path = use_mem_eff_path
         self.layer_idx = layer_idx
+        self.context_parallel = context_parallel
+
+        assert not (self.context_parallel and self.sequence_parallel)
+        if self.context_parallel or self.sequence_parallel and not self.process_group:
+            #TODO clean up process group passes along with world size/local rank here so one source of truth
+            assert torch.distributed.is_initialized()
+            self.process_group = torch.distributed.group.WORLD
+            self.world_size = torch.distributed.get_world_size()
+            self.local_rank = torch.distributed.get_rank()
+
+        if self.context_parallel:
+            self.cpmixer = ContextParallelMixerLayer(padding=d_conv - 1, process_group=self.process_group)
+        else:
+            self.cpmixer = None
 
         # Order: [z, x, B, C, dt]
         d_in_proj = 2 * self.d_inner + 2 * self.ngroups * self.d_state + self.nheads
-        if self.process_group is None:
+        if not self.sequence_parallel:
             self.in_proj = nn.Linear(self.d_model, d_in_proj, bias=bias, **factory_kwargs)
-        else:
+        else: #FIXME not sure why this has sequence parallel flag, why would use ColumnParallel without sequence parallel?
             self.in_proj = ColumnParallelLinear(self.d_model, d_in_proj * self.world_size, bias=bias,
                                                 process_group=self.process_group, sequence_parallel=self.sequence_parallel,
                                                 **factory_kwargs)
@@ -144,7 +173,7 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
             self.norm = RMSNormGated(self.d_ssm, eps=1e-5, norm_before_gate=self.norm_before_gate,
                                      group_size=self.d_ssm // ngroups, **factory_kwargs)
 
-        if self.process_group is None:
+        if not self.sequence_parallel: #FIXME not sure why this has sequence parallel flag, why would use RowParallel without sequence parallel?
             self.out_proj = nn.Linear(self.d_inner, self.d_model, bias=bias, **factory_kwargs)
         else:
             self.out_proj = RowParallelLinear(self.d_inner * self.world_size, self.d_model, bias=bias,
@@ -175,14 +204,20 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
                 out, _, _ = self.step(u, conv_state, ssm_state)
                 return out
 
-        zxbcdt = self.in_proj(u)  # (B, L, d_in_proj) or (B * L, d_in_proj)
+        if self.cpmixer: #Context parallel - transfer some tokens to mix in with the conv layer to the next GPU
+            u = self.cpmixer(u)
+        zxbcdt = self.in_proj(u)
+        #torch.save(zxbcdt,f'zxbcdt_{dist.get_rank() if dist.is_initialized() else 0}.pt')
+        #torch.save(self.norm.weight,f'norm_weight_{dist.get_rank() if dist.is_initialized() else 0}.pt')
         if seqlen_og is not None:
             zxbcdt = rearrange(zxbcdt, "(b l) d -> b l d", l=seqlen)
         # If the model is loaded in fp16, without the .float() here, A might be -inf
         A = -torch.exp(self.A_log.float())  # (nheads) or (d_inner, d_state)
         dt_limit_kwargs = {} if self.dt_limit == (0.0, float("inf")) else dict(dt_limit=self.dt_limit)
+
         if self.use_mem_eff_path and inference_params is None:
-            out = mamba_split_conv1d_scan_combined(
+            fn = mamba_split_conv1d_scan_combined_cp if self.context_parallel else mamba_split_conv1d_scan_combined
+            out = fn(
                 zxbcdt,
                 rearrange(self.conv1d.weight, "d 1 w -> d w"),
                 self.conv1d.bias,
@@ -199,13 +234,14 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
                 headdim=None if self.D_has_hdim else self.headdim,
                 ngroups=self.ngroups,
                 norm_before_gate=self.norm_before_gate,
+                process_group=self.process_group,
                 **dt_limit_kwargs,
             )
             if seqlen_og is not None:
                 out = rearrange(out, "b l d -> (b l) d")
-            if self.process_group is not None:
-                reduce_fn = reduce_scatter if self.sequence_parallel else all_reduce
-                out = reduce_fn(out, self.process_group)
+            #if self.process_group is not None: #FIXME this was here before adding context parallel
+            #    reduce_fn = reduce_scatter if self.sequence_parallel else all_reduce
+            #    out = reduce_fn(out, self.process_group)
         else:
             d_mlp = (zxbcdt.shape[-1] - 2 * self.d_ssm - 2 * self.ngroups * self.d_state - self.nheads) // 2
             z0, x0, z, xBC, dt = torch.split(
