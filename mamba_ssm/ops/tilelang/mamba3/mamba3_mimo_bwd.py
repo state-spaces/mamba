@@ -19,7 +19,13 @@ import argparse
 from einops import rearrange
 from typing import Optional, Tuple
 
-from mamba_ssm.ops.triton.mamba3.mamba3_mimo_utils import bwd_dadt_fused_triton, bwd_dtrap_ddt_triton
+from mamba_ssm.ops.triton.mamba3.mamba3_mimo_utils import (
+    bwd_dadt_fused_triton,
+    bwd_dtrap_ddt_triton,
+)
+from mamba_ssm.ops.triton.mamba3.grouped_head_reduction import (
+    reduce_grouped_qk_grads_and_bias_triton,
+)
 
 
 # def get_configs():
@@ -50,11 +56,14 @@ def mamba_mimo_bwd_fwd(
     hasZ,
     hasD,
     reduceO,
+    fuse_pregate_headwise_rms_norm=False,
     chunk_size: int = 16,
     rotary_dim_divisor: int = 4,
     dtype: str = 'float16',
+    outproj_norm_eps: float = 1e-5,
     threads: int = 128,
     num_stages: int = 0,
+    states_dtype = torch.bfloat16,
 ) -> torch.Tensor:
 
     accum_dtype = 'float32'
@@ -67,6 +76,9 @@ def mamba_mimo_bwd_fwd(
         DOUT_shape = (B, S, H, P)
     else:
         DOUT_shape = (B, S, R, H, P)
+    DOUT_PRE_RMS_shape = (B, H, S*R, P) if fuse_pregate_headwise_rms_norm else (1,)
+
+    dtype_states = str(states_dtype).replace("torch.","")
 
     @T.prim_func
     def mamba_mimo_bwd_fwd_kernel(
@@ -78,9 +90,12 @@ def mamba_mimo_bwd_fwd(
             K_BIAS: T.Tensor([H, R, N], T.float32),  # type: ignore
             MIMO_V: T.Tensor([H, R, P], T.float32), # type: ignore
             MIMO_O: T.Tensor([H, R, P], T.float32), # type: ignore
-            
+            OUT_NORM_WEIGHT: T.Tensor([H, P], T.float32), # type: ignore
+
             DMIMO_O: T.Tensor([B, H, R, P], T.float32), # type: ignore
-            STATES: T.Tensor([B, H, nchunks, N, P], dtype), # type: ignore 
+            DOUT_NORM_WEIGHT: T.Tensor([B, H, R, P], T.float32), # type: ignore
+            DOUT_PRE_RMS: T.Tensor(DOUT_PRE_RMS_shape, dtype), # type: ignore
+            STATES: T.Tensor([B, H, nchunks, N, P], dtype_states), # type: ignore
 
             Z: T.Tensor([B, S, H, P], dtype),  # type: ignore
             MIMO_Z: T.Tensor([H, R, P], T.float32), # type: ignore
@@ -94,7 +109,7 @@ def mamba_mimo_bwd_fwd(
             D: T.Tensor([H], T.float32),  # type: ignore
 
             QK_DOT: T.Tensor([B, H, S, R, R], dtype), # type: ignore
-            
+
             SEGSUM: T.Tensor([B, H, nchunks, chunk_size, chunk_size], T.float32), # type: ignore
             ):
         """
@@ -102,25 +117,33 @@ def mamba_mimo_bwd_fwd(
             Fused backward-forward pass over chunks. Recomputes local forward intermediates,
             accumulates projection gradients (DMIMO_O and optional DMIMO_Z), emits optional DZ,
             stores per-chunk recurrent STATES, and materializes QK_DOT for the second backward pass.
+            When pregate headwise RMSNorm is enabled, this pass also computes DOUT_NORM_WEIGHT
+            and writes DOUT_PRE_RMS in packed [B, H, S*R, P] layout for the reverse pass.
 
         Inputs:
             - Activations and upstream grad: DOUT, Q, K, V.
-            - Projection weights/biases: Q_BIAS, K_BIAS, MIMO_V (Psi), MIMO_O (Phi), optional MIMO_Z (Zeta).
-            - Optional forward modifiers: Z, D.
+            - Projection weights/biases: Q_BIAS, K_BIAS, MIMO_V (Psi), MIMO_O (Phi),
+              optional OUT_NORM_WEIGHT, optional MIMO_Z (Zeta).
+            - Optional forward modifiers: Z and D.
             - Discretization tensors: DA_CS, DA_CS_REV, DT, TRAP, and SEGSUM.
 
         Outputs:
             - MIMO projection grads: DMIMO_O and optional DMIMO_Z.
             - Optional activation grad: DZ.
+            - Pregate RMSNorm grads: optional DOUT_NORM_WEIGHT and DOUT_PRE_RMS.
             - Cached intermediates for pass 2: STATES and QK_DOT.
 
         Notation:
             - Psi: MIMO X projection.
             - Phi: MIMO O projection.
             - Zeta: MIMO Z projection.
+            - raw y: per-rank MIMO output before pregate RMSNorm, gate, and down projection.
+            - xhat: RMS-normalized raw y, equal to raw_y * rstd.
+            - dnorm: gradient wrt xhat before applying the RMSNorm input-gradient formula.
+            - DOUT_PRE_RMS: gradient wrt raw y, materialized for pass 2.
             - Trap: convex-combination modulator used in exponential-trapezoidal discretization.
         """
-        
+
         with T.Kernel(H, B, threads=threads) as (i_h, i_b):
             # --- Kernel Setup ---
             # GQA support: map V head to Q/K head
@@ -141,6 +164,9 @@ def mamba_mimo_bwd_fwd(
             if reduceO:
                 dPhi_shared = T.alloc_shared([R, P], accum_dtype)
                 T.clear(dPhi_shared)
+            if fuse_pregate_headwise_rms_norm:
+                dOutNorm_shared = T.alloc_shared([R, P], accum_dtype)
+                T.clear(dOutNorm_shared)
 
             dout_shared = T.alloc_shared([chunk_size, P], dtype)
 
@@ -202,8 +228,8 @@ def mamba_mimo_bwd_fwd(
                     )
                 shifted_gamma_frag = T.alloc_fragment([chunk_size], dtype)
                 for cs in T.Parallel(chunk_size):
-                    shifted_gamma_frag[cs] = T.if_then_else(chunk_start + cs < (S - 1), 
-                                                            dt_shifted_frag[cs] * (T.sigmoid(-trap_shifted_frag[cs])), 
+                    shifted_gamma_frag[cs] = T.if_then_else(chunk_start + cs < (S - 1),
+                                                            dt_shifted_frag[cs] * (T.sigmoid(-trap_shifted_frag[cs])),
                                                             0.0)
 
                 shifted_gamma_shared = T.alloc_shared([chunk_size], dtype)
@@ -265,7 +291,7 @@ def mamba_mimo_bwd_fwd(
                     q_first_half_frag[cs, r, n] = q_shared[cs*R + r, n]
                     q_second_half_frag[cs, r, n] = q_shared[cs*R + r, N//2 + n]
 
-                # NOTE: angles are casted to fp32 for numerical stability
+                # Cast angles to fp32 for numerical stability.
                 angles_frag = T.alloc_fragment([chunk_size, N//rotary_dim_divisor], T.float32)
                 T.copy(ANGLES[i_b, chunk_start:chunk_start+chunk_size, i_h, :], angles_frag)
 
@@ -279,7 +305,7 @@ def mamba_mimo_bwd_fwd(
                 for cs, r, n in T.Parallel(chunk_size, R, N//rotary_dim_divisor):
                     k_first_half_frag[cs, r, n] = k_shared[cs*R + r, n]
                     k_second_half_frag[cs, r, n] = k_shared[cs*R + r, N//2 + n]
-                
+
                 for cs, r, n in T.Parallel(chunk_size, R, N//rotary_dim_divisor):
                     k_shared[cs*R + r, n] = T.cos(angles_frag[cs, n]) * k_first_half_frag[cs, r, n] - T.sin(angles_frag[cs, n]) * k_second_half_frag[cs, r, n]
                     k_shared[cs*R + r, N//2 + n] = T.sin(angles_frag[cs, n]) * k_first_half_frag[cs, r, n] + T.cos(angles_frag[cs, n]) * k_second_half_frag[cs, r, n]
@@ -292,8 +318,8 @@ def mamba_mimo_bwd_fwd(
 
                 # --- Interchunk + Intrachunk Output Accumulation ---
                 q_state_out_frag = T.alloc_fragment([fused_chunk_size, P], dtype=accum_dtype)
-                # NOTE: Tilelang unable to infer correct layout when trying to cast
-                # states_frag to 16-bit within rmem
+                # TileLang cannot infer the desired layout when casting states_frag
+                # to 16-bit in register memory, so stage through shared memory.
                 T.copy(states_frag, states_accum_cast_shared)
                 T.gemm(q_shared, states_accum_cast_shared, q_state_out_frag, clear_accum=True)
 
@@ -302,7 +328,7 @@ def mamba_mimo_bwd_fwd(
 
                 # Strictly causal masking over chunk steps (exclude same-step diagonal).
                 da_cs__or__exp_da_cs_shared = T.alloc_shared([chunk_size], T.float32)
-                T.copy(DA_CS[i_b, i_h, chunk_start:chunk_start+chunk_size], da_cs__or__exp_da_cs_shared)       
+                T.copy(DA_CS[i_b, i_h, chunk_start:chunk_start+chunk_size], da_cs__or__exp_da_cs_shared)
                 for csr_i, csr_j in T.Parallel(fused_chunk_size, fused_chunk_size):
                     qk_intrachunk_frag[csr_i, csr_j] = T.if_then_else(
                                                 csr_i//R > csr_j//R,
@@ -312,7 +338,7 @@ def mamba_mimo_bwd_fwd(
                 qk_intrachunk_masked_shared = T.alloc_shared([fused_chunk_size, fused_chunk_size], dtype=dtype)
                 for csr_i, csr_j in T.Parallel(fused_chunk_size, fused_chunk_size):
                     qk_intrachunk_masked_shared[csr_i, csr_j] = qk_intrachunk_frag[csr_i, csr_j]
-                
+
                 # Exponentiate da_cs__or__exp_da_cs_shared so that later usage does not have to:
                 for cs in T.Parallel(chunk_size):
                     da_cs__or__exp_da_cs_shared[cs] = T.exp(da_cs__or__exp_da_cs_shared[cs])
@@ -348,21 +374,56 @@ def mamba_mimo_bwd_fwd(
                     for csr, p in T.Parallel(fused_chunk_size, P):
                         o_mimo_accum_frag[csr, p] += D_var * PsiV_D_frag[csr, p]
 
-                # --- Project to dMIMO_O and Optional Z Backward Path ---
+                # --- Projection, Optional Gate, and Pregate RMS Side Gradients ---
                 if reduceO:
-                    out_prereduced_shared = T.alloc_shared([fused_chunk_size, P], dtype)
-                    T.copy(o_mimo_accum_frag, out_prereduced_shared)
-                    
+                    if not fuse_pregate_headwise_rms_norm:
+                        out_prereduced_shared = T.alloc_shared([fused_chunk_size, P], dtype)
+                        T.copy(o_mimo_accum_frag, out_prereduced_shared)
+
+                    dout_frag = T.alloc_fragment([chunk_size, P], dtype)
+                    T.copy(DOUT[i_b, chunk_start:chunk_start+chunk_size, i_h, :], dout_shared)
+                    T.copy(dout_shared, dout_frag)
+
                     o_gated_frag = T.alloc_fragment([chunk_size, R, P], T.float32)
-                    if hasZ:
-                        # Apply Z gating to out:
+
+
+                    if fuse_pregate_headwise_rms_norm:
+                        # Reuse o_gated_frag for raw-y squares before it holds the gated output.
+                        for cs, r, p in T.Parallel(chunk_size, R, P):
+                            o_gated_frag[cs, r, p] = o_mimo_accum_frag[cs*R + r, p]
+                            o_gated_frag[cs, r, p] *= o_gated_frag[cs, r, p]
+                        o_rstd_frag = T.alloc_fragment([chunk_size, R], T.float32)
+                        T.reduce_sum(o_gated_frag, o_rstd_frag, dim=-1, clear=True)
+                        # o_rstd_frag = T.view(o_rstd_frag_fused, shape=[chunk_size, R])
+                        for cs, r in T.Parallel(chunk_size, R):
+                            o_rstd_frag[cs, r] = 1.0 / T.sqrt(
+                                o_rstd_frag[cs, r] / P + outproj_norm_eps
+                            )
+
+                        # Apply pregate RMSNorm and SiLU(Z * Zeta) before the down projection.
                         T.copy(Z[i_b, chunk_start:chunk_start+chunk_size, i_h, :], z_shared)
                         z_o_frag = T.alloc_fragment([chunk_size, P], T.float32)
                         T.copy(z_shared, z_o_frag)
                         Zeta_o_frag = T.alloc_fragment([R, P], T.float32)
                         T.copy(MIMO_Z[i_h, :, :], Zeta_o_frag)
                         for cs, r, p in T.Parallel(chunk_size, R, P):
-                            # Apply SiLU to o_gated_frag:
+                            tmp = z_o_frag[cs, p] * Zeta_o_frag[r, p] * 0.5
+                            o_gated_frag[cs, r, p] = tmp * T.tanh(tmp) + tmp
+
+                        for cs, r, p in T.Parallel(chunk_size, R, P):
+                            o_gated_frag[cs, r, p] *= (
+                                o_mimo_accum_frag[cs*R + r, p]
+                                * o_rstd_frag[cs, r]
+                                * OUT_NORM_WEIGHT[i_h, p]
+                            )
+                    elif hasZ:
+                        # Apply SiLU(Z * Zeta) before the down projection.
+                        T.copy(Z[i_b, chunk_start:chunk_start+chunk_size, i_h, :], z_shared)
+                        z_o_frag = T.alloc_fragment([chunk_size, P], T.float32)
+                        T.copy(z_shared, z_o_frag)
+                        Zeta_o_frag = T.alloc_fragment([R, P], T.float32)
+                        T.copy(MIMO_Z[i_h, :, :], Zeta_o_frag)
+                        for cs, r, p in T.Parallel(chunk_size, R, P):
                             tmp = z_o_frag[cs, p] * Zeta_o_frag[r, p] * 0.5
                             o_gated_frag[cs, r, p] = tmp * T.tanh(tmp) + tmp
                         for cs, r, p in T.Parallel(chunk_size, R, P):
@@ -370,20 +431,120 @@ def mamba_mimo_bwd_fwd(
                     else:
                         for cs, r, p in T.Parallel(chunk_size, R, P):
                             o_gated_frag[cs, r, p] = out_prereduced_shared[cs*R + r, p]
-                    
-                    # NOTE: keeping dPhi_frag in fp32 for numerical reason
-                    dPhi_frag = T.alloc_fragment([R, P], T.float32)
-                    T.copy(dPhi_shared, dPhi_frag)
-                    dout_frag = T.alloc_fragment([chunk_size, P], dtype)
-                    T.copy(DOUT[i_b, chunk_start:chunk_start+chunk_size, i_h, :], dout_shared)
-                    T.copy(dout_shared, dout_frag)
-                    for r, p in T.Parallel(R, P):
-                        for cs in T.serial(chunk_size):
-                            dPhi_frag[r, p] += o_gated_frag[cs, r, p] * dout_frag[cs, p]
-                    T.copy(dPhi_frag, dPhi_shared)
 
-                    if hasZ:
-                        # Up-project DOUT from SISO to MIMO.
+                    # Keep dPhi accumulation in fp32 for numerical stability.
+                    if fuse_pregate_headwise_rms_norm:
+                        dPhi_prereduce = T.alloc_fragment([chunk_size, R, P], T.float32)
+
+                        for cs, r, p in T.Parallel(chunk_size, R, P):
+                            dPhi_prereduce[cs, r, p] = o_gated_frag[cs, r, p] * dout_frag[cs, p]
+
+                        dPhi_frag = T.alloc_fragment([R, P], T.float32)
+                        T.copy(dPhi_shared, dPhi_frag)
+                        T.reduce_sum(dPhi_prereduce, dPhi_frag, dim=0, clear=False)
+                        T.copy(dPhi_frag, dPhi_shared)
+                    else:
+                        dPhi_frag = T.alloc_fragment([R, P], T.float32)
+                        T.copy(dPhi_shared, dPhi_frag)
+                        for r, p in T.Parallel(R, P):
+                            for cs in T.serial(chunk_size):
+                                dPhi_frag[r, p] += o_gated_frag[cs, r, p] * dout_frag[cs, p]
+                        T.copy(dPhi_frag, dPhi_shared)
+
+                    if fuse_pregate_headwise_rms_norm:
+                        Phi_frag = T.alloc_fragment([R, P], dtype)
+                        T.copy(MIMO_O[i_h, :, :], Phi_frag)
+
+                        # Compute gate/Zeta grads and DOUT_PRE_RMS while raw y
+                        # (o_mimo_accum_frag) is still available.
+                        # Reload DOUT in a fresh fragment to avoid TileLang scope inference issues.
+                        dout_frag = T.alloc_fragment([chunk_size, P], dtype)
+                        T.copy(DOUT[i_b, chunk_start:chunk_start+chunk_size, i_h, :], dout_shared)
+                        T.copy(dout_shared, dout_frag)
+
+                        dPhiO_frag = T.alloc_fragment([chunk_size, R, P], dtype)
+                        for cs, r, p in T.Parallel(chunk_size, R, P):
+                            dPhiO_frag[cs, r, p] = (
+                                dout_frag[cs, p]
+                                * Phi_frag[r, p]
+                                * o_mimo_accum_frag[cs*R + r, p]
+                                * o_rstd_frag[cs, r]
+                                * OUT_NORM_WEIGHT[i_h, p]
+                            )
+
+                        # Backward of SiLU(u): sigmoid(u) * (1 + u * sigmoid(-u)).
+                        z_frag = T.alloc_fragment([chunk_size, P], T.float32)
+                        T.copy(z_shared, z_frag)
+                        Zeta_frag = T.alloc_fragment([R, P], T.float32)
+                        T.copy(MIMO_Z[i_h, :, :], Zeta_frag)
+                        dZetaZ_frag = T.alloc_fragment([chunk_size, R, P], T.float32)
+                        for cs, r, p in T.Parallel(chunk_size, R, P):
+                            dZetaZ_frag[cs, r, p] = z_frag[cs, p] * Zeta_frag[r, p]
+                            dZetaZ_frag[cs, r, p] = dPhiO_frag[cs, r, p] * T.sigmoid(dZetaZ_frag[cs, r, p]) * \
+                                (1 + dZetaZ_frag[cs, r, p] * (T.sigmoid(-dZetaZ_frag[cs, r, p])))
+
+                        # Reduce over rank to produce DZ without materializing a GMEM MIMO grad.
+                        dZ_frag_prereduce = T.alloc_fragment([chunk_size, R, P], dtype)
+                        for cs, r, p in T.Parallel(chunk_size, R, P):
+                            dZ_frag_prereduce[cs, r, p] = dZetaZ_frag[cs, r, p] * Zeta_frag[r, p]
+                        dZ_frag = T.alloc_fragment([chunk_size, P], dtype)
+                        T.reduce_sum(dZ_frag_prereduce, dZ_frag, clear=True, dim=1)
+                        T.copy(dZ_frag, DZ[i_b, chunk_start:chunk_start+chunk_size, i_h, :])
+
+                        for cs, r, p in T.Parallel(chunk_size, R, P):
+                            dZetaZ_frag[cs, r, p] *= z_frag[cs, p]
+                        dZeta_frag = T.alloc_fragment([R, P], T.float32)
+                        T.copy(dZeta_shared, dZeta_frag)
+                        T.reduce_sum(dZetaZ_frag, dZeta_frag, clear=False, dim=0)
+                        T.copy(dZeta_frag, dZeta_shared)
+
+                        # RMSNorm backward:
+                        #   xhat = raw_y * rstd
+                        #   dnorm = dL/dxhat = DOUT * Phi * gate
+                        #   DOUT_PRE_RMS = dL/draw_y
+                        weighted_dot_frag = T.alloc_fragment([chunk_size, R, P], T.float32)
+                        for cs, r, p in T.Parallel(chunk_size, R, P):
+                            tmp = z_frag[cs, p] * Zeta_frag[r, p] * 0.5
+                            gate = tmp * T.tanh(tmp) + tmp
+                            xhat = (
+                                o_mimo_accum_frag[cs*R + r, p]
+                                * o_rstd_frag[cs, r]
+                            )
+                            dnorm = dout_frag[cs, p] * Phi_frag[r, p] * gate
+                            weighted_dot_frag[cs, r, p] = (
+                                dnorm * xhat
+                            )
+
+                        dOutNorm_frag = T.alloc_fragment([R, P], T.float32)
+                        T.copy(dOutNorm_shared, dOutNorm_frag)
+                        T.reduce_sum(weighted_dot_frag, dOutNorm_frag, dim=0, clear=False)
+                        T.copy(dOutNorm_frag, dOutNorm_shared)
+
+                        for cs, r, p in T.Parallel(chunk_size, R, P):
+                            weighted_dot_frag[cs, r, p] *= OUT_NORM_WEIGHT[i_h, p]
+
+                        rms_dot_frag = T.alloc_fragment([chunk_size, R], T.float32)
+                        T.reduce_sum(weighted_dot_frag, rms_dot_frag, dim=-1, clear=True)
+                        for cs, r in T.Parallel(chunk_size, R):
+                            rms_dot_frag[cs, r] /= P
+
+                        for cs, r, p in T.Parallel(chunk_size, R, P):
+                            tmp = z_frag[cs, p] * Zeta_frag[r, p] * 0.5
+                            gate = tmp * T.tanh(tmp) + tmp
+                            xhat = (
+                                o_mimo_accum_frag[cs*R + r, p]
+                                * o_rstd_frag[cs, r]
+                            )
+                            dnorm = dout_frag[cs, p] * Phi_frag[r, p] * gate
+                            DOUT_PRE_RMS[i_b, i_h, fused_chunk_start+cs*R+r, p] = (
+                                o_rstd_frag[cs, r]
+                                * (
+                                    dnorm * OUT_NORM_WEIGHT[i_h, p]
+                                    - xhat * rms_dot_frag[cs, r]
+                                )
+                            )
+                    elif hasZ:
+                        # Expand SISO DOUT through Phi, then apply SiLU gate backward.
                         Phi_frag = T.alloc_fragment([R, P], dtype)
                         T.copy(MIMO_O[i_h, :, :], Phi_frag)
                         dPhiO_frag = T.alloc_fragment([chunk_size, R, P], dtype)
@@ -392,12 +553,10 @@ def mamba_mimo_bwd_fwd(
                         for cs, r, p in T.Parallel(chunk_size, R, P):
                             dPhiO_frag[cs, r, p] = dout_frag[cs, p] * Phi_frag[r, p]
 
-                        # NOTE: layout issue when trying to reuse o_mimo_accum_frag
-                        # NOTE: note that it uses out_prereduced_shared, which is the pre-Z-gate version
-                        # of out
+                        # Use the raw pre-gate MIMO output saved in shared memory.
                         for cs, r, p in T.Parallel(chunk_size, R, P):
                             dPhiO_frag[cs, r, p] *= out_prereduced_shared[cs*R + r, p]
-                        # Backward of SILU(z) is sigmoid(z) * (1 + z * (1 - sigmoid(z)))
+                        # Backward of SiLU(u): sigmoid(u) * (1 + u * sigmoid(-u)).
                         z_frag = T.alloc_fragment([chunk_size, P], T.float32)
                         T.copy(z_shared, z_frag)
                         Zeta_frag = T.alloc_fragment([R, P], T.float32)
@@ -431,7 +590,7 @@ def mamba_mimo_bwd_fwd(
                             dPhiO_frag[cs, r, p] = DOUT[i_b, chunk_start + cs, r, i_h, p]
                         for cs, r, p in T.Parallel(chunk_size, R, P):
                             dPhiO_frag[cs, r, p] *= out_prereduced_shared[cs*R + r, p]
-                        # Backward of SILU(z) is sigmoid(z) * (1 + z * (1 - sigmoid(z)))
+                        # Backward of SiLU(u): sigmoid(u) * (1 + u * sigmoid(-u)).
                         z_frag = T.alloc_fragment([chunk_size, P], T.float32)
                         T.copy(z_shared, z_frag)
                         Zeta_frag = T.alloc_fragment([R, P], T.float32)
@@ -441,14 +600,14 @@ def mamba_mimo_bwd_fwd(
                             dZetaZ_frag[cs, r, p] = z_frag[cs, p] * Zeta_frag[r, p]
                             dZetaZ_frag[cs, r, p] = dPhiO_frag[cs, r, p]* T.sigmoid(dZetaZ_frag[cs, r, p]) * \
                                 (1 + dZetaZ_frag[cs, r, p] * (T.sigmoid(-dZetaZ_frag[cs, r, p])))
-                        ## Compute DZ
+                        # Compute DZ.
                         dZ_frag = T.alloc_fragment([chunk_size, P], dtype)
                         T.clear(dZ_frag)
                         for cs, p in T.Parallel(chunk_size, P):
                             for r in T.serial(R):
                                 dZ_frag[cs, p] += dZetaZ_frag[cs, r, p] * Zeta_frag[r, p]
                         T.copy(dZ_frag, DZ[i_b, chunk_start:chunk_start+chunk_size, i_h, :])
-                        ## Compute DMIMO_Z
+                        # Compute DMIMO_Z.
                         for cs, r, p in T.Parallel(chunk_size, R, P):
                             dZetaZ_frag[cs, r, p] *= z_frag[cs, p]
                         dZeta_frag = T.alloc_fragment([R, P], T.float32)
@@ -462,8 +621,7 @@ def mamba_mimo_bwd_fwd(
                 # DA_CS_REV scales stepwise K contribution into the new state.
                 dA_cs_rev_frag = T.alloc_fragment([chunk_size], T.float32)
                 T.copy(DA_CS_REV[i_b, i_h, chunk_start:chunk_start+chunk_size], dA_cs_rev_frag)
-                # NOTE: we can recycle k_trap_scaled_frag from earlier, however,
-                # that is slower, so choose to recopy from smem:
+                # Recopy from shared memory; recycling k_trap_scaled_frag was slower here.
                 k_state_frag = T.alloc_fragment([fused_chunk_size, N], dtype)
                 T.copy(k_shared, k_state_frag)
                 for csr, n in T.Parallel(fused_chunk_size, N):
@@ -478,9 +636,11 @@ def mamba_mimo_bwd_fwd(
                 for n, p in T.Parallel(N, P):
                     states_frag[n, p] *= T.exp(da_cs_sum)
                 T.gemm(k_state_frag, PsiV_shared, states_frag, transpose_A=True, clear_accum=False)
-            
+
             if reduceO:
                 T.copy(dPhi_shared, DMIMO_O[i_b, i_h, :, :])
+            if fuse_pregate_headwise_rms_norm:
+                T.copy(dOutNorm_shared, DOUT_NORM_WEIGHT[i_b, i_h, :, :])
             if hasZ:
                 T.copy(dZeta_shared, DMIMO_Z[i_b, i_h, :, :])
 
@@ -513,11 +673,13 @@ def mamba_mimo_bwd_bwd(
     hasZ,
     hasD,
     reduceO,
+    packed_dout=False,
     chunk_size: int = 16,
     rotary_dim_divisor: int = 4,
     dtype: str = 'float16',
     threads: int = 256,
     num_stages: int = 0,
+    states_dtype = torch.bfloat16,
 ) -> torch.Tensor:
 
     accum_dtype = 'float32'
@@ -526,10 +688,14 @@ def mamba_mimo_bwd_bwd(
     tail_len = S % chunk_size
     fused_chunk_size = chunk_size * R
 
-    if reduceO:
+    if packed_dout:
+        DOUT_shape = (B, H, S*R, P)
+    elif reduceO:
         DOUT_shape = (B, S, H, P)
     else:
         DOUT_shape = (B, S, R, H, P)
+
+    dtype_states = str(states_dtype).replace("torch.","")
 
     @T.prim_func
     def mamba_mimo_bwd_bwd_kernel(
@@ -544,7 +710,7 @@ def mamba_mimo_bwd_bwd(
             DK: T.Tensor([B, S*R, H, N], dtype),  # type: ignore
             DV: T.Tensor([B, S, H, P], dtype),  # type: ignore
             DMIMO_V: T.Tensor([B, H, R, P], T.float32), # type: ignore
-            STATES: T.Tensor([B, H, nchunks, N, P], dtype), # type: ignore 
+            STATES: T.Tensor([B, H, nchunks, N, P], dtype_states), # type: ignore
             DQ: T.Tensor([B, S*R, H, N], dtype),  # type: ignore
 
             Z: T.Tensor([B, S, H, P], dtype),  # type: ignore
@@ -572,11 +738,17 @@ def mamba_mimo_bwd_bwd(
         """
         Overview:
             Reverse-chunk backward pass that consumes cached STATES and QK_DOT from the first pass
-            to produce gradients for the fused Mamba3 attention block.
+            to produce gradients for the fused Mamba3 attention block. For pregate headwise
+            RMSNorm, DOUT is the packed DOUT_PRE_RMS tensor produced by bwd_fwd, so this
+            pass does not recompute raw y (the MIMO output before RMSNorm/gate/down-projection),
+            RMSNorm, down-projection, or gate/Zeta gradients.
 
         Inputs:
             - Forward activations/tensors: DOUT, Q, K, V, optional Z, optional D.
-            - Projection weights/biases: Q_BIAS, K_BIAS, MIMO_V (Psi), MIMO_O (Phi), optional MIMO_Z (Zeta).
+              DOUT is [B,S,H,P] when reduceO=True, [B,S,R,H,P] when reduceO=False,
+              or packed [B,H,S*R,P] when packed_dout=True.
+            - Projection weights/biases: Q_BIAS, K_BIAS, MIMO_V (Psi), MIMO_O (Phi),
+              optional MIMO_Z (Zeta).
             - Cached intermediates: STATES and QK_DOT.
             - Discretization grads and factors:
               DA_CS, DA_CS_REV, DT, TRAP, DDA, DSSDA, DDA_CS_REV, DDA_CS, and SEGSUM.
@@ -586,6 +758,8 @@ def mamba_mimo_bwd_bwd(
             - MIMO projection grads: DMIMO_V.
             - Discretization/rotation grads: DANGLES, DFACTOR, DGAMMA_DIAG, DDA_CS_REV, DDA_CS, DDA.
             - Additional grads: optional DD.
+            - DMIMO_O, DMIMO_Z, DZ, and DOUT_NORM_WEIGHT are produced by bwd_fwd in the
+              pregate RMSNorm path.
 
         Notation:
             - Psi: MIMO X projection.
@@ -593,7 +767,7 @@ def mamba_mimo_bwd_bwd(
             - Zeta: MIMO Z projection.
             - Trap: convex-combination modulator used in exponential-trapezoidal discretization.
         """
-        
+
         with T.Kernel(H, B, threads=threads) as (i_h, i_b):
             # --- Kernel Setup ---
             # GQA support: map V head to Q/K head
@@ -610,6 +784,7 @@ def mamba_mimo_bwd_bwd(
 
             k_shared = T.alloc_shared([fused_chunk_size, N], dtype)
             v_shared = T.alloc_shared([chunk_size, P], dtype)
+            PsiV_shared = T.alloc_shared([fused_chunk_size, P], dtype)
 
             states_shared = T.alloc_shared([N, P], dtype)
             lkq_masked__or__dkq_masked_shared = T.alloc_shared([fused_chunk_size, fused_chunk_size], dtype)
@@ -640,6 +815,7 @@ def mamba_mimo_bwd_bwd(
 
                     k_shared: tilelang.layout.make_swizzled_layout(k_shared),
                     v_shared: tilelang.layout.make_swizzled_layout(v_shared),
+                    PsiV_shared: tilelang.layout.make_swizzled_layout(PsiV_shared),
                     states_shared: tilelang.layout.make_swizzled_layout(states_shared),
                     lkq_masked__or__dkq_masked_shared: tilelang.layout.make_swizzled_layout(lkq_masked__or__dkq_masked_shared),
 
@@ -668,7 +844,7 @@ def mamba_mimo_bwd_bwd(
             Psi_frag = T.alloc_fragment([R, P], dtype)
             T.copy(MIMO_V[i_h, :, :], Psi_frag)
 
-            dPsi_acc = T.alloc_fragment([R, P], accum_dtype) # TODO
+            dPsi_acc = T.alloc_fragment([R, P], accum_dtype)
             T.clear(dPsi_acc)
 
             if hasD:
@@ -702,8 +878,8 @@ def mamba_mimo_bwd_bwd(
                     )
                 shifted_gamma_frag = T.alloc_fragment([chunk_size], dtype)
                 for cs in T.Parallel(chunk_size):
-                    shifted_gamma_frag[cs] = T.if_then_else(chunk_start + cs < (S - 1), 
-                                                            dt_shifted_frag[cs] * T.sigmoid(-trap_shifted_frag[cs]), 
+                    shifted_gamma_frag[cs] = T.if_then_else(chunk_start + cs < (S - 1),
+                                                            dt_shifted_frag[cs] * T.sigmoid(-trap_shifted_frag[cs]),
                                                             0.0)
 
                 trap_frag = T.alloc_fragment([chunk_size], T.float32)
@@ -721,7 +897,7 @@ def mamba_mimo_bwd_bwd(
                 trap_scale_shared = T.alloc_shared([chunk_size], dtype)
                 T.copy(trap_scale_frag, trap_scale_shared)
 
-                # --- DOUT Projection and Optional Z / D Paths ---
+                # --- Build dPhiO from reduced, unreduced, or packed pre-RMS DOUT ---
                 dPhiO_frag = T.alloc_fragment([chunk_size, R, P], dtype)
                 if reduceO:
                     for cs, p in T.Parallel(chunk_size, P):
@@ -730,10 +906,17 @@ def mamba_mimo_bwd_bwd(
                         dPhiO_frag[cs, r, p] = dout_shared[cs, p] * Phi_frag[r, p]
                 else:
                     for cs, r, p in T.Parallel(chunk_size, R, P):
-                        dPhiO_frag[cs, r, p] = DOUT[i_b, chunk_start + cs, r, i_h, p]
+                        if packed_dout:
+                            dPhiO_frag[cs, r, p] = DOUT[
+                                i_b, i_h, fused_chunk_start+cs*R+r, p
+                            ]
+                        else:
+                            dPhiO_frag[cs, r, p] = DOUT[
+                                i_b, chunk_start + cs, r, i_h, p
+                            ]
 
                 if hasZ:
-                    ## Backpropagate via *SILU(Z)
+                    # Backpropagate through the SiLU(Z * Zeta) gate.
                     Zeta_frag = T.alloc_fragment([R, P], dtype)
                     T.copy(MIMO_Z[i_h, :, :], Zeta_frag)
                     z_frag = T.alloc_fragment([chunk_size, P], dtype)
@@ -745,7 +928,7 @@ def mamba_mimo_bwd_bwd(
 
                 T.copy(V[i_b, chunk_start:chunk_start+chunk_size, i_h, :], v_shared)
                 if hasD:
-                    # Compute dD via projected DOUT and V/Psi factors.
+                    # Compute dD from dPhiO and Psi(V).
                     v_dD_frag =  T.alloc_fragment([chunk_size, P], accum_dtype)
                     Psi_dD_frag = T.alloc_fragment([R, P], accum_dtype)
                     T.copy(v_shared, v_dD_frag)
@@ -758,7 +941,7 @@ def mamba_mimo_bwd_bwd(
                 # Load q and apply q_bias to it:
                 for cs, r, n in T.Parallel(chunk_size, R, N):
                     q_shared[cs*R + r, n] = Q[i_b, chunk_start+cs, r, i_h_qk, n]
-                
+
                 q_frag = T.alloc_fragment([chunk_size, R, N], dtype)
                 for cs, r, n in T.Parallel(chunk_size, R, N):
                     q_frag[cs, r, n] = q_shared[cs*R + r, n]
@@ -806,6 +989,11 @@ def mamba_mimo_bwd_bwd(
                     k_trap_scaled_frag[csr, n] *= trap_scale_shared[csr//R]
                 T.copy(k_trap_scaled_frag, k_shared)
 
+                v_for_psiv_frag = T.alloc_fragment([chunk_size, P], accum_dtype)
+                T.copy(v_shared, v_for_psiv_frag)
+                for cs, r, p in T.Parallel(chunk_size, R, P):
+                    PsiV_shared[cs*R + r, p] = v_for_psiv_frag[cs, p] * Psi_frag[r, p]
+
                 # Apply the effect of interchunk (state update):
                 dPsiV_frag = T.alloc_fragment([fused_chunk_size, P], accum_dtype)
                 T.gemm(k_shared, dstates_shared, dPsiV_frag, clear_accum=True)
@@ -820,7 +1008,8 @@ def mamba_mimo_bwd_bwd(
                 # Apply the effect of intrachunk:
                 lkq_frag = T.alloc_fragment([fused_chunk_size, fused_chunk_size], accum_dtype)
                 T.gemm(k_shared, q_shared, lkq_frag, transpose_B=True, clear_accum=True)
-                T.copy(lkq_frag, lkq_masked__or__dkq_masked_shared) # NOTE: Save later for the computation of DSSDA, using lkq_masked__or__dkq_masked_shared which has the same shape
+                # Save the unmasked KQ product for DSSDA; reuse this same-shape buffer.
+                T.copy(lkq_frag, lkq_masked__or__dkq_masked_shared)
                 if R == 1: # More smem efficient which is necessary for R=1, but slower due to the need for casting
                     lkq_masked_dtype_buf = T.alloc_fragment([fused_chunk_size, fused_chunk_size], dtype)
                     T.copy(lkq_masked__or__dkq_masked_shared, lkq_masked_dtype_buf)
@@ -855,8 +1044,7 @@ def mamba_mimo_bwd_bwd(
                 else:
                     T.copy(dPsiV_frag, dPsiV_D_fused_frag)
                 # Compute the contribution from the qk_dot term:
-                # NOTE: recomputing qk_dot here is much slower than just loading from
-                # the result of the bwd_fwd kernel
+                # Loading QK_DOT from bwd_fwd is faster than recomputing it here.
                 qk_dot_frag = T.alloc_fragment([chunk_size, R, R], dtype)
                 T.copy(QK_DOT[i_b, i_h, chunk_start:chunk_start+chunk_size, :, :], qk_dot_shared)
                 T.copy(qk_dot_shared, qk_dot_frag)
@@ -894,9 +1082,7 @@ def mamba_mimo_bwd_bwd(
                 for cs, p in T.Parallel(chunk_size, P):
                     for r in T.serial(R):
                         PsiV_frag[cs, r, p] += v_frag[cs, p] * Psi_frag[r, p]
-                # NOTE: Tilelang unable to perform gemm with reshaped PsiV_frag
-                # so have to copy to smem
-                PsiV_shared  = T.alloc_shared([fused_chunk_size, P], dtype)
+                # TileLang cannot use the reshaped PsiV fragment directly in this GEMM.
                 for cs, r, p in T.Parallel(chunk_size, R, P):
                     PsiV_shared[cs*R + r, p] = PsiV_frag[cs, r, p]
 
@@ -995,10 +1181,10 @@ def mamba_mimo_bwd_bwd(
                 T.copy(dk_nodiag_frag, dk_shared)
 
                 # --- State-Passing ddA Terms + Interchunk dQ ---
-                T.copy(STATES[i_b, i_h, chunk_idx, :, :], states_shared) # Load cached states from bwd_fwd
-                # NOTE: Compute the contribution of state passing (part 3 of 4)
                 states_frag = T.alloc_fragment([N, P], T.float32)
-                T.copy(states_shared, states_frag)
+                T.copy(STATES[i_b, i_h, chunk_idx, :, :], states_frag) # Load cached states from bwd_fwd
+                # Contribution from state passing.
+                T.copy(states_frag, states_shared)
                 ddA_state_passing = T.alloc_fragment([1], T.float32)
                 ddA_state_passing_prereduce_frag = T.alloc_fragment([N, P], T.float32)
                 da_cs_sum = T.alloc_var(T.float32)
@@ -1008,8 +1194,8 @@ def mamba_mimo_bwd_bwd(
                     T.copy(DA_CS[i_b, i_h, chunk_start+chunk_size-1], da_cs_sum)
                 for n, p in T.Parallel(N, P):
                     ddA_state_passing_prereduce_frag[n, p] = (
-                        states_frag[n, p] 
-                        * dstates_frag[n, p] 
+                        states_frag[n, p]
+                        * dstates_frag[n, p]
                         * T.exp(da_cs_sum)
                     )
                 T.reduce_sum(
@@ -1024,13 +1210,13 @@ def mamba_mimo_bwd_bwd(
 
                 dq_frag = T.alloc_fragment([fused_chunk_size, N], accum_dtype)
                 T.gemm(dPhiO_shared, states_shared, dq_frag, transpose_B=True, clear_accum=True)
-                # NOTE: Compute the contribution to ddA from applying it to q*state (part 4 of 4)
+                # Contribution from applying dA_cs to q * state.
                 dda_cs_prereduce_frag = T.alloc_fragment([fused_chunk_size, N], accum_dtype)
                 T.copy(q_shared, dda_cs_prereduce_frag)
                 for csr, n in T.Parallel(fused_chunk_size, N):
                     dda_cs_prereduce_frag[csr, n] *= dq_frag[csr, n]
                 dda_cs_frag = T.alloc_fragment([chunk_size], accum_dtype)
-                T.reduce_sum(T.view(dda_cs_prereduce_frag, shape=[chunk_size, R*N]), 
+                T.reduce_sum(T.view(dda_cs_prereduce_frag, shape=[chunk_size, R*N]),
                              dda_cs_frag, dim=-1, clear=True)
                 T.copy(dda_cs_frag, DDA_CS[i_b, i_h, chunk_start:chunk_start+chunk_size])
 
@@ -1042,8 +1228,7 @@ def mamba_mimo_bwd_bwd(
                 for csr, n in T.Parallel(fused_chunk_size, N):
                     # DA_CS scales interchunk q-state contribution in backward.
                     dq_frag[csr, n] *= T.exp(dA_cs_dq_frag[csr//R])
-                # NOTE: Unable to reuse dk_intrachunk_frag_dtype due to layout issue
-                # (we do gemm with the transpose of dk_intrachunk_frag_dtype)
+                # Keep a separate buffer; the later GEMM needs the transposed layout.
                 T.copy(dq_frag, dq_shared)
                 dq_combined_frag = T.alloc_fragment([fused_chunk_size, N], accum_dtype)
                 T.copy(dq_shared, dq_combined_frag)
@@ -1068,7 +1253,7 @@ def mamba_mimo_bwd_bwd(
                     dangle_dk_frag[cs, r, n] = dk_first_half_frag[cs, r, n] * (-k_prerot_first_half_frag[cs, r, n] * T.sin(angles_dk_frag[cs, n]) - k_prerot_second_half_frag[cs, r, n] * T.cos(angles_dk_frag[cs, n])) +\
                                             dk_second_half_frag[cs, r, n] * (k_prerot_first_half_frag[cs, r, n] * T.cos(angles_dk_frag[cs, n]) - k_prerot_second_half_frag[cs, r, n] * T.sin(angles_dk_frag[cs, n]))
                 T.copy(T.view(dangle_dk_frag, shape=[fused_chunk_size, N//rotary_dim_divisor]), dangle_dk__or__dq_shared)
-                
+
                 # Rotate dk_shared:
                 for cs, r, n in T.Parallel(chunk_size, R, N//rotary_dim_divisor):
                     dk_shared[cs*R + r, n] = T.cos(angles_dk_frag[cs, n]) * dk_first_half_frag[cs, r, n] + T.sin(angles_dk_frag[cs, n]) * dk_second_half_frag[cs, r, n]
@@ -1079,13 +1264,13 @@ def mamba_mimo_bwd_bwd(
 
                 # Compute the effect of dqk_from_diag
                 q_dk_frag = T.alloc_fragment([fused_chunk_size, N], accum_dtype) # Keeping q_dk_frag in accum_dtype to avoid casting instructions
-                T.copy(q_pre_rot_shared, q_dk_frag) # NOTE: we need to use the pre-rotated version of q
+                T.copy(q_pre_rot_shared, q_dk_frag)
                 q_dk_frag_reshaped = T.view(q_dk_frag, [chunk_size, R, N])
                 for csr_in, n in T.Parallel(fused_chunk_size, N):
                     cs = csr_in // R
                     for r_out in T.serial(R):
                         csr_out = cs*R + r_out
-                        dk_combined_frag[csr_in, n] += dqk_from_diag_shared[csr_out, csr_in] * q_dk_frag_reshaped[cs, r_out, n]  
+                        dk_combined_frag[csr_in, n] += dqk_from_diag_shared[csr_out, csr_in] * q_dk_frag_reshaped[cs, r_out, n]
                 # Copy to gmem:
                 T.copy(dk_combined_frag, DK[i_b, fused_chunk_start:fused_chunk_start+fused_chunk_size, i_h, :])
 
@@ -1096,7 +1281,7 @@ def mamba_mimo_bwd_bwd(
                 for cs, r, n in T.Parallel(chunk_size, R, N//rotary_dim_divisor):
                     dq_first_half_frag[cs, r, n] = dq_shared[cs*R + r, n]
                     dq_second_half_frag[cs, r, n] = dq_shared[cs*R + r, N//2 + n]
-                
+
                 # Compute the contribution of dq to dangle:
                 q_prerot_first_half_frag = T.alloc_fragment([chunk_size, R, N//rotary_dim_divisor], dtype)
                 q_prerot_second_half_frag = T.alloc_fragment([chunk_size, R, N//rotary_dim_divisor], dtype)
@@ -1157,12 +1342,12 @@ def mamba_mimo_bwd_bwd(
 
 def mamba_mimo_bwd_combined(
         dout,
-        q, 
-        k, 
-        v, 
+        q,
+        k,
+        v,
         q_bias,
         k_bias,
-        mimo_v, 
+        mimo_v,
         mimo_o,
         z,
         mimo_z,
@@ -1180,15 +1365,54 @@ def mamba_mimo_bwd_combined(
         bf_num_stages=0,
         bb_threads=256,
         bb_num_stages=0,
+        states_dtype=torch.bfloat16,
+        fuse_pregate_headwise_rms_norm=False,
+        outproj_norm_weight=None,
+        outproj_norm_eps=1e-5,
         ):
     # TileLang kernel expects contiguous last-dim strides for DOUT.
     B, S, R, G, N = q.shape
     H, P = v.shape[-2], v.shape[-1]
     reduceO = mimo_o is not None
+    if fuse_pregate_headwise_rms_norm:
+        if not reduceO:
+            raise ValueError("fuse_pregate_headwise_rms_norm=True requires mimo_o.")
+        if z is None or mimo_z is None:
+            raise ValueError("fuse_pregate_headwise_rms_norm=True requires z and mimo_z.")
+    if not fuse_pregate_headwise_rms_norm:
+        outproj_norm_weight_arg = None
+    elif outproj_norm_weight is None:
+        outproj_norm_weight_arg = torch.ones((H, P), dtype=torch.float32, device=q.device)
+    else:
+        if outproj_norm_weight.ndim == 1:
+            if outproj_norm_weight.numel() != H * P:
+                raise ValueError(
+                    f"Expected flattened outproj_norm_weight to have {H * P} elements, "
+                    f"got {outproj_norm_weight.numel()}."
+                )
+            outproj_norm_weight_arg = outproj_norm_weight.reshape(H, P).contiguous()
+        elif outproj_norm_weight.shape == (H, P):
+            outproj_norm_weight_arg = outproj_norm_weight.contiguous()
+        else:
+            raise ValueError(
+                f"Expected outproj_norm_weight to have shape ({H}, {P}) or ({H * P},), "
+                f"got {tuple(outproj_norm_weight.shape)}."
+            )
+        outproj_norm_weight_arg = outproj_norm_weight_arg.to(device=q.device, dtype=torch.float32)
 
     dmimo_o = torch.empty([B, H, R, P], dtype=mimo_v.dtype, device=mimo_v.device) if reduceO else None
-    states = torch.empty([B, H, math.ceil(S/chunk_size), N, P], dtype=v.dtype, device=v.device) # NOTE: states dtype is set to v.dtype
-    
+    dout_norm_weight = (
+        torch.empty([B, H, R, P], dtype=torch.float32, device=v.device)
+        if fuse_pregate_headwise_rms_norm else None
+    )
+    dout_norm_weight_arg = dout_norm_weight
+    dout_pre_rms = (
+        torch.empty([B, H, S*R, P], dtype=dout.dtype, device=dout.device)
+        if fuse_pregate_headwise_rms_norm
+        else None
+    )
+    states = torch.empty([B, H, math.ceil(S/chunk_size), N, P], dtype=states_dtype, device=v.device)
+
     if z is not None:
         dz_tilelang = torch.empty_like(v)
         dmimo_z = torch.empty([B, H, R, P], dtype=mimo_v.dtype, device=mimo_v.device)
@@ -1204,30 +1428,34 @@ def mamba_mimo_bwd_combined(
         dtype_str = dtype
     bwd_fwd_kernel = mamba_mimo_bwd_fwd(
         T.dynamic("B"),
-        T.dynamic("S"), 
-        T.dynamic("H"), 
-        T.dynamic("G"), 
-        N, P, R, 
+        T.dynamic("S"),
+        T.dynamic("H"),
+        T.dynamic("G"),
+        N, P, R,
         z is not None,
         D is not None,
         reduceO,
-        chunk_size, 
+        fuse_pregate_headwise_rms_norm,
+        chunk_size,
         rotary_dim_divisor,
         dtype_str,
+        outproj_norm_eps,
         bf_threads,
-        bf_num_stages
-    )
-
+        bf_num_stages,
+        states_dtype=states_dtype)
     bwd_fwd_kernel(
                     dout,
-                    q, 
-                    k, 
-                    v, 
+                    q,
+                    k,
+                    v,
                     q_bias,
                     k_bias,
-                    mimo_v, 
+                    mimo_v,
                     mimo_o,
+                    outproj_norm_weight_arg,
                     dmimo_o,
+                    dout_norm_weight_arg,
+                    dout_pre_rms,
                     states,
                     z,
                     mimo_z,
@@ -1242,10 +1470,10 @@ def mamba_mimo_bwd_combined(
                     qk_dot,
                     segsum,
                     )
-    if reduceO:
+    if reduceO and not fuse_pregate_headwise_rms_norm:
         dmimo_o = dmimo_o.sum(dim=0)
 
-    
+
     dq_tilelang = torch.empty([B, S, R, H, N], dtype=q.dtype, device=q.device)
     dk_tilelang = torch.empty([B, S, R, H, N], dtype=k.dtype, device=k.device)
     dv_tilelang = torch.empty_like(v)
@@ -1258,34 +1486,41 @@ def mamba_mimo_bwd_combined(
     dSSdA = torch.zeros([B, H, math.ceil(S/chunk_size), chunk_size, chunk_size], dtype=torch.float32, device=dt.device)
     ddA_cs_rev = torch.zeros([B, H, S], dtype=torch.float32, device=dt.device)
     ddA_cs = torch.zeros([B, H, S], dtype=torch.float32, device=dt.device)
-    
-    
+
+
+    # Pregate RMSNorm is handled in bwd_fwd. The reverse pass consumes packed
+    # DOUT_PRE_RMS and skips Phi/Z/RMSNorm work.
+    bwd_bwd_dout = dout_pre_rms if fuse_pregate_headwise_rms_norm else dout
+    bwd_bwd_reduceO = reduceO and not fuse_pregate_headwise_rms_norm
+    bwd_bwd_hasZ = (z is not None) and not fuse_pregate_headwise_rms_norm
+    bwd_bwd_packed_dout = fuse_pregate_headwise_rms_norm
     bwd_bwd_kernel = mamba_mimo_bwd_bwd(
         T.dynamic("B"),
-        T.dynamic("S"), 
-        T.dynamic("H"), 
-        T.dynamic("G"), 
-        N, P, R, 
-        z is not None,
+        T.dynamic("S"),
+        T.dynamic("H"),
+        T.dynamic("G"),
+        N, P, R,
+        bwd_bwd_hasZ,
         D is not None,
-        reduceO,
-        chunk_size, 
+        bwd_bwd_reduceO,
+        bwd_bwd_packed_dout,
+        chunk_size,
         rotary_dim_divisor,
         dtype_str,
         bb_threads,
-        bb_num_stages)
-
+        bb_num_stages,
+        states_dtype=states_dtype)
     bwd_bwd_kernel(
-            dout,
-            q, 
+            bwd_bwd_dout,
+            q,
             k,
             v,
             q_bias,
             k_bias,
-            mimo_v, 
+            mimo_v,
             mimo_o,
-            dk_tilelang.view(B, S*R, H, N), 
-            dv_tilelang, 
+            dk_tilelang.view(B, S*R, H, N),
+            dv_tilelang,
             dmimo_v,
             states,
             dq_tilelang.view(B, S*R, H, N),
@@ -1308,23 +1543,18 @@ def mamba_mimo_bwd_combined(
             ddA_cs,
             segsum,
             )
-    
-    if G == 1:
-        dq_bias_tilelang = dq_tilelang.sum(dim=(0, 1)).permute((1, 0, 2))
-        dk_bias_tilelang = dk_tilelang.sum(dim=(0, 1)).permute((1, 0, 2))
-        dq_tilelang = dq_tilelang.sum(dim=3, keepdim=True)
-        dk_tilelang = dk_tilelang.sum(dim=3, keepdim=True)
-        dmimo_v = dmimo_v.sum(dim=0)
-        dmimo_z = dmimo_z.sum(dim=0) if dmimo_z is not None else None
-        dD = dD.sum(dim=0) if dD is not None else None
-    elif G == H:
-        dq_bias_tilelang = dq_tilelang.sum(dim=(0, 1)).permute((1, 0, 2))
-        dk_bias_tilelang = dk_tilelang.sum(dim=(0, 1)).permute((1, 0, 2))
-        dmimo_v = dmimo_v.sum(dim=0)
-        dmimo_z = dmimo_z.sum(dim=0) if dmimo_z is not None else None
-        dD = dD.sum(dim=0) if dD is not None else None
+
+    dq_tilelang, dk_tilelang, dq_bias_tilelang, dk_bias_tilelang = (
+        reduce_grouped_qk_grads_and_bias_triton(dq_tilelang, dk_tilelang, G)
+    )
+    dmimo_v = dmimo_v.sum(dim=0)
+    if fuse_pregate_headwise_rms_norm:
+        dmimo_o = dmimo_o.sum(dim=0)
+        dmimo_z = dmimo_z.sum(dim=0)
+        dout_norm_weight = dout_norm_weight.sum(dim=(0, 2))
     else:
-        raise ValueError(f"G value of {G} is not currently supported!")
+        dmimo_z = dmimo_z.sum(dim=0) if dmimo_z is not None else None
+    dD = dD.sum(dim=0) if dD is not None else None
 
     ddt, dtrap = bwd_dtrap_ddt_triton(
         trap, dt, dfactor, dgamma_diag, chunk_size
@@ -1335,7 +1565,7 @@ def mamba_mimo_bwd_combined(
     )
 
 
-    return (dq_tilelang, dk_tilelang, dv_tilelang, 
+    return (dq_tilelang, dk_tilelang, dv_tilelang,
             ddA, ddt, dtrap, dq_bias_tilelang, dk_bias_tilelang,
-            dmimo_v, dmimo_z, dmimo_o, dangles, 
-            dD, dz_tilelang)
+            dmimo_v, dmimo_z, dmimo_o, dangles,
+            dD, dz_tilelang, dout_norm_weight)

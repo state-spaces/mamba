@@ -58,6 +58,7 @@ class Mamba3(nn.Module):
         is_outproj_norm=False,
         is_mimo=False,
         mimo_rank=4,
+        fuse_pregate_headwise_norm=True,
         #-------------------------------------------
         # Fused kernel and sharding options
         chunk_size=64, # Recommended: 64 for SISO, 64/mimo_rank for MIMO
@@ -80,6 +81,9 @@ class Mamba3(nn.Module):
         self.is_outproj_norm=is_outproj_norm
         self.is_mimo = is_mimo
         self.mimo_rank = mimo_rank
+        self.fuse_pregate_headwise_norm = bool(
+            fuse_pregate_headwise_norm and self.is_mimo and self.is_outproj_norm
+        )
         if not self.is_mimo:
             self.mimo_rank = 1
         else:
@@ -144,6 +148,10 @@ class Mamba3(nn.Module):
                 group_size=self.headdim,
                 **factory_kwargs
             )
+            if self.fuse_pregate_headwise_norm:
+                assert self.norm.weight.numel() == self.nheads * self.headdim, (
+                    "Fused pregate headwise norm expects one norm weight per head/headdim element."
+                )
 
         # Output projection
         self.out_proj = nn.Linear(self.d_inner, self.d_model, bias=False, **factory_kwargs)
@@ -210,15 +218,18 @@ class Mamba3(nn.Module):
                 K_bias=self.B_bias,
                 MIMO_V=self.mimo_x,
                 MIMO_Z=self.mimo_z,
-                MIMO_Out=self.mimo_o if not self.is_outproj_norm else None,
+                MIMO_Out=self.mimo_o if (self.fuse_pregate_headwise_norm or not self.is_outproj_norm) else None,
                 Angles=angles,
                 D=self.D,
-                Z=z if not self.is_outproj_norm else None,
+                Z=z if (self.fuse_pregate_headwise_norm or not self.is_outproj_norm) else None,
                 chunk_size=self.chunk_size,
                 rotary_dim_divisor=self.rotary_dim_divisor,
                 dtype=x.dtype,
                 return_state=ssm_state is not None,
                 cu_seqlens=cu_seqlens,
+                fuse_pregate_headwise_rms_norm=self.fuse_pregate_headwise_norm,
+                outproj_norm_weight=self.norm.weight if self.fuse_pregate_headwise_norm else None,
+                outproj_norm_eps=self.norm.eps if self.fuse_pregate_headwise_norm else 1e-5,
             )
             if ssm_state is not None:
                 y, last_angle, last_state, last_k, last_v, *rest = y
@@ -226,7 +237,7 @@ class Mamba3(nn.Module):
                 ssm_state.copy_(last_state)
                 k_state.copy_(last_k)
                 v_state.copy_(last_v)
-            if self.is_outproj_norm:
+            if self.is_outproj_norm and not self.fuse_pregate_headwise_norm:
                 z = torch.einsum("blhp,hrp->blrhp", z.float(), self.mimo_z)
                 z = rearrange(z, "b l r h p -> b l r (h p)")
                 y = rearrange(y, "b l r h p -> b l r (h p)").float()

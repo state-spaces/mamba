@@ -19,6 +19,9 @@ pytest -q -s -p no:warnings tests/ops/tilelang/test_mamba3_mimo.py -k "fwd_varle
 pytest -q -s -p no:warnings tests/ops/tilelang/test_mamba3_mimo.py -k "bwd_varlen"
 pytest -q -s -p no:warnings tests/ops/tilelang/test_mamba3_mimo.py -k "smoke_forward_backward_varlen"
 
+# Tests with headwise pregate norm fused:
+pytest -q -s -p no:warnings tests/ops/tilelang/test_mamba3_mimo.py -k fused_norm
+
 # (Remove the -s flag for less verbose output).
 """
 
@@ -57,6 +60,11 @@ CASE_GRID = [
     pytest.param(128, 64, 8, 8, 256, id="N128_P64_R8_C8_BB256"),
     pytest.param(128, 64, 2, 32, 256, id="N128_P64_R2_C32_BB256"),
     pytest.param(128, 64, 1, 64, 256, id="N128_P64_R1_C64_BB256"),
+]
+
+FUSED_NORM_CASE_GRID = [
+    pytest.param(32, 64, 4, 16, 256, id="N32_P64_R4_C16_BB256"),
+    pytest.param(128, 64, 4, 16, 256, id="N128_P64_R4_C16_BB256"),
 ]
 
 
@@ -163,6 +171,7 @@ def build_inputs(
     dA_cs, dA_cs_rev, segsum = mods.utils.compute_dacs_segsum_triton(dA, chunk_size)
     trap = torch.rand((b, h, s), device="cuda", dtype=dtype)
     dout = torch.randn_like(v)
+    outproj_norm_weight = torch.randn((h, p), device="cuda", dtype=torch.float32)
 
     return {
         "q": q,
@@ -183,6 +192,7 @@ def build_inputs(
         "segsum": segsum,
         "trap": trap,
         "dout": dout,
+        "outproj_norm_weight": outproj_norm_weight,
         "chunk_size": chunk_size,
         "rotary_dim_divisor": rotary_dim_divisor,
     }
@@ -329,6 +339,9 @@ def mamba3_MIMO_step_ref(
     Z: Optional[torch.Tensor] = None,
     MIMO_Z: Optional[torch.Tensor] = None,
     Input_States: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = None,
+    fused_norm: bool = False,
+    outproj_norm_weight: Optional[torch.Tensor] = None,
+    outproj_norm_eps: float = 1e-5,
 ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
     """Reference implementation of Mamba-3 MIMO in recurrent (step) mode.
 
@@ -436,7 +449,17 @@ def mamba3_MIMO_step_ref(
         if D is not None:
             out = out + D[None, :, None, None] * v
 
-        if z is not None:
+        if fused_norm:
+            if z is None:
+                raise ValueError("fused_norm=True requires Z and MIMO_Z.")
+            out = out.float()
+            out = out * torch.rsqrt(
+                out.square().mean(dim=-1, keepdim=True) + outproj_norm_eps
+            )
+            if outproj_norm_weight is not None:
+                out = out * outproj_norm_weight[None, :, None, :].float()
+            out = out * torch.nn.functional.silu(z.float())
+        elif z is not None:
             out = out * z * torch.sigmoid(z)
 
         out = torch.einsum("bhrp,hrp->bhp", out, MIMO_O)
@@ -484,6 +507,9 @@ def mamba3_MIMO_chunk_ref(
     rotate_pairwise: bool = False,
     contract_mimo_out: bool = True,
     cu_seqlens: Optional[Tensor] = None,
+    fused_norm: bool = False,
+    outproj_norm_weight: Optional[Tensor] = None,
+    outproj_norm_eps: float = 1e-5,
 ) -> tuple[Tensor, Optional[Tensor], Optional[Tensor]]:
     # Local copy of the reference program so tests remain valid even if module-level
     # debug/reference helpers are removed from shipped kernels.
@@ -511,9 +537,18 @@ def mamba3_MIMO_chunk_ref(
                 rotate_pairwise=rotate_pairwise,
                 contract_mimo_out=contract_mimo_out,
                 cu_seqlens=None,
+                fused_norm=fused_norm,
+                outproj_norm_weight=outproj_norm_weight,
+                outproj_norm_eps=outproj_norm_eps,
             )
             out_parts.append(out_i[:, :seq_len])
         return torch.cat(out_parts, dim=1), None, None
+
+    if fused_norm:
+        if not contract_mimo_out:
+            raise ValueError("fused_norm=True requires contract_mimo_out=True.")
+        if z is None or mimo_z is None:
+            raise ValueError("fused_norm=True requires z and mimo_z.")
 
     # --- Single-sequence path ---
     # Pad to the next multiple of chunk_size so the chunked rearranges are valid
@@ -543,6 +578,9 @@ def mamba3_MIMO_chunk_ref(
     if contract_mimo_out:
         assert mimo_o is not None
         mimo_o = mimo_o.to(dtype)
+    outproj_norm_weight = (
+        outproj_norm_weight.float() if outproj_norm_weight is not None else None
+    )
     if dA_cs is not None:
         dA_cs, dA_cs_rev = dA_cs.to(dtype), dA_cs_rev.to(dtype)
         dA_cs = rearrange(dA_cs, "b h (n c) -> b h n c", c=chunk_size)
@@ -674,6 +712,39 @@ def mamba3_MIMO_chunk_ref(
         vd = rearrange(vd, "b h (n c) r d -> b h n c r d", c=chunk_size)
         o += vd
 
+    if fused_norm:
+        raw_y = rearrange(o, "b h n c r p -> b (n c) r h p").float()
+        z_gate = torch.einsum(
+            "b l h p,h r p->b l r h p",
+            z.float(),
+            mimo_z.float(),
+        )
+        raw_y = raw_y * torch.rsqrt(
+            raw_y.square().mean(dim=-1, keepdim=True) + outproj_norm_eps
+        )
+        if outproj_norm_weight is not None:
+            if outproj_norm_weight.ndim == 1:
+                if outproj_norm_weight.numel() != nheads * raw_y.shape[-1]:
+                    raise ValueError(
+                        f"Expected flattened outproj_norm_weight to have "
+                        f"{nheads * raw_y.shape[-1]} elements, got "
+                        f"{outproj_norm_weight.numel()}."
+                    )
+                outproj_norm_weight = rearrange(
+                    outproj_norm_weight, "(h p) -> h p", h=nheads
+                )
+            elif outproj_norm_weight.shape != (nheads, raw_y.shape[-1]):
+                raise ValueError(
+                    f"Expected outproj_norm_weight to have shape "
+                    f"({nheads}, {raw_y.shape[-1]}) or "
+                    f"({nheads * raw_y.shape[-1]},), got "
+                    f"{tuple(outproj_norm_weight.shape)}."
+                )
+            raw_y = raw_y * outproj_norm_weight[None, None, None, :, :]
+        raw_y = raw_y * torch.nn.functional.silu(z_gate)
+        out = torch.einsum("b l r h p,h r p->b l h p", raw_y, mimo_o.float())
+        return out[:, :orig_seqlen], final_state, final_k
+
     if z is not None:
         z = torch.einsum("bthd,hrd->btrhd", z, mimo_z)
         z = rearrange(z, "b (n c) r h d -> b h n c r d", c=chunk_size)
@@ -695,6 +766,8 @@ def run_ref_backward_fp32(
     *,
     contract_mimo_out: bool = True,
     grad_output: Optional[Tensor] = None,
+    fused_norm: bool = False,
+    outproj_norm_eps: float = 1e-5,
 ) -> dict:
     ref_dtype = torch.float32
     q = inputs["q"].detach().to(ref_dtype).requires_grad_(True)
@@ -706,6 +779,11 @@ def run_ref_backward_fp32(
     mimo_o = (
         inputs["mimo_o"].detach().to(ref_dtype).requires_grad_(True)
         if contract_mimo_out
+        else None
+    )
+    outproj_norm_weight = (
+        inputs["outproj_norm_weight"].detach().to(ref_dtype).requires_grad_(True)
+        if fused_norm
         else None
     )
     z = (
@@ -749,6 +827,9 @@ def run_ref_backward_fp32(
         rotary_dim_divisor=inputs["rotary_dim_divisor"],
         dtype=ref_dtype,
         contract_mimo_out=contract_mimo_out,
+        fused_norm=fused_norm,
+        outproj_norm_weight=outproj_norm_weight,
+        outproj_norm_eps=outproj_norm_eps,
     )
 
     grad_input_items = [
@@ -771,6 +852,8 @@ def run_ref_backward_fp32(
         grad_input_items.append(("mimo_z", mimo_z))
     if contract_mimo_out:
         grad_input_items.append(("mimo_o", mimo_o))
+    if fused_norm:
+        grad_input_items.append(("outproj_norm_weight", outproj_norm_weight))
 
     if grad_output is None:
         grad_output = inputs["dout"]
@@ -799,6 +882,7 @@ def run_ref_backward_fp32(
         "dangles": grad_map["angles"],
         "dD": grad_map["dD"],
         "dz": grad_map.get("z"),
+        "dout_norm_weight": grad_map.get("outproj_norm_weight"),
     }
 
 
@@ -878,6 +962,92 @@ def test_mamba3_MIMO_chunk_ref_matches_step_ref() -> None:
         chunk_out,
         step_out,
         label="chunk_ref_vs_step_ref",
+        cfg=f"B={B}, S={S}, H={H}, P={P}, N={N}, R={R}, C={chunk_size}",
+        rel_tol=0.02,
+    )
+
+
+def test_mamba3_MIMO_chunk_ref_fused_norm_matches_step_ref() -> None:
+    # Lightweight deterministic ref-vs-ref consistency test for fused RMSNorm + gate.
+    B, S, H, G, P, N, R, chunk_size = 1, 128, 8, 1, 32, 64, 4, 16
+    dtype = torch.float32
+    device = "cpu"
+    torch.manual_seed(1)
+
+    q = torch.randn((B, S, R, G, N), device=device, dtype=dtype)
+    k = torch.randn((B, S, R, G, N), device=device, dtype=dtype)
+    v = torch.randn((B, S, H, P), device=device, dtype=dtype)
+
+    q_bias = torch.randn((H, R, N), device=device, dtype=dtype)
+    k_bias = torch.randn((H, R, N), device=device, dtype=dtype)
+    mimo_v = torch.rand((H, R, P), device=device, dtype=dtype)
+    mimo_o = torch.rand((H, R, P), device=device, dtype=dtype)
+    outproj_norm_weight = torch.randn((H, P), device=device, dtype=dtype)
+
+    z = torch.randn_like(v)
+    mimo_z = torch.rand_like(mimo_v)
+    D = torch.randn((H,), device=device, dtype=dtype)
+
+    angles = torch.rand((B, S, H, N // 2), device=device, dtype=dtype)
+    dt = F.softplus(-3.0 + torch.randn(B, H, S, device=device, dtype=torch.float32))
+    A_neg = -F.softplus(torch.randn((B, H, S), device=device, dtype=torch.float32))
+    A_neg = torch.clamp(A_neg, max=-1e-4)
+    ADT = A_neg * dt
+    trap = torch.rand(B, H, S, device=device, dtype=dtype) * 0.5
+
+    dA_cs = torch.cumsum(rearrange(ADT, "b h (n c) -> b h n c", c=chunk_size), dim=-1)
+    dA_cs_rev = dA_cs[..., -1:] - dA_cs
+    angles_prerotated = apply_angle_dt_reference(angles, dt.permute(0, 2, 1))
+
+    chunk_out, _, _ = mamba3_MIMO_chunk_ref(
+        q,
+        k,
+        v,
+        q_bias,
+        k_bias,
+        mimo_v,
+        mimo_o,
+        z,
+        mimo_z,
+        angles_prerotated,
+        dA_cs.view(B, H, S),
+        dA_cs_rev.view(B, H, S),
+        dt,
+        trap,
+        D,
+        chunk_size=chunk_size,
+        rotary_dim_divisor=2,
+        return_final_state=True,
+        dtype=dtype,
+        rotate_pairwise=True,
+        fused_norm=True,
+        outproj_norm_weight=outproj_norm_weight,
+    )
+
+    step_out, _ = mamba3_MIMO_step_ref(
+        q,
+        k,
+        v,
+        ADT,
+        dt,
+        trap,
+        q_bias,
+        k_bias,
+        angles,
+        mimo_v,
+        mimo_o,
+        D=D,
+        Z=z,
+        MIMO_Z=mimo_z,
+        fused_norm=True,
+        outproj_norm_weight=outproj_norm_weight,
+    )
+
+    assert chunk_out.shape == step_out.shape
+    assert_stable_rel(
+        chunk_out,
+        step_out,
+        label="chunk_ref_fused_norm_vs_step_ref",
         cfg=f"B={B}, S={S}, H={H}, P={P}, N={N}, R={R}, C={chunk_size}",
         rel_tol=0.02,
     )
@@ -1124,6 +1294,7 @@ def test_mamba_mimo_bwd_combined_relative_errors_lt_10pct(
         dangles,
         dD,
         dz,
+        dout_norm_weight,
     ) = mods.bwd.mamba_mimo_bwd_combined(
         inputs["dout"],
         inputs["q"],
@@ -1147,6 +1318,7 @@ def test_mamba_mimo_bwd_combined_relative_errors_lt_10pct(
         FIXED_DTYPE,
         bb_threads=bb_threads,
     )
+    assert dout_norm_weight is None
 
     comparisons = {
         "dq": (dq, ref_grads["dq"]),
@@ -1212,6 +1384,7 @@ def test_mamba_mimo_bwd_combined_prereduce_relative_errors_lt_10pct(
         dangles,
         dD,
         dz,
+        dout_norm_weight,
     ) = mods.bwd.mamba_mimo_bwd_combined(
         dout_prereduce,
         inputs["q"],
@@ -1238,6 +1411,7 @@ def test_mamba_mimo_bwd_combined_prereduce_relative_errors_lt_10pct(
     assert dmimo_o is None
     assert dmimo_z is None
     assert dz is None
+    assert dout_norm_weight is None
 
     comparisons = {
         "dq_prereduce": (dq, ref_grads["dq"]),
@@ -1258,6 +1432,163 @@ def test_mamba_mimo_bwd_combined_prereduce_relative_errors_lt_10pct(
             ours,
             ref,
             label=name,
+            cfg=f"N={n}, P={p}, R={r}, chunk={chunk_size}, bb_threads={bb_threads}",
+        )
+
+
+@pytest.mark.parametrize("n,p,r,chunk_size,bb_threads", FUSED_NORM_CASE_GRID)
+def test_fused_norm_fwd_relative_error_lt_10pct(
+    mods: SimpleNamespace, n: int, p: int, r: int, chunk_size: int, bb_threads: int
+) -> None:
+    del bb_threads
+    inputs = build_inputs(
+        mods=mods,
+        n=n,
+        p=p,
+        r=r,
+        chunk_size=chunk_size,
+        seed=7901 + n + p + r + chunk_size,
+    )
+
+    out_tilelang, _, _ = mods.fwd.mamba_mimo_forward(
+        inputs["q"],
+        inputs["k"],
+        inputs["v"],
+        inputs["q_bias"],
+        inputs["k_bias"],
+        inputs["mimo_v"],
+        inputs["mimo_o"],
+        inputs["z"],
+        inputs["D"],
+        inputs["mimo_z"],
+        inputs["angles"],
+        inputs["dA_cs"],
+        inputs["dA_cs_rev"],
+        inputs["dt"],
+        inputs["trap"],
+        inputs["segsum"],
+        chunk_size=chunk_size,
+        rotary_dim_divisor=inputs["rotary_dim_divisor"],
+        dtype=FIXED_DTYPE,
+        fuse_pregate_headwise_rms_norm=True,
+        outproj_norm_weight=inputs["outproj_norm_weight"],
+    )
+
+    out_ref_fp32, _, _ = mamba3_MIMO_chunk_ref(
+        inputs["q"].clone(),
+        inputs["k"].clone(),
+        inputs["v"].clone(),
+        inputs["q_bias"].clone(),
+        inputs["k_bias"].clone(),
+        inputs["mimo_v"].clone(),
+        inputs["mimo_o"].clone(),
+        inputs["z"].clone(),
+        inputs["mimo_z"].clone(),
+        inputs["angles"].clone(),
+        inputs["dA_cs"].clone(),
+        inputs["dA_cs_rev"].clone(),
+        inputs["dt"].clone(),
+        inputs["trap"].clone(),
+        inputs["D"].clone(),
+        chunk_size=chunk_size,
+        rotary_dim_divisor=inputs["rotary_dim_divisor"],
+        dtype=torch.float32,
+        fused_norm=True,
+        outproj_norm_weight=inputs["outproj_norm_weight"].clone(),
+    )
+
+    assert_stable_rel(
+        out_tilelang,
+        out_ref_fp32,
+        label="fused_norm_forward",
+        cfg=f"N={n}, P={p}, R={r}, chunk={chunk_size}",
+    )
+
+
+@pytest.mark.parametrize("n,p,r,chunk_size,bb_threads", FUSED_NORM_CASE_GRID)
+def test_fused_norm_bwd_relative_errors_lt_10pct(
+    mods: SimpleNamespace, n: int, p: int, r: int, chunk_size: int, bb_threads: int
+) -> None:
+    inputs = build_inputs(
+        mods=mods,
+        n=n,
+        p=p,
+        r=r,
+        chunk_size=chunk_size,
+        seed=7902 + n + p + r + chunk_size,
+    )
+
+    ref_grads = run_ref_backward_fp32(
+        mods,
+        inputs,
+        fused_norm=True,
+    )
+
+    (
+        dq,
+        dk,
+        dv,
+        dA,
+        ddt,
+        dtrap,
+        dq_bias,
+        dk_bias,
+        dmimo_v,
+        dmimo_z,
+        dmimo_o,
+        dangles,
+        dD,
+        dz,
+        dout_norm_weight,
+    ) = mods.bwd.mamba_mimo_bwd_combined(
+        inputs["dout"],
+        inputs["q"],
+        inputs["k"],
+        inputs["v"],
+        inputs["q_bias"],
+        inputs["k_bias"],
+        inputs["mimo_v"],
+        inputs["mimo_o"],
+        inputs["z"],
+        inputs["mimo_z"],
+        inputs["angles"],
+        inputs["dA_cs"],
+        inputs["dA_cs_rev"],
+        inputs["dt"],
+        inputs["trap"],
+        inputs["D"],
+        inputs["segsum"],
+        chunk_size,
+        inputs["rotary_dim_divisor"],
+        FIXED_DTYPE,
+        bb_threads=bb_threads,
+        fuse_pregate_headwise_rms_norm=True,
+        outproj_norm_weight=inputs["outproj_norm_weight"],
+    )
+
+    comparisons = {
+        "dq": (dq, ref_grads["dq"]),
+        "dk": (dk, ref_grads["dk"]),
+        "dv": (dv, ref_grads["dv"]),
+        "dA": (dA, ref_grads["dA"]),
+        "ddt": (ddt, ref_grads["ddt"]),
+        "dtrap": (dtrap, ref_grads["dtrap"]),
+        "dq_bias": (dq_bias, ref_grads["dq_bias"]),
+        "dk_bias": (dk_bias, ref_grads["dk_bias"]),
+        "dmimo_v": (dmimo_v, ref_grads["dmimo_v"]),
+        "dmimo_z": (dmimo_z, ref_grads["dmimo_z"]),
+        "dmimo_o": (dmimo_o, ref_grads["dmimo_o"]),
+        "dangles": (dangles, ref_grads["dangles"]),
+        "dD": (dD, ref_grads["dD"]),
+        "dz": (dz, ref_grads["dz"]),
+        "dout_norm_weight": (dout_norm_weight, ref_grads["dout_norm_weight"]),
+    }
+
+    for name, (ours, ref) in comparisons.items():
+        assert_stable_rel(
+            ours,
+            ref,
+            label=f"fused_norm_bwd_{name}",
             cfg=f"N={n}, P={p}, R={r}, chunk={chunk_size}, bb_threads={bb_threads}",
         )
 
@@ -1493,6 +1824,7 @@ def build_inputs_varlen(
     )
     trap = torch.rand((b, h, s_total), device="cuda", dtype=dtype)
     dout = torch.randn_like(v)
+    outproj_norm_weight = torch.randn((h, p), device="cuda", dtype=torch.float32)
 
     return {
         "q": q, "k": k, "v": v,
@@ -1503,6 +1835,7 @@ def build_inputs_varlen(
         "dA": dA,
         "dA_cs": dA_cs, "dA_cs_rev": dA_cs_rev,
         "segsum": segsum, "trap": trap, "dout": dout,
+        "outproj_norm_weight": outproj_norm_weight,
         "cu_seqlens": cu_seqlens, "seqlens": seqlens,
         "chunk_size": chunk_size,
         "rotary_dim_divisor": rotary_dim_divisor,
@@ -1514,6 +1847,8 @@ def run_ref_backward_fp32_varlen(
     *,
     contract_mimo_out: bool = True,
     grad_output: Optional[Tensor] = None,
+    fused_norm: bool = False,
+    outproj_norm_eps: float = 1e-5,
 ) -> dict:
     """Per-sequence fp32 autograd reference for the varlen backward pass.
 
@@ -1534,6 +1869,9 @@ def run_ref_backward_fp32_varlen(
     mimo_v_base = inputs["mimo_v"].detach().to(ref_dtype)
     mimo_o_base = (
         inputs["mimo_o"].detach().to(ref_dtype) if contract_mimo_out else None
+    )
+    outproj_norm_weight_base = (
+        inputs["outproj_norm_weight"].detach().to(ref_dtype) if fused_norm else None
     )
     z_base = (
         inputs["z"].detach().to(ref_dtype) if inputs["z"] is not None else None
@@ -1561,6 +1899,9 @@ def run_ref_backward_fp32_varlen(
     dk_bias = torch.zeros_like(k_bias_base)
     dmimo_v = torch.zeros_like(mimo_v_base)
     dmimo_o = torch.zeros_like(mimo_o_base) if contract_mimo_out else None
+    dout_norm_weight = (
+        torch.zeros_like(outproj_norm_weight_base) if fused_norm else None
+    )
     dz = torch.zeros_like(v_base) if z_base is not None else None
     dmimo_z = torch.zeros_like(mimo_z_base) if mimo_z_base is not None else None
     dD = torch.zeros_like(d_base)
@@ -1585,6 +1926,10 @@ def run_ref_backward_fp32_varlen(
         kb_i       = k_bias_base.clone().requires_grad_()
         mv_i       = mimo_v_base.clone().requires_grad_()
         mo_i       = mimo_o_base.clone().requires_grad_() if contract_mimo_out else None
+        onw_i      = (
+            outproj_norm_weight_base.clone().requires_grad_()
+            if fused_norm else None
+        )
         z_i_leaf   = (
             z_base[:, start:end].detach().requires_grad_()
             if z_base is not None else None
@@ -1607,6 +1952,9 @@ def run_ref_backward_fp32_varlen(
             rotary_dim_divisor=inputs["rotary_dim_divisor"],
             dtype=ref_dtype,
             contract_mimo_out=contract_mimo_out,
+            fused_norm=fused_norm,
+            outproj_norm_weight=onw_i,
+            outproj_norm_eps=outproj_norm_eps,
         )
         # out_i is already [:, :seq_len] — mamba3_MIMO_chunk_ref slices internally.
 
@@ -1623,6 +1971,8 @@ def run_ref_backward_fp32_varlen(
             grad_input_items.append(("mimo_z", mz_i))
         if contract_mimo_out:
             grad_input_items.append(("mimo_o", mo_i))
+        if fused_norm:
+            grad_input_items.append(("outproj_norm_weight", onw_i))
 
         grads = torch.autograd.grad(
             outputs=out_i,
@@ -1651,6 +2001,8 @@ def run_ref_backward_fp32_varlen(
             dmimo_z += gmap["mimo_z"]
         if dmimo_o is not None and "mimo_o" in gmap:
             dmimo_o += gmap["mimo_o"]
+        if dout_norm_weight is not None and "outproj_norm_weight" in gmap:
+            dout_norm_weight += gmap["outproj_norm_weight"]
 
     # Convert per-sequence ddA_cs / ddA_cs_rev -> ddA using the same formula
     # as grads_to_dA, applied independently to each sequence.
@@ -1673,6 +2025,7 @@ def run_ref_backward_fp32_varlen(
         "dmimo_v": dmimo_v, "dmimo_o": dmimo_o,
         "dmimo_z": dmimo_z, "dangles": dangles,
         "dD": dD, "dz": dz,
+        "dout_norm_weight": dout_norm_weight,
     }
 
 
@@ -1819,6 +2172,7 @@ def test_bwd_varlen_relative_errors_lt_10pct(
         dq_bias, dk_bias,
         dmimo_v, dmimo_z, dmimo_o,
         dangles, dD, dz,
+        dout_norm_weight,
     ) = mods_varlen.bwd_varlen.mamba_mimo_bwd_combined_varlen(
         inputs["dout"],
         inputs["q"], inputs["k"], inputs["v"],
@@ -1834,6 +2188,7 @@ def test_bwd_varlen_relative_errors_lt_10pct(
         cu_seqlens=inputs["cu_seqlens"],
         bb_threads=bb_threads,
     )
+    assert dout_norm_weight is None
 
     comparisons = {
         "dq": (dq, ref_grads["dq"]),
@@ -1857,6 +2212,123 @@ def test_bwd_varlen_relative_errors_lt_10pct(
         if ours is None and ref is None:
             continue
         assert_stable_rel(ours, ref, label=f"bwd_varlen_{name}", cfg=cfg)
+
+
+@pytest.mark.parametrize("n,p,r,chunk_size,bb_threads", FUSED_NORM_CASE_GRID)
+def test_fused_norm_fwd_varlen_relative_error_lt_10pct(
+    mods_varlen: SimpleNamespace,
+    n: int, p: int, r: int, chunk_size: int, bb_threads: int,
+) -> None:
+    del bb_threads
+    seqlens = _varlen_seqlens(chunk_size)
+    inputs = build_inputs_varlen(
+        mods_varlen=mods_varlen,
+        n=n, p=p, r=r, chunk_size=chunk_size, seqlens=seqlens,
+        seed=9101 + n + p + r + chunk_size,
+    )
+
+    out_tilelang, _, _ = mods_varlen.fwd_varlen.mamba_mimo_forward_varlen(
+        inputs["q"], inputs["k"], inputs["v"],
+        inputs["q_bias"], inputs["k_bias"],
+        inputs["mimo_v"], inputs["mimo_o"],
+        inputs["z"], inputs["D"], inputs["mimo_z"],
+        inputs["angles"],
+        inputs["dA_cs"], inputs["dA_cs_rev"],
+        inputs["dt"], inputs["trap"], inputs["segsum"],
+        chunk_size=chunk_size,
+        rotary_dim_divisor=inputs["rotary_dim_divisor"],
+        dtype=FIXED_DTYPE,
+        cu_seqlens=inputs["cu_seqlens"],
+        fuse_pregate_headwise_rms_norm=True,
+        outproj_norm_weight=inputs["outproj_norm_weight"],
+    )
+
+    out_ref_fp32, _, _ = mamba3_MIMO_chunk_ref(
+        inputs["q"].clone(), inputs["k"].clone(), inputs["v"].clone(),
+        inputs["q_bias"].clone(), inputs["k_bias"].clone(),
+        inputs["mimo_v"].clone(), inputs["mimo_o"].clone(),
+        inputs["z"].clone(), inputs["mimo_z"].clone(),
+        inputs["angles"].clone(),
+        inputs["dA_cs"].clone(), inputs["dA_cs_rev"].clone(),
+        inputs["dt"].clone(), inputs["trap"].clone(),
+        inputs["D"].clone(),
+        chunk_size=chunk_size,
+        rotary_dim_divisor=inputs["rotary_dim_divisor"],
+        dtype=torch.float32,
+        cu_seqlens=inputs["cu_seqlens"],
+        fused_norm=True,
+        outproj_norm_weight=inputs["outproj_norm_weight"].clone(),
+    )
+
+    assert_stable_rel(
+        out_tilelang, out_ref_fp32,
+        label="fused_norm_fwd_varlen",
+        cfg=f"N={n}, P={p}, R={r}, chunk={chunk_size}, seqlens={seqlens}",
+    )
+
+
+@pytest.mark.parametrize("n,p,r,chunk_size,bb_threads", FUSED_NORM_CASE_GRID)
+def test_fused_norm_bwd_varlen_relative_errors_lt_10pct(
+    mods_varlen: SimpleNamespace,
+    n: int, p: int, r: int, chunk_size: int, bb_threads: int,
+) -> None:
+    seqlens = _varlen_seqlens(chunk_size)
+    inputs = build_inputs_varlen(
+        mods_varlen=mods_varlen,
+        n=n, p=p, r=r, chunk_size=chunk_size, seqlens=seqlens,
+        seed=9102 + n + p + r + chunk_size,
+    )
+
+    ref_grads = run_ref_backward_fp32_varlen(
+        inputs,
+        fused_norm=True,
+    )
+
+    (
+        dq, dk, dv, dA, ddt, dtrap,
+        dq_bias, dk_bias,
+        dmimo_v, dmimo_z, dmimo_o,
+        dangles, dD, dz,
+        dout_norm_weight,
+    ) = mods_varlen.bwd_varlen.mamba_mimo_bwd_combined_varlen(
+        inputs["dout"],
+        inputs["q"], inputs["k"], inputs["v"],
+        inputs["q_bias"], inputs["k_bias"],
+        inputs["mimo_v"], inputs["mimo_o"],
+        inputs["z"], inputs["mimo_z"],
+        inputs["angles"],
+        inputs["dA_cs"], inputs["dA_cs_rev"],
+        inputs["dt"], inputs["trap"],
+        inputs["D"], inputs["segsum"],
+        chunk_size, inputs["rotary_dim_divisor"],
+        FIXED_DTYPE,
+        cu_seqlens=inputs["cu_seqlens"],
+        bb_threads=bb_threads,
+        fuse_pregate_headwise_rms_norm=True,
+        outproj_norm_weight=inputs["outproj_norm_weight"],
+    )
+
+    comparisons = {
+        "dq": (dq, ref_grads["dq"]),
+        "dk": (dk, ref_grads["dk"]),
+        "dv": (dv, ref_grads["dv"]),
+        "dA": (dA, ref_grads["dA"]),
+        "ddt": (ddt, ref_grads["ddt"]),
+        "dtrap": (dtrap, ref_grads["dtrap"]),
+        "dq_bias": (dq_bias, ref_grads["dq_bias"]),
+        "dk_bias": (dk_bias, ref_grads["dk_bias"]),
+        "dmimo_v": (dmimo_v, ref_grads["dmimo_v"]),
+        "dmimo_z": (dmimo_z, ref_grads["dmimo_z"]),
+        "dmimo_o": (dmimo_o, ref_grads["dmimo_o"]),
+        "dangles": (dangles, ref_grads["dangles"]),
+        "dD": (dD, ref_grads["dD"]),
+        "dz": (dz, ref_grads["dz"]),
+        "dout_norm_weight": (dout_norm_weight, ref_grads["dout_norm_weight"]),
+    }
+
+    cfg = f"N={n}, P={p}, R={r}, chunk={chunk_size}, seqlens={seqlens}, bb_threads={bb_threads}"
+    for name, (ours, ref) in comparisons.items():
+        assert_stable_rel(ours, ref, label=f"fused_norm_bwd_varlen_{name}", cfg=cfg)
 
 
 @pytest.mark.parametrize("n,p,r,chunk_size,bb_threads", VARLEN_CASE_GRID)
@@ -1888,6 +2360,7 @@ def test_bwd_varlen_prereduce_relative_errors_lt_10pct(
         dq_bias, dk_bias,
         dmimo_v, dmimo_z, dmimo_o,
         dangles, dD, dz,
+        dout_norm_weight,
     ) = mods_varlen.bwd_varlen.mamba_mimo_bwd_combined_varlen(
         dout_prereduce,
         inputs["q"], inputs["k"], inputs["v"],
@@ -1907,6 +2380,7 @@ def test_bwd_varlen_prereduce_relative_errors_lt_10pct(
     assert dmimo_o is None
     assert dmimo_z is None
     assert dz is None
+    assert dout_norm_weight is None
 
     comparisons = {
         "dq": (dq, ref_grads["dq"]),

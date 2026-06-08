@@ -66,11 +66,13 @@ def mamba_mimo_fwd(
     hasZ,
     hasD,
     reduceO,
+    fuse_pregate_headwise_rms_norm=False,
     isVarlen: bool = True,
     return_final_state=False,
     chunk_size: int = 16,
     rotary_dim_divisor = 4,
     dtype: str = 'bfloat16',
+    outproj_norm_eps: float = 1e-5,
     threads: int = 128,
     num_stages: int = 0,
 ) -> torch.Tensor:
@@ -87,6 +89,17 @@ def mamba_mimo_fwd(
     * SEGSUM shape becomes ``[B, H, max_nchunks, C, C]``.
     * FINAL_STATE shape is ``(NS, H, N, P)`` (vs. ``(B, H, N, P)``).
     * FINAL_K shape is ``(NS, R, H, N)`` (vs. ``(B, R, H, N)``).
+
+    Output modes match the dense kernel:
+
+    * ``reduceO=False`` writes the full per-rank MIMO output
+      ``raw_y`` with shape ``[B, S, R, H, P]``.
+    * ``reduceO=True`` applies the MIMO output projection inside the kernel.
+    * ``reduceO=True`` with ``fuse_pregate_headwise_rms_norm=True`` applies
+      ``RMSNorm(raw_y) * silu(z_r)`` per valid token/rank/head before the
+      MIMO output projection.  The RMS reduction is over headdim ``P``, not
+      sequence lanes, so chunk-tail padding used for varlen execution does not
+      enter the RMS mean.
 
     When NS == 1 (or cu_seqlens is None) the kernel degenerates to the
     non-varlen behaviour.
@@ -125,6 +138,7 @@ def mamba_mimo_fwd(
             K_BIAS: T.Tensor([H, R, N], T.float32),  # type: ignore
             MIMO_V: T.Tensor([H, R, P], T.float32), # type: ignore
             MIMO_O: T.Tensor([H, R, P], T.float32), # type: ignore
+            OUT_NORM_WEIGHT: T.Tensor([H, P], T.float32), # type: ignore
             Z: T.Tensor([B, S, H, P], dtype),  # type: ignore
             D: T.Tensor([H], T.float32),  # type: ignore
             MIMO_Z: T.Tensor([H, R, P], T.float32), # type: ignore
@@ -154,17 +168,31 @@ def mamba_mimo_fwd(
               ``start_chunk_ind + i`` where
               ``start_chunk_ind = (CU_SEQLENS[i_ns] // chunk_size) + i_ns``.
 
+            Output handling is the same as the dense MIMO kernel:
+            - ``reduceO=False`` writes per-rank ``raw_y`` to
+              ``[B, S, R, H, P]``.
+            - ``reduceO=True`` applies ``MIMO_O`` in-kernel and writes
+              ``[B, S, H, P]``.
+            - ``reduceO=True`` and ``fuse_pregate_headwise_rms_norm=True``
+              applies ``RMSNorm(raw_y) * silu(z_r)`` in-kernel before
+              ``MIMO_O``.  The RMS mean is over ``P`` for each valid token,
+              rank, and head; varlen tail padding is only used to execute
+              full chunks and does not contribute sequence elements to the
+              RMS reduction.
+
         Inputs:
             - Activations: Q, K, V.
             - Projection parameters/biases: MIMO_V (Psi), MIMO_O (Phi),
-              optional MIMO_Z (Zeta), ANGLES, and Q_BIAS/K_BIAS.
+              optional MIMO_Z (Zeta), optional OUT_NORM_WEIGHT, ANGLES, and
+              Q_BIAS/K_BIAS.
             - Optional modifiers: Z and D.
             - Discretization tensors: DA_CS, DA_CS_REV, DT, TRAP, and SEGSUM.
             - CU_SEQLENS: int32 prefix-sum of per-sequence lengths, shape
               ``[NS+1]``.
 
         Outputs:
-            - O: fused forward output activations.
+            - O: forward output activations. Shape is ``[B, S, H, P]`` when
+              ``reduceO`` is true, otherwise ``[B, S, R, H, P]``.
             - FINAL_STATE: final recurrent states per sequence (shape
               ``[NS, H, N, P]`` when NS > 1; written only when
               return_final_state is True).
@@ -178,7 +206,7 @@ def mamba_mimo_fwd(
             - Trap: convex-combination modulator used in
               exponential-trapezoidal discretization.
         """
-        
+
         with T.Kernel(H, NS, B, threads=threads) as (i_h, i_ns, i_b):
             # --- Kernel Setup ---
             # GQA support: map V head to Q/K head
@@ -272,8 +300,8 @@ def mamba_mimo_fwd(
                     T.copy(DT[i_b, i_h, chunk_start+1: chunk_start+chunk_size+1], dt_shifted_frag)
                 shifted_gamma_frag = T.alloc_fragment([chunk_size], dtype)
                 for cs in T.Parallel(chunk_size):
-                    shifted_gamma_frag[cs] = T.if_then_else(chunk_start + cs < (seq_end - 1), 
-                                                            dt_shifted_frag[cs] * T.sigmoid(-trap_shifted_frag[cs]), 
+                    shifted_gamma_frag[cs] = T.if_then_else(chunk_start + cs < (seq_end - 1),
+                                                            dt_shifted_frag[cs] * T.sigmoid(-trap_shifted_frag[cs]),
                                                             0.0)
                 shifted_gamma_shared = T.alloc_shared([chunk_size], dtype)
                 T.copy(shifted_gamma_frag, shifted_gamma_shared)
@@ -361,7 +389,7 @@ def mamba_mimo_fwd(
                 for cs, r, n in T.Parallel(chunk_size, R, N//rotary_dim_divisor):
                     k_first_half_frag[cs, r, n] = k_shared[cs*R + r, n]
                     k_second_half_frag[cs, r, n] = k_shared[cs*R + r, N//2 + n]
-                
+
                 for cs, r, n in T.Parallel(chunk_size, R, N//rotary_dim_divisor):
                     k_shared[cs*R + r, n] = T.cos(angles_frag[cs, n]) * k_first_half_frag[cs, r, n] - T.sin(angles_frag[cs, n]) * k_second_half_frag[cs, r, n]
                     k_shared[cs*R + r, N//2 + n] = T.sin(angles_frag[cs, n]) * k_first_half_frag[cs, r, n] + T.cos(angles_frag[cs, n]) * k_second_half_frag[cs, r, n]
@@ -393,7 +421,7 @@ def mamba_mimo_fwd(
                 for csr_i, csr_j in T.Parallel(fused_chunk_size, fused_chunk_size):
                     qk_intrachunk_masked_frag[csr_i, csr_j] = T.if_then_else(
                                                 csr_i//R > csr_j//R, # NOTE: we do indeed want to exclude the diagonal
-                                                qk_intrachunk_frag[csr_i, csr_j] 
+                                                qk_intrachunk_frag[csr_i, csr_j]
                                                 * T.exp(SEGSUM[i_b, i_h, start_chunk_ind+i, csr_i//R, csr_j//R]),
                                                 0.0
                                             )
@@ -419,7 +447,7 @@ def mamba_mimo_fwd(
                 T.clear(qkdot_psiv_frag)
                 for cs, r_out, p in T.Parallel(chunk_size, R, P):
                     for r_in in T.serial(R):
-                        qkdot_psiv_frag[cs, r_out, p] += qk_dot_full_shared[cs * R + r_out, cs * R + r_in] * PsiV_shared[cs * R + r_in, p]                    
+                        qkdot_psiv_frag[cs, r_out, p] += qk_dot_full_shared[cs * R + r_out, cs * R + r_in] * PsiV_shared[cs * R + r_in, p]
                     qkdot_psiv_frag[cs, r_out, p] *= gamma_frag[cs] # Apply shifted gamma
 
                 if hasD:
@@ -436,7 +464,27 @@ def mamba_mimo_fwd(
 
                 # --- Optional Z Gating + Down-Projection ---
                 if reduceO:
-                    if hasZ:
+                    if fuse_pregate_headwise_rms_norm:
+                        o_sq_frag = T.alloc_fragment([chunk_size, R, P], T.float32)
+                        for cs, r, p in T.Parallel(chunk_size, R, P):
+                            o_sq_frag[cs, r, p] = (
+                                o_mimo_accum_frag[cs * R + r, p]
+                                * o_mimo_accum_frag[cs * R + r, p]
+                            )
+                        o_rstd_frag = T.alloc_fragment([chunk_size, R], T.float32)
+                        T.reduce_sum(o_sq_frag, o_rstd_frag, dim=-1, clear=True)
+                        for cs, r in T.Parallel(chunk_size, R):
+                            o_rstd_frag[cs, r] = 1.0 / T.sqrt(
+                                o_rstd_frag[cs, r] / P + outproj_norm_eps
+                            )
+                        z_frag = T.alloc_fragment([chunk_size, P], dtype)
+                        T.copy(Z[i_b, chunk_start:chunk_start+chunk_size, i_h, :], z_frag)
+                        z_expanded_frag = T.alloc_fragment([chunk_size, R, P], dtype)
+                        for cs, r, p in T.Parallel(chunk_size, R, P):
+                            # Apply SiLU to z_expanded_frag[cs, r, p]:
+                            o_gated = z_frag[cs, p] * MIMO_Z[i_h, r, p] * 0.5
+                            z_expanded_frag[cs, r, p] = o_gated * T.tanh(o_gated) + o_gated
+                    elif hasZ:
                         z_frag = T.alloc_fragment([chunk_size, P], dtype)
                         T.copy(Z[i_b, chunk_start:chunk_start+chunk_size, i_h, :], z_frag)
                         z_expanded_frag = T.alloc_fragment([chunk_size, R, P], dtype)
@@ -446,7 +494,15 @@ def mamba_mimo_fwd(
                             z_expanded_frag[cs, r, p] = o_gated * T.tanh(o_gated) + o_gated
 
                     lqk_PsiV_reshaped_frag = T.view(o_mimo_accum_frag, shape=[chunk_size, R, P])
-                    if hasZ:
+                    if fuse_pregate_headwise_rms_norm:
+                        for cs, r, p in T.Parallel(chunk_size, R, P):
+                            lqk_PsiV_reshaped_frag[cs, r, p] *= (
+                                o_rstd_frag[cs, r]
+                                * OUT_NORM_WEIGHT[i_h, p]
+                                * phi_frag_intrachunk[r, p]
+                                * z_expanded_frag[cs, r, p]
+                            )
+                    elif hasZ:
                         for cs, r, p in T.Parallel(chunk_size, R, P):
                             lqk_PsiV_reshaped_frag[cs, r, p] *= phi_frag_intrachunk[r, p] * z_expanded_frag[cs, r, p]
                     else:
@@ -510,23 +566,23 @@ def mamba_mimo_fwd(
                         k_state_frag[csr, n] = T.if_then_else(csr < tail_len * R, k_state_frag[csr, n], 0.0)
                 else:
                     T.copy(DA_CS[i_b, i_h, chunk_start+chunk_size-1], da_cs_sum)
-                
+
                 for n, p in T.Parallel(N, P):
                     states_frag[n, p] *= T.exp(da_cs_sum)
                 T.gemm(k_state_frag, PsiV_shared, states_frag, transpose_A=True, clear_accum=False)
-            
+
             # --- Save Last State (if applicable) ---
             if return_final_state:
                 if isVarlen:
                     T.copy(states_frag, FINAL_STATE[i_ns, i_h, :, :])
                 else:
                     T.copy(states_frag, FINAL_STATE[i_b, i_h, :, :])
-                
+
 
     return mamba_mimo_fwd_kernel
 
 
-def mamba_mimo_forward_varlen(q, k, v, 
+def mamba_mimo_forward_varlen(q, k, v,
                        q_bias, k_bias,
                        mimo_v, mimo_o,
                        z, D,
@@ -540,6 +596,9 @@ def mamba_mimo_forward_varlen(q, k, v,
                        chunk_size, rotary_dim_divisor, dtype,
                        cu_seqlens=None,
                        return_state=False,
+                       fuse_pregate_headwise_rms_norm=False,
+                       outproj_norm_weight=None,
+                       outproj_norm_eps=1e-5,
                        threads=128,
                        num_stages=0):
     """
@@ -572,6 +631,16 @@ def mamba_mimo_forward_varlen(q, k, v,
         cu_seqlens:    Optional int32 tensor of shape ``[NS+1]`` with
                        per-sequence token offsets.  None → dense mode.
         return_state:  If True, also return the final recurrent state and K.
+        fuse_pregate_headwise_rms_norm: If True, fuse headwise
+                       ``RMSNorm(raw_y) * silu(z_r)`` with MIMO down
+                       projection in the forward kernel.  Requires ``mimo_o``,
+                       ``z``, and ``mimo_z``.  Uses ``outproj_norm_weight`` when
+                       supplied, otherwise a unit RMSNorm weight.  The RMS
+                       reduction is over ``P`` and is unaffected by varlen
+                       chunk-tail padding.
+        outproj_norm_weight: Optional RMSNorm weight, shaped ``[H, P]`` or
+                       flattened to ``[H * P]``.
+        outproj_norm_eps: Epsilon for the fused RMSNorm path.
         threads:       Number of GPU threads per thread-block.
         num_stages:    Software-pipeline stages (0 = auto).
 
@@ -600,28 +669,55 @@ def mamba_mimo_forward_varlen(q, k, v,
         NS = 1
 
     reduceO = mimo_o is not None
-    kernel = mamba_mimo_fwd(B, H, G, 
-                            N, P, R, 
-                            z is not None, 
-                            D is not None, 
-                            reduceO,
-                            isVarlen=cu_seqlens is not None,
-                            return_final_state=return_state,
-                            chunk_size=chunk_size, 
-                            rotary_dim_divisor=rotary_dim_divisor, 
-                            dtype=tl_dtype,
-                            threads=threads,
-                            num_stages=num_stages)
+    if fuse_pregate_headwise_rms_norm:
+        if not reduceO:
+            raise ValueError("fuse_pregate_headwise_rms_norm=True requires mimo_o.")
+        if z is None or mimo_z is None:
+            raise ValueError("fuse_pregate_headwise_rms_norm=True requires z and mimo_z.")
+    kernel = mamba_mimo_fwd(B, H, G,
+                                       N, P, R,
+                                       z is not None,
+                                       D is not None,
+                                       reduceO,
+                                       fuse_pregate_headwise_rms_norm,
+                                       isVarlen=cu_seqlens is not None,
+                                       return_final_state=return_state,
+                                       chunk_size=chunk_size,
+                                       rotary_dim_divisor=rotary_dim_divisor,
+                                       dtype=tl_dtype,
+                                       outproj_norm_eps=outproj_norm_eps,
+                                       threads=threads,
+                                       num_stages=num_stages)
     # print(kernel.get_kernel_source()) # NOTE: prints compiled CUDA code
     if reduceO:
         o = torch.empty((B, S, H, P), device='cuda', dtype=dtype)
     else:
         o = torch.empty((B, S, R, H, P), device='cuda', dtype=dtype)
-    # Kernel always declares all tensor parameters; pass dummies for None args
-    mimo_o_arg = mimo_o if reduceO else torch.empty((H, R, P), device=q.device, dtype=torch.float32)
-    z_arg = z if z is not None else torch.empty((B, S, H, P), device=q.device, dtype=dtype)
-    D_arg = D if D is not None else torch.empty((H,), device=q.device, dtype=torch.float32)
-    mimo_z_arg = mimo_z if mimo_z is not None else torch.empty((H, R, P), device=q.device, dtype=torch.float32)
+    # TileLang accepts None for tensor arguments that are compile-time unused.
+    mimo_o_arg = mimo_o if reduceO else None
+    if not fuse_pregate_headwise_rms_norm:
+        outproj_norm_weight_arg = None
+    elif outproj_norm_weight is None:
+        outproj_norm_weight_arg = torch.ones((H, P), device=q.device, dtype=torch.float32)
+    else:
+        if outproj_norm_weight.ndim == 1:
+            if outproj_norm_weight.numel() != H * P:
+                raise ValueError(
+                    f"Expected flattened outproj_norm_weight to have {H * P} elements, "
+                    f"got {outproj_norm_weight.numel()}."
+                )
+            outproj_norm_weight_arg = outproj_norm_weight.reshape(H, P).contiguous()
+        elif outproj_norm_weight.shape == (H, P):
+            outproj_norm_weight_arg = outproj_norm_weight.contiguous()
+        else:
+            raise ValueError(
+                f"Expected outproj_norm_weight to have shape ({H}, {P}) or ({H * P},), "
+                f"got {tuple(outproj_norm_weight.shape)}."
+            )
+        outproj_norm_weight_arg = outproj_norm_weight_arg.to(device=q.device, dtype=torch.float32)
+    z_arg = z
+    D_arg = D
+    mimo_z_arg = mimo_z
 
     if cu_seqlens is not None:
         h = torch.empty((NS, H, N, P), device='cuda', dtype=torch.float32) if return_state else None
@@ -635,6 +731,7 @@ def mamba_mimo_forward_varlen(q, k, v,
             v, o,
             q_bias, k_bias,
             mimo_v, mimo_o_arg,
+            outproj_norm_weight_arg,
             z_arg, D_arg, mimo_z_arg,
             angles,
             dA_cs,
