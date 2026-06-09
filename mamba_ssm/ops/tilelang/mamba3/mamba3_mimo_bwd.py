@@ -1427,10 +1427,10 @@ def mamba_mimo_bwd_combined(
     else:
         dtype_str = dtype
     bwd_fwd_kernel = mamba_mimo_bwd_fwd(
-        T.dynamic("B"),
-        T.dynamic("S"),
-        T.dynamic("H"),
-        T.dynamic("G"),
+        B,
+        S,
+        H,
+        G,
         N, P, R,
         z is not None,
         D is not None,
@@ -1495,10 +1495,10 @@ def mamba_mimo_bwd_combined(
     bwd_bwd_hasZ = (z is not None) and not fuse_pregate_headwise_rms_norm
     bwd_bwd_packed_dout = fuse_pregate_headwise_rms_norm
     bwd_bwd_kernel = mamba_mimo_bwd_bwd(
-        T.dynamic("B"),
-        T.dynamic("S"),
-        T.dynamic("H"),
-        T.dynamic("G"),
+        B,
+        S,
+        H,
+        G,
         N, P, R,
         bwd_bwd_hasZ,
         D is not None,
