@@ -494,10 +494,10 @@ def mamba_mimo_forward(q, k, v,
             raise ValueError("fuse_pregate_headwise_rms_norm=True requires mimo_o.")
         if z is None or mimo_z is None:
             raise ValueError("fuse_pregate_headwise_rms_norm=True requires z and mimo_z.")
-    kernel = mamba_mimo_fwd(T.dynamic("B"),
-                            T.dynamic("S"), 
-                            T.dynamic("H"), 
-                            T.dynamic("G"), 
+    kernel = mamba_mimo_fwd(B,
+                            S,
+                            H,
+                            G,
                             N, P, R, 
                             z is not None, 
                             D is not None, 
