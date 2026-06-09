@@ -34,7 +34,7 @@ this_dir = os.path.dirname(os.path.abspath(__file__))
 
 PACKAGE_NAME = "mamba_ssm"
 
-BASE_WHEEL_URL = "https://github.com/state-spaces/mamba/releases/download/{tag_name}/{wheel_name}"
+BASE_WHEEL_URL = os.getenv("MAMBA_BASE_WHEEL_URL", "https://github.com/state-spaces/mamba/releases/download/{tag_name}/{wheel_name}")
 
 # FORCE_BUILD: Force a fresh build locally, instead of attempting to find prebuilt wheels
 # SKIP_CUDA_BUILD: Intended to allow CI to use a simple `python setup.py sdist` run to copy over raw files, without any cuda compilation
