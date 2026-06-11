@@ -18,7 +18,7 @@ from mamba_ssm.ops.triton.mamba3.utils import cos_approx, sin_approx, silu, tanh
     configs=[
         triton.Config({}, num_stages=s, num_warps=w)
         for s in [1, 2, 3]
-        for w in [2, 4, 8]
+        for w in [1, 2, 4, 8]
     ],
     key=[
         "HEADDIM_QK", "HEADDIM_V", "HAS_D", "HAS_Z",],
