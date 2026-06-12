@@ -16,11 +16,11 @@ classifiers = [
     "Operating System :: Unix"
 ]
 dependencies = [
-    "torch==2.12.0",
+    "torch",
     "tilelang==0.1.8",
     "apache-tvm-ffi<=0.1.9",
     "quack-kernels>=0.3.4",
-    "triton>=3.5.0",
+    "triton",
     "ninja",
     "einops",
     "transformers",
