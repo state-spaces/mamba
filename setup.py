@@ -397,7 +397,7 @@ setup(
         "packaging",
         "ninja",
         "einops",
-        "triton>=3.5.0",
+        "triton",
         "transformers",
         "tilelang==0.1.8",
         "apache-tvm-ffi<=0.1.9",
