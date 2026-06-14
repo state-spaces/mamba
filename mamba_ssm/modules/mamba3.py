@@ -7,16 +7,70 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from mamba_ssm.ops.triton.layernorm_gated import RMSNorm as RMSNormGated
+try:
+    from mamba_ssm.ops.triton.layernorm_gated import RMSNorm as RMSNormGated
+except ImportError:
+    RMSNormGated = None
 
 try:
     from mamba_ssm.ops.tilelang.mamba3.mamba3_mimo import mamba3_mimo as mamba3_mimo_combined
 except ImportError:
     mamba3_mimo_combined = None
 
-from mamba_ssm.ops.triton.mamba3.mamba3_siso_combined import mamba3_siso_combined
+try:
+    from mamba_ssm.ops.triton.mamba3.mamba3_siso_combined import mamba3_siso_combined
+except ImportError:
+    mamba3_siso_combined = None
 
-from mamba_ssm.ops.triton.mamba3.mamba3_mimo_rotary_step import apply_rotary_qk_inference_fwd
+try:
+    from mamba_ssm.ops.triton.mamba3.mamba3_mimo_rotary_step import apply_rotary_qk_inference_fwd
+except ImportError:
+    apply_rotary_qk_inference_fwd = None
+
+if RMSNormGated is None:
+    class RMSNormGated(nn.Module):
+        def __init__(self, dim, eps=1e-5, norm_before_gate=False, group_size=None, **kwargs):
+            super().__init__()
+            self.eps = eps
+            self.norm_before_gate = norm_before_gate
+            self.group_size = group_size
+            self.weight = nn.Parameter(torch.ones(dim))
+
+        def forward(self, x, z=None):
+            if z is not None:
+                gated = F.silu(z)
+                if self.norm_before_gate:
+                    if self.group_size is None:
+                        variance = x.pow(2).mean(-1, keepdim=True)
+                    else:
+                        orig_shape = x.shape
+                        x_reshaped = x.view(*orig_shape[:-1], -1, self.group_size)
+                        variance = x_reshaped.pow(2).mean(-1, keepdim=True)
+                        x_normed = x_reshaped * torch.rsqrt(variance + self.eps)
+                        x = x_normed.view(orig_shape)
+                    normed = x * self.weight
+                    return normed * gated
+                else:
+                    out = x * gated
+                    if self.group_size is None:
+                        variance = out.pow(2).mean(-1, keepdim=True)
+                    else:
+                        orig_shape = out.shape
+                        out_reshaped = out.view(*orig_shape[:-1], -1, self.group_size)
+                        variance = out_reshaped.pow(2).mean(-1, keepdim=True)
+                        out_normed = out_reshaped * torch.rsqrt(variance + self.eps)
+                        out = out_normed.view(orig_shape)
+                    return out * self.weight
+            else:
+                if self.group_size is None:
+                    variance = x.pow(2).mean(-1, keepdim=True)
+                else:
+                    orig_shape = x.shape
+                    x_reshaped = x.view(*orig_shape[:-1], -1, self.group_size)
+                    variance = x_reshaped.pow(2).mean(-1, keepdim=True)
+                    x_normed = x_reshaped * torch.rsqrt(variance + self.eps)
+                    x = x_normed.view(orig_shape)
+                return x * self.weight
 
 try:
     from mamba_ssm.ops.cute.mamba3.mamba3_step_fn import mamba3_step_fn
