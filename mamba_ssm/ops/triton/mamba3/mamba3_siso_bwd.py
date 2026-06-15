@@ -1786,4 +1786,3 @@ def _alloc_fn(size: int, alignment: int, stream: Optional[int]):
 
 
 triton.set_allocator(_alloc_fn)
-
