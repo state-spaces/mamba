@@ -1637,6 +1637,157 @@ def test_mamba_mimo_smoke_forward_backward(mods: SimpleNamespace) -> None:
         assert torch.isfinite(grad).all(), f"Non-finite gradient detected for {name}"
 
 
+def test_mamba3_mimo_initial_states_split_prefill_matches_full(mods: SimpleNamespace) -> None:
+    chunk_size = 16
+    split = 32
+    inputs = make_smoke_inputs(
+        batch=1,
+        seqlen=64,
+        mimo_rank=4,
+        nheads_qk=1,
+        nheads=8,
+        headdim_qk=128,
+        headdim_v=64,
+        chunk_size=chunk_size,
+        rotary_dim_divisor=FIXED_ROTARY_DIM_DIVISOR,
+        device="cuda",
+        dtype=FIXED_DTYPE,
+        seed=123,
+    )
+
+    def copied(t: Tensor) -> Tensor:
+        out = torch.empty(t.shape, device=t.device, dtype=t.dtype)
+        out.copy_(t)
+        return out
+
+    def sliced(start: int, end: int) -> dict:
+        out = dict(inputs)
+        for name in ("Q", "K", "V", "Angles", "Z"):
+            out[name] = copied(inputs[name][:, start:end])
+        for name in ("ADT", "DT", "Trap"):
+            out[name] = copied(inputs[name][:, :, start:end])
+        return out
+
+    with torch.no_grad():
+        full_out, full_angle, full_ssm, full_k, full_v = mods.top.mamba3_mimo(
+            **inputs, return_state=True
+        )
+        first_out, first_angle, first_ssm, first_k, first_v = mods.top.mamba3_mimo(
+            **sliced(0, split), return_state=True
+        )
+        second_out, final_angle, final_ssm, final_k, final_v = mods.top.mamba3_mimo(
+            **sliced(split, 64),
+            return_state=True,
+            Input_States=(first_angle, first_ssm, first_k, first_v),
+        )
+
+    split_out = torch.cat([first_out, second_out], dim=1)
+    cfg = f"B=1, S=64, split={split}, H=8, P=64, N=128, R=4, C={chunk_size}"
+    assert_stable_rel(split_out, full_out, label="initial_state_split_out", cfg=cfg)
+    assert_stable_rel(final_angle, full_angle, label="initial_state_split_angle", cfg=cfg)
+    assert_stable_rel(final_ssm, full_ssm, label="initial_state_split_ssm", cfg=cfg)
+    assert_stable_rel(final_k, full_k, label="initial_state_split_k", cfg=cfg)
+    assert_stable_rel(final_v, full_v, label="initial_state_split_v", cfg=cfg)
+
+
+def test_mamba3_mimo_varlen_initial_states_split_prefill_matches_full(mods: SimpleNamespace) -> None:
+    chunk_size = 16
+    seqlens = [31, 42, 47]
+    splits = [16, 18, 21]
+    suffix_lens = [seqlen - split for seqlen, split in zip(seqlens, splits)]
+    full_starts = [0]
+    for seqlen in seqlens[:-1]:
+        full_starts.append(full_starts[-1] + seqlen)
+    s_total = sum(seqlens)
+    inputs = make_smoke_inputs(
+        batch=1,
+        seqlen=s_total,
+        mimo_rank=4,
+        nheads_qk=1,
+        nheads=8,
+        headdim_qk=128,
+        headdim_v=64,
+        chunk_size=chunk_size,
+        rotary_dim_divisor=FIXED_ROTARY_DIM_DIVISOR,
+        device="cuda",
+        dtype=FIXED_DTYPE,
+        seed=321,
+    )
+
+    def cu_seqlens(lengths: list[int]) -> Tensor:
+        return torch.tensor(
+            [0] + list(torch.cumsum(torch.tensor(lengths, dtype=torch.int32), dim=0).tolist()),
+            device="cuda",
+            dtype=torch.int32,
+        )
+
+    def packed_spans(starts: list[int], ends: list[int]) -> dict:
+        out = dict(inputs)
+        for name in ("Q", "K", "V", "Angles", "Z"):
+            out[name] = torch.cat(
+                [inputs[name][:, start:end] for start, end in zip(starts, ends)],
+                dim=1,
+            )
+        for name in ("ADT", "DT", "Trap"):
+            out[name] = torch.cat(
+                [inputs[name][:, :, start:end] for start, end in zip(starts, ends)],
+                dim=2,
+            )
+        return out
+
+    full_cu = cu_seqlens(seqlens)
+    prefix_cu = cu_seqlens(splits)
+    suffix_cu = cu_seqlens(suffix_lens)
+    prefix_starts = full_starts
+    prefix_ends = [start + split for start, split in zip(full_starts, splits)]
+    suffix_starts = prefix_ends
+    suffix_ends = [start + seqlen for start, seqlen in zip(full_starts, seqlens)]
+    prefix_inputs = packed_spans(prefix_starts, prefix_ends)
+    suffix_inputs = packed_spans(suffix_starts, suffix_ends)
+
+    with torch.no_grad():
+        full_out, full_angle, full_ssm, full_k, full_v = mods.top.mamba3_mimo(
+            **inputs,
+            return_state=True,
+            cu_seqlens=full_cu,
+        )
+        prefix_out, prefix_angle, prefix_ssm, prefix_k, prefix_v = mods.top.mamba3_mimo(
+            **prefix_inputs,
+            return_state=True,
+            cu_seqlens=prefix_cu,
+        )
+        suffix_out, final_angle, final_ssm, final_k, final_v = mods.top.mamba3_mimo(
+            **suffix_inputs,
+            return_state=True,
+            cu_seqlens=suffix_cu,
+            Input_States=(prefix_angle, prefix_ssm, prefix_k, prefix_v),
+        )
+
+    combined_parts = []
+    prefix_offset = 0
+    suffix_offset = 0
+    for split, suffix_len in zip(splits, suffix_lens):
+        combined_parts.append(
+            torch.cat(
+                [
+                    prefix_out[:, prefix_offset:prefix_offset + split],
+                    suffix_out[:, suffix_offset:suffix_offset + suffix_len],
+                ],
+                dim=1,
+            )
+        )
+        prefix_offset += split
+        suffix_offset += suffix_len
+    split_out = torch.cat(combined_parts, dim=1)
+
+    cfg = f"seqlens={seqlens}, splits={splits}, H=8, P=64, N=128, R=4, C={chunk_size}"
+    assert_stable_rel(split_out, full_out, label="varlen_initial_state_split_out", cfg=cfg)
+    assert_stable_rel(final_angle, full_angle, label="varlen_initial_state_split_angle", cfg=cfg)
+    assert_stable_rel(final_ssm, full_ssm, label="varlen_initial_state_split_ssm", cfg=cfg)
+    assert_stable_rel(final_k, full_k, label="varlen_initial_state_split_k", cfg=cfg)
+    assert_stable_rel(final_v, full_v, label="varlen_initial_state_split_v", cfg=cfg)
+
+
 def test_mamba_mimo_smoke_forward_backward_varlen(mods: SimpleNamespace) -> None:
     """Smoke test for the varlen forward+backward path through ``mamba3_mimo``.
 

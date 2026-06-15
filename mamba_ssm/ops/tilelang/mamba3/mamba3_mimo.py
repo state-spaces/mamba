@@ -48,6 +48,10 @@ class _Mamba3Function(torch.autograd.Function):
         Angles: Tensor,
         D: Tensor,
         Z: Tensor,
+        Input_Angle_State: Optional[Tensor],
+        Input_SSM_State: Optional[Tensor],
+        Input_K_State: Optional[Tensor],
+        Input_V_State: Optional[Tensor],
         chunk_size: int,
         rotary_dim_divisor: int,
         dtype: torch.dtype,
@@ -62,10 +66,26 @@ class _Mamba3Function(torch.autograd.Function):
         ctx.dtype = dtype
         ctx.fuse_pregate_headwise_rms_norm = fuse_pregate_headwise_rms_norm
         ctx.outproj_norm_eps = outproj_norm_eps
-        (Q, K, V, ADT, DT, Trap, Q_bias, K_bias, MIMO_V, MIMO_Z, MIMO_Out, Out_Norm_Weight, Angles, D, Z) = tuple(
+        ctx.has_input_state = Input_SSM_State is not None
+        all_states_present = (
+            Input_Angle_State is not None
+            and Input_SSM_State is not None
+            and Input_K_State is not None
+            and Input_V_State is not None
+        )
+        all_states_absent = (
+            Input_Angle_State is None
+            and Input_SSM_State is None
+            and Input_K_State is None
+            and Input_V_State is None
+        )
+        assert all_states_present or all_states_absent, "Input states must be provided together or all be None."
+        (Q, K, V, ADT, DT, Trap, Q_bias, K_bias, MIMO_V, MIMO_Z, MIMO_Out, Out_Norm_Weight, Angles, D, Z,
+            Input_Angle_State, Input_SSM_State, Input_K_State, Input_V_State) = tuple(
             t.contiguous() if t is not None else None
             for t in (
                 Q, K, V, ADT, DT, Trap, Q_bias, K_bias, MIMO_V, MIMO_Z, MIMO_Out, Out_Norm_Weight, Angles, D, Z,
+                Input_Angle_State, Input_SSM_State, Input_K_State, Input_V_State,
             )
         )
         # Kernels require cu_seqlens as int32; torch.cumsum promotes int32→int64 on CUDA
@@ -75,6 +95,7 @@ class _Mamba3Function(torch.autograd.Function):
         # Compute cumulative angles (varlen-aware)
         Angles_Cumsum, angle_output_state = angle_dt_fwd(
             Angles, DT,
+            init_state=Input_Angle_State,
             chunk_size=chunk_size,
             return_output_state=True,
             cu_seqlens=cu_seqlens,
@@ -89,6 +110,7 @@ class _Mamba3Function(torch.autograd.Function):
                 Z, D, MIMO_Z, Angles_Cumsum,
                 DA_CS, DA_CS_REV, DT, Trap, Segsum,
                 cu_seqlens=cu_seqlens,
+                initial_states=(Input_SSM_State, Input_K_State, Input_V_State) if all_states_present else None,
                 return_state=return_state,
                 chunk_size=chunk_size, rotary_dim_divisor=rotary_dim_divisor,
                 dtype=dtype,
@@ -103,6 +125,7 @@ class _Mamba3Function(torch.autograd.Function):
                 Q, K, V, Q_bias, K_bias, MIMO_V, MIMO_Out,
                 Z, D, MIMO_Z, Angles_Cumsum,
                 DA_CS, DA_CS_REV, DT, Trap, Segsum,
+                initial_states=(Input_SSM_State, Input_K_State, Input_V_State) if all_states_present else None,
                 return_state=return_state,
                 chunk_size=chunk_size, rotary_dim_divisor=rotary_dim_divisor,
                 dtype=dtype,
@@ -124,7 +147,14 @@ class _Mamba3Function(torch.autograd.Function):
         else:
             Final_SSM_State = Final_SSM_State.permute(0, 1, 3, 2).contiguous().detach()
             Final_K = Final_K.contiguous().detach()
-            Final_V = V[:, -1, :, :].contiguous().detach()
+            if cu_seqlens is None:
+                Final_V = torch.empty((V.shape[0], V.shape[2], V.shape[3]), device=V.device, dtype=V.dtype)
+                Final_V.copy_(V[:, -1, :, :])
+            else:
+                final_v_indices = cu_seqlens[1:].to(torch.long) - 1
+                Final_V = torch.empty((final_v_indices.shape[0], V.shape[2], V.shape[3]), device=V.device, dtype=V.dtype)
+                Final_V.copy_(V[0, final_v_indices, :, :])
+            Final_V = Final_V.detach()
             ctx.mark_non_differentiable(Final_Angle, Final_SSM_State, Final_K, Final_V)
             return Out, Final_Angle, Final_SSM_State, Final_K, Final_V
     
@@ -136,6 +166,11 @@ class _Mamba3Function(torch.autograd.Function):
             raise RuntimeError(
                 "Backward called but forward ran without gradient tracking. "
                 "Ensure inputs require grad or run under torch.enable_grad()."
+            )
+        if ctx.has_input_state:
+            raise NotImplementedError(
+                "Mamba-3 MIMO backward with Input_States is not implemented; "
+                "use input states only for inference/prefill."
             )
         dout = dout.contiguous()
 
@@ -236,6 +271,7 @@ class _Mamba3Function(torch.autograd.Function):
             dAngles,
             dD,
             dZ,
+            None, None, None, None,
             None, None, None, None, None, None, None,
         )
 
@@ -264,6 +300,7 @@ def mamba3_mimo(
     dtype: torch.dtype,
     return_state: bool = False,
     cu_seqlens: Optional[Tensor] = None,
+    Input_States: Optional[Tuple[Tensor, Tensor, Tensor, Tensor]] = None,
     fuse_pregate_headwise_rms_norm: bool = False,
     outproj_norm_weight: Optional[Tensor] = None,
     outproj_norm_eps: float = 1e-5,
@@ -289,6 +326,10 @@ def mamba3_mimo(
         rotary_dim_divisor: Divisor for rotary embedding dimensions (default: 4, meaning angles have 1/4 of headdim_qk)
         dtype: Data type for lower-precision computation (e.g., torch.bfloat16)
         return_state: Whether to return final state for autoregressive decoding (default: False)
+        Input_States: Optional tuple of initial states (angle, ssm, k, v). Dense shapes are
+         (batch, nheads, angle_dim), (batch, nheads, headdim_v, headdim_qk),
+         (batch, mimo_rank, nheads, headdim_qk), and (batch, nheads, headdim_v).
+         Varlen mode uses num_sequences as the leading dimension.
         cu_seqlens: Optional tensor of cumulative sequence lengths for variable-length sequences. 
          If provided, should be a tensor of shape (num_seq + 1,) where cu_seqlens[i] is 
          the cumulative sequence length up to sequence i. This is used for efficient processing of 
@@ -324,6 +365,25 @@ def mamba3_mimo(
     assert nheads % nheads_qk == 0, f"nheads ({nheads}) must be divisible by nheads_qk ({nheads_qk})"
     assert headdim_qk % 2 == 0, f"headdim_qk ({headdim_qk}) must be even for rotary embeddings"
     assert rotary_dim_divisor in [2, 4], f"currently only supports rotary embedding on entire or half of headdim_qk"
+    num_sequences = cu_seqlens.shape[0] - 1 if cu_seqlens is not None else batch
+    if Input_States is None:
+        Input_Angle_State, Input_SSM_State, Input_K_State, Input_V_State = None, None, None, None
+    else:
+        assert len(Input_States) == 4, "Input_States must be a tuple of (angle_state, ssm_state, k_state, v_state)"
+        Input_Angle_State, Input_SSM_State, Input_K_State, Input_V_State = Input_States
+        angle_dim = Angles.shape[-1]
+        assert Input_Angle_State.shape == (num_sequences, nheads, angle_dim), (
+            f"Input angle state shape mismatch: expected {(num_sequences, nheads, angle_dim)}, got {Input_Angle_State.shape}"
+        )
+        assert Input_SSM_State.shape == (num_sequences, nheads, headdim_v, headdim_qk), (
+            f"Input SSM state shape mismatch: expected {(num_sequences, nheads, headdim_v, headdim_qk)}, got {Input_SSM_State.shape}"
+        )
+        assert Input_K_State.shape == (num_sequences, mimo_rank, nheads, headdim_qk), (
+            f"Input K state shape mismatch: expected {(num_sequences, mimo_rank, nheads, headdim_qk)}, got {Input_K_State.shape}"
+        )
+        assert Input_V_State.shape == (num_sequences, nheads, headdim_v), (
+            f"Input V state shape mismatch: expected {(num_sequences, nheads, headdim_v)}, got {Input_V_State.shape}"
+        )
     # NOTE: the following (headdim_qk, headdim_v) values currently can result in compilation errors: (16, 32), (256, 128) 
     if headdim_qk not in [16, 32, 64, 128, 256]:
         print(f"WARNING: The value headdim_qk={headdim_qk} has not been tested. " +\
@@ -354,6 +414,10 @@ def mamba3_mimo(
         Angles,
         D,
         Z,
+        Input_Angle_State,
+        Input_SSM_State,
+        Input_K_State,
+        Input_V_State,
         chunk_size,
         rotary_dim_divisor,
         dtype,

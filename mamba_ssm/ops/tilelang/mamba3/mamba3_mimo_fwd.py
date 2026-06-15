@@ -48,6 +48,7 @@ def mamba_mimo_fwd(
     reduceO,
     fuse_pregate_headwise_rms_norm=False,
     return_final_state=False,
+    has_initial_state=False,
     chunk_size: int = 16,
     rotary_dim_divisor = 4,
     dtype: str = 'bfloat16',
@@ -61,6 +62,9 @@ def mamba_mimo_fwd(
     nchunks = tilelang.cdiv(S, chunk_size)
     tail_len = S % chunk_size
     fused_chunk_size = chunk_size * R
+    Init_SSM_State_shape = (B, H, P, N)
+    Init_K_State_shape = (B, R, H, N)
+    Init_V_State_shape = (B, H, P)
 
     if reduceO:
         O_shape = (B, S, H, P)
@@ -88,6 +92,9 @@ def mamba_mimo_fwd(
             DT: T.Tensor([B, H, S], T.float32), # type: ignore
             TRAP: T.Tensor([B, H, S], dtype), # type: ignore
             SEGSUM: T.Tensor([B, H, nchunks, chunk_size, chunk_size], T.float32), # type: ignore
+            INIT_SSM_STATE: T.Tensor(Init_SSM_State_shape, T.float32),  # type: ignore
+            INIT_K_STATE: T.Tensor(Init_K_State_shape, dtype),  # type: ignore
+            INIT_V_STATE: T.Tensor(Init_V_State_shape, dtype),  # type: ignore
 
             FINAL_STATE: T.Tensor([B, H, N, P], T.float32),  # type: ignore
             FINAL_K: T.Tensor([B, R, H, N], dtype)  # type: ignore
@@ -188,6 +195,22 @@ def mamba_mimo_fwd(
 
             T.copy(Q_BIAS[i_h, :, :], q_bias_frag)
             T.copy(K_BIAS[i_h, :, :], k_bias_frag)
+
+            if has_initial_state:
+                boundary_scale = T.alloc_var(T.float32)
+                boundary_trap = T.alloc_var(dtype)
+                T.copy(DT[i_b, i_h, 0], boundary_scale)
+                T.copy(TRAP[i_b, i_h, 0], boundary_trap)
+                boundary_scale *= T.sigmoid(-boundary_trap)
+                for n, p in T.Parallel(N, P):
+                    states_frag[n, p] = INIT_SSM_STATE[i_b, i_h, p, n]
+                    for r in T.serial(R):
+                        states_frag[n, p] += (
+                            INIT_K_STATE[i_b, r, i_h, n]
+                            * INIT_V_STATE[i_b, i_h, p]
+                            * MIMO_V[i_h, r, p]
+                            * boundary_scale
+                        )
 
             # --- Chunk Loop ---
             for i in T.Pipelined(0, nchunks, num_stages=num_stages):
@@ -477,6 +500,7 @@ def mamba_mimo_forward(q, k, v,
                        segsum,
                        chunk_size, rotary_dim_divisor, dtype, 
                        return_state=False,
+                       initial_states=None,
                        fuse_pregate_headwise_rms_norm=False,
                        outproj_norm_weight=None,
                        outproj_norm_eps=1e-5,
@@ -504,6 +528,7 @@ def mamba_mimo_forward(q, k, v,
                             reduceO,
                             fuse_pregate_headwise_rms_norm,
                             return_final_state=return_state,
+                            has_initial_state=initial_states is not None,
                             chunk_size=chunk_size, 
                             rotary_dim_divisor=rotary_dim_divisor, 
                             dtype=tl_dtype, 
@@ -540,6 +565,28 @@ def mamba_mimo_forward(q, k, v,
     z_arg = z
     D_arg = D
     mimo_z_arg = mimo_z
+    if initial_states is None:
+        init_ssm_state_arg, init_k_state_arg, init_v_state_arg = None, None, None
+    else:
+        init_ssm_state_arg, init_k_state_arg, init_v_state_arg = initial_states
+        if init_ssm_state_arg.shape != (B, H, P, N):
+            raise ValueError(
+                f"Expected initial SSM state shape {(B, H, P, N)}, "
+                f"got {tuple(init_ssm_state_arg.shape)}"
+            )
+        if init_k_state_arg.shape != (B, R, H, N):
+            raise ValueError(
+                f"Expected initial K state shape {(B, R, H, N)}, "
+                f"got {tuple(init_k_state_arg.shape)}"
+            )
+        if init_v_state_arg.shape != (B, H, P):
+            raise ValueError(
+                f"Expected initial V state shape {(B, H, P)}, "
+                f"got {tuple(init_v_state_arg.shape)}"
+            )
+        init_ssm_state_arg = init_ssm_state_arg.contiguous()
+        init_k_state_arg = init_k_state_arg.contiguous()
+        init_v_state_arg = init_v_state_arg.contiguous()
 
     h = torch.empty((B, H, N, P), device='cuda', dtype=torch.float32) if return_state else None
     k_final = torch.empty((B, R, H, N), device='cuda', dtype=dtype) if return_state else None
@@ -557,6 +604,9 @@ def mamba_mimo_forward(q, k, v,
             dt,
             trap,
             segsum,
+            init_ssm_state_arg,
+            init_k_state_arg,
+            init_v_state_arg,
             h,
             k_final
             )

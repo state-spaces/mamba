@@ -207,6 +207,11 @@ class Mamba3(nn.Module):
         
         # Apply Mamba-3 kernel
         if self.is_mimo:
+            input_states = (
+                (angle_dt_state, ssm_state, k_state, v_state)
+                if ssm_state is not None
+                else None
+            )
             y = mamba3_mimo_combined(
                 Q=C,
                 K=B,
@@ -226,6 +231,7 @@ class Mamba3(nn.Module):
                 rotary_dim_divisor=self.rotary_dim_divisor,
                 dtype=x.dtype,
                 return_state=ssm_state is not None,
+                Input_States=input_states,
                 cu_seqlens=cu_seqlens,
                 fuse_pregate_headwise_rms_norm=self.fuse_pregate_headwise_norm,
                 outproj_norm_weight=self.norm.weight if self.fuse_pregate_headwise_norm else None,
@@ -246,6 +252,11 @@ class Mamba3(nn.Module):
                 y = torch.einsum("blrhp,hrp->blhp", y, self.mimo_o)
             y = rearrange(y, "b l h p -> b l (h p)")
         else:
+            input_states = (
+                (angle_dt_state, ssm_state, k_state.squeeze(1), v_state)
+                if ssm_state is not None
+                else None
+            )
             y = mamba3_siso_combined(
                 Q=C.squeeze(2),
                 K=B.squeeze(2),
@@ -259,7 +270,7 @@ class Mamba3(nn.Module):
                 D=self.D,
                 Z=z if not self.is_outproj_norm else None,
                 chunk_size=self.chunk_size,
-                Input_States=None,
+                Input_States=input_states,
                 return_final_states=ssm_state is not None,
                 cu_seqlens=cu_seqlens,
             )
