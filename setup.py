@@ -327,14 +327,14 @@ def get_wheel_url():
 
 class CachedWheelsCommand(_bdist_wheel):
     """
-    The CachedWheelsCommand plugs into the default bdist wheel, which is ran by pip when it cannot
-    find an existing wheel (which is currently the case for all installs). We use
-    the environment parameters to detect whether there is already a pre-built version of a compatible
-    wheel available and short-circuits the standard full build pipeline.
+    The CachedWheelsCommand plugs into the default bdist wheel, which is run by pip when it cannot
+    find an existing wheel. Cached CUDA/HIP wheels are only considered when CUDA kernels are
+    explicitly requested with MAMBA_KEEP_CUDA_BUILD=TRUE; default installs use the standard build
+    path and do not guess or download CUDA-enabled wheels.
     """
 
     def run(self):
-        if FORCE_BUILD:
+        if FORCE_BUILD or not KEEP_CUDA_BUILD:
             return super().run()
 
         wheel_url, wheel_filename = get_wheel_url()
