@@ -15,9 +15,15 @@ except ImportError:
     causal_conv1d_bwd_function = None
     causal_conv1d_update_function = None
 
-from mamba_ssm.ops.triton.layer_norm import _layer_norm_fwd
+try:
+    from mamba_ssm.ops.triton.layer_norm import _layer_norm_fwd
+except ImportError:
+    _layer_norm_fwd = None
 
-import selective_scan_cuda
+try:
+    import selective_scan_cuda
+except ImportError:
+    selective_scan_cuda = None
 
 
 class SelectiveScanFn(torch.autograd.Function):
@@ -96,11 +102,178 @@ def rms_norm_forward(
     weight = weight.contiguous()
     if bias is not None:
         bias = bias.contiguous()
+    if _layer_norm_fwd is None:
+        if is_rms_norm:
+            variance = x.pow(2).mean(-1, keepdim=True)
+            output = x * torch.rsqrt(variance + eps) * weight
+            if bias is not None:
+                output = output + bias
+            return output
+        else:
+            mean = x.mean(-1, keepdim=True)
+            var = x.var(-1, keepdim=True, unbiased=False)
+            output = (x - mean) * torch.rsqrt(var + eps) * weight
+            if bias is not None:
+                output = output + bias
+            return output
     y = _layer_norm_fwd(
         x, weight, bias, eps, None, residual_dtype=None, is_rms_norm=is_rms_norm
     )[0]
     # y (b l) d
     return y
+
+
+import math
+
+def hybrid_chunk_scan_pytorch(u, delta, A, B, C, D=None, z=None, delta_bias=None, delta_softplus=False,
+                             return_last_state=False, chunk_size=64):
+    """
+    Pure PyTorch implementation of selective scan using a Hybrid Chunked Associative Scan.
+    Fully parallelized and vectorized.
+    """
+    dtype_in = u.dtype
+    u = u.float()
+    delta = delta.float()
+    if delta_bias is not None:
+        delta = delta + delta_bias[..., None].float()
+    if delta_softplus:
+        delta = F.softplus(delta)
+        
+    batch, dim, dstate = u.shape[0], A.shape[0], A.shape[1]
+    is_variable_B = B.dim() >= 3
+    is_variable_C = C.dim() >= 3
+    
+    if A.is_complex():
+        if is_variable_B:
+            B = torch.view_as_complex(rearrange(B.float(), "... (L two) -> ... L two", two=2))
+        if is_variable_C:
+            C = torch.view_as_complex(rearrange(C.float(), "... (L two) -> ... L two", two=2))
+    else:
+        B = B.float()
+        C = C.float()
+        
+    deltaA = torch.exp(torch.einsum('bdl,dn->bdln', delta, A))
+    if not is_variable_B:
+        deltaB_u = torch.einsum('bdl,dn,bdl->bdln', delta, B, u)
+    else:
+        if B.dim() == 3:
+            deltaB_u = torch.einsum('bdl,bnl,bdl->bdln', delta, B, u)
+        else:
+            B = repeat(B, "B G N L -> B (G H) N L", H=dim // B.shape[1])
+            deltaB_u = torch.einsum('bdl,bdnl,bdl->bdln', delta, B, u)
+            
+    if is_variable_C and C.dim() == 4:
+        C = repeat(C, "B G N L -> B (G H) N L", H=dim // C.shape[1])
+
+    # Rearrange deltaA and deltaB_u to (B, D, N, L)
+    a = rearrange(deltaA, 'b d l n -> b d n l')
+    b = rearrange(deltaB_u, 'b d l n -> b d n l')
+    
+    L = u.shape[2]
+    
+    # Pad L to a multiple of chunk_size if necessary
+    pad_len = (chunk_size - (L % chunk_size)) % chunk_size
+    if pad_len > 0:
+        a = F.pad(a, (0, pad_len), value=1.0)
+        b = F.pad(b, (0, pad_len), value=0.0)
+        
+    L_padded = a.shape[-1]
+    num_chunks = L_padded // chunk_size
+    
+    # Reshape to (B, D, N, C, W)
+    a = rearrange(a, 'b d n (c w) -> b d n c w', w=chunk_size)
+    b = rearrange(b, 'b d n (c w) -> b d n c w', w=chunk_size)
+    
+    # 1. Intra-chunk sequential scan (vectorized over chunks, batch, and dims)
+    A_loc = []
+    X_loc = []
+    
+    curr_A = torch.ones((batch, dim, dstate, num_chunks), device=a.device, dtype=a.dtype)
+    curr_X = torch.zeros((batch, dim, dstate, num_chunks), device=b.device, dtype=b.dtype)
+    
+    for w in range(chunk_size):
+        curr_A = a[..., w] * curr_A
+        curr_X = a[..., w] * curr_X + b[..., w]
+        A_loc.append(curr_A)
+        X_loc.append(curr_X)
+        
+    # Shape of A_loc and X_loc is (chunk_size, B, D, N, C)
+    # Stack them to shape (B, D, N, C, W)
+    A_loc = torch.stack(A_loc, dim=-1)
+    X_loc = torch.stack(X_loc, dim=-1)
+    
+    # Chunk summary:
+    # chunk_a: decay factor for each chunk (B, D, N, C)
+    # chunk_b: output term for each chunk (B, D, N, C)
+    chunk_a = A_loc[..., -1]
+    chunk_b = X_loc[..., -1]
+    
+    # 2. Inter-chunk parallel scan (Kogge-Stone style scan over C chunks)
+    # s_c: boundary state at start of chunk c (B, D, N, C)
+    # s_0 = 0.
+    s = torch.zeros((batch, dim, dstate, num_chunks), device=a.device, dtype=a.dtype)
+    
+    # We want to solve s_{c+1} = chunk_a_c * s_c + chunk_b_c
+    # This means the state after chunk c is chunk_x_c = prefix_scan(chunk_a, chunk_b)
+    # Let's perform parallel prefix scan on chunk_a and chunk_b
+    scan_a = chunk_a.clone()
+    scan_b = chunk_b.clone()
+    
+    num_steps = int(math.ceil(math.log2(num_chunks)))
+    for i in range(num_steps):
+        stride = 2 ** i
+        if stride >= num_chunks:
+            break
+        # Shift and combine
+        a_left = scan_a[..., :num_chunks - stride]
+        b_left = scan_b[..., :num_chunks - stride]
+        
+        a_right = scan_a[..., stride:]
+        b_right = scan_b[..., stride:]
+        
+        scan_a[..., stride:] = a_right * a_left
+        scan_b[..., stride:] = a_right * b_left + b_right
+        
+    # The state at the end of chunk c is scan_b[..., c]
+    # So the state at the start of chunk c+1 is scan_b[..., c]
+    # The state at the start of chunk 0 is s_0 = 0
+    if num_chunks > 1:
+        s[..., 1:] = scan_b[..., :-1]
+        
+    # 3. Final state reconstruction for all steps in all chunks
+    # x_{c, w} = A_loc_{c, w} * s_c + X_loc_{c, w}
+    # A_loc: (B, D, N, C, W)
+    # s: (B, D, N, C) -> unsqueeze to (B, D, N, C, 1)
+    # X_loc: (B, D, N, C, W)
+    x = A_loc * s.unsqueeze(-1) + X_loc
+    
+    # Reshape back to (B, D, N, L_padded) and truncate to (B, D, N, L)
+    x = rearrange(x, 'b d n c w -> b d n (c w)')
+    if pad_len > 0:
+        x = x[..., :-pad_len]
+        
+    # Get last state if needed
+    last_state = x[..., -1]
+    
+    # Compute output y:
+    # x: (B, D, N, L)
+    if not is_variable_C:
+        y = torch.einsum('bdnl,dn->bdl', x, C)
+    else:
+        if C.dim() == 3:
+            y = torch.einsum('bdnl,bnl->bdl', x, C)
+        else:
+            y = torch.einsum('bdnl,bdnl->bdl', x, C)
+            
+    if y.is_complex():
+        y = y.real * 2
+        
+    out = y if D is None else y + u * rearrange(D, "d -> d 1")
+    if z is not None:
+        out = out * F.silu(z)
+        
+    out = out.to(dtype=dtype_in)
+    return out if not return_last_state else (out, last_state)
 
 
 def selective_scan_fn(u, delta, A, B, C, D=None, z=None, delta_bias=None, delta_softplus=False,
@@ -109,6 +282,8 @@ def selective_scan_fn(u, delta, A, B, C, D=None, z=None, delta_bias=None, delta_
     last_state has shape (batch, dim, dstate). Note that the gradient of the last state is
     not considered in the backward pass.
     """
+    if selective_scan_cuda is None:
+        return hybrid_chunk_scan_pytorch(u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state)
     return SelectiveScanFn.apply(u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state)
 
 
@@ -370,12 +545,76 @@ class MambaInnerFn(torch.autograd.Function):
                 dB_proj_bias, dC_proj_bias, None, None, None, None, None, None)
 
 
+def mamba_inner_ref_pure(
+    xz, conv1d_weight, conv1d_bias, x_proj_weight, delta_proj_weight,
+    out_proj_weight, out_proj_bias,
+    A, B=None, C=None, D=None, delta_bias=None, B_proj_bias=None,
+    C_proj_bias=None, delta_softplus=True, checkpoint_lvl=1,
+    b_rms_weight=None, c_rms_weight=None, dt_rms_weight=None, b_c_dt_rms_eps=1e-6
+):
+    L = xz.shape[-1]
+    delta_rank = delta_proj_weight.shape[1]
+    d_state = A.shape[-1] * (1 if not A.is_complex() else 2)
+    x, z = xz.chunk(2, dim=1)
+    
+    if causal_conv1d_fn is not None:
+        x = causal_conv1d_fn(x, rearrange(conv1d_weight, "d 1 w -> d w"), conv1d_bias, activation="silu")
+    else:
+        d_conv = conv1d_weight.shape[-1]
+        x_padded = F.pad(x, (d_conv - 1, 0))
+        x = F.conv1d(x_padded, conv1d_weight, bias=conv1d_bias, groups=x.shape[1])
+        x = F.silu(x)
+        
+    x_dbl = F.linear(rearrange(x, 'b d l -> (b l) d'), x_proj_weight)  # (bl d)
+    delta = rearrange(delta_proj_weight @ x_dbl[:, :delta_rank].t(), "d (b l) -> b d l", l=L)
+    
+    if B is None:  # variable B
+        B = x_dbl[:, delta_rank:delta_rank + d_state]  # (bl dstate)
+        if B_proj_bias is not None:
+            B = B + B_proj_bias.to(dtype=B.dtype)
+        if not A.is_complex():
+            B = rearrange(B, "(b l) dstate -> b dstate l", l=L).contiguous()
+        else:
+            B = rearrange(B, "(b l) (dstate two) -> b dstate (l two)", l=L, two=2).contiguous()
+    if C is None:  # variable C
+        C = x_dbl[:, -d_state:]  # (bl dstate)
+        if C_proj_bias is not None:
+            C = C + C_proj_bias.to(dtype=C.dtype)
+        if not A.is_complex():
+            C = rearrange(C, "(b l) dstate -> b dstate l", l=L).contiguous()
+        else:
+            C = rearrange(C, "(b l) (dstate two) -> b dstate (l two)", l=L, two=2).contiguous()
+            
+    if b_rms_weight is not None:
+        B = rearrange(B, "b dstate l -> (b l) dstate").contiguous()
+        B = rms_norm_forward(B, b_rms_weight, bias=None, eps=b_c_dt_rms_eps)
+        B = rearrange(B, "(b l) dstate -> b dstate l", l=L).contiguous()
+    if c_rms_weight is not None:
+        C = rearrange(C, "b dstate l -> (b l) dstate").contiguous()
+        C = rms_norm_forward(C, c_rms_weight, bias=None, eps=b_c_dt_rms_eps)
+        C = rearrange(C, "(b l) dstate -> b dstate l", l=L).contiguous()
+    if dt_rms_weight is not None:
+        delta = rearrange(delta, "b d l -> (b l) d", l=L).contiguous()
+        delta = rms_norm_forward(delta, dt_rms_weight, bias=None, eps=b_c_dt_rms_eps)
+        delta = rearrange(delta, "(b l) d -> b d l", l=L).contiguous()
+        
+    y = selective_scan_fn(x, delta, A, B, C, D, z=z, delta_bias=delta_bias, delta_softplus=delta_softplus)
+    return F.linear(rearrange(y, "b d l -> b l d"), out_proj_weight, out_proj_bias)
+
+
 def mamba_inner_fn(
     xz, conv1d_weight, conv1d_bias, x_proj_weight, delta_proj_weight,
     out_proj_weight, out_proj_bias,
     A, B=None, C=None, D=None, delta_bias=None, B_proj_bias=None,
     C_proj_bias=None, delta_softplus=True, checkpoint_lvl=1, b_rms_weight= None, c_rms_weight= None, dt_rms_weight= None, b_c_dt_rms_eps=1e-6
 ):
+    if selective_scan_cuda is None or causal_conv1d_fwd_function is None:
+        return mamba_inner_ref_pure(
+            xz, conv1d_weight, conv1d_bias, x_proj_weight, delta_proj_weight,
+            out_proj_weight, out_proj_bias,
+            A, B, C, D, delta_bias, B_proj_bias, C_proj_bias, delta_softplus, checkpoint_lvl,
+            b_rms_weight, c_rms_weight, dt_rms_weight, b_c_dt_rms_eps
+        )
     return MambaInnerFn.apply(xz, conv1d_weight, conv1d_bias, x_proj_weight, delta_proj_weight,
                               out_proj_weight, out_proj_bias,
                               A, B, C, D, delta_bias, B_proj_bias, C_proj_bias, delta_softplus, checkpoint_lvl, b_rms_weight, c_rms_weight, dt_rms_weight, b_c_dt_rms_eps)

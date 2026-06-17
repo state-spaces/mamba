@@ -4,7 +4,48 @@ from typing import Optional
 import torch
 from torch import nn, Tensor
 
-from mamba_ssm.ops.triton.layer_norm import RMSNorm, layer_norm_fn
+try:
+    from mamba_ssm.ops.triton.layer_norm import RMSNorm, layer_norm_fn
+except ImportError:
+    RMSNorm = None
+    layer_norm_fn = None
+
+if RMSNorm is None:
+    class RMSNorm(nn.Module):
+        def __init__(self, dim, eps=1e-5):
+            super().__init__()
+            self.eps = eps
+            self.weight = nn.Parameter(torch.ones(dim))
+            self.register_parameter("bias", None)
+
+        def forward(self, x):
+            variance = x.pow(2).mean(-1, keepdim=True)
+            return x * torch.rsqrt(variance + self.eps) * self.weight
+
+if layer_norm_fn is None:
+    def layer_norm_fn(x, weight, bias, residual=None, eps=1e-6, prenorm=False, residual_in_fp32=False, is_rms_norm=False):
+        res = (x + residual) if residual is not None else x
+        if residual_in_fp32:
+            res_out = res.to(torch.float32)
+        else:
+            res_out = res
+        
+        if is_rms_norm:
+            variance = res.pow(2).mean(-1, keepdim=True)
+            normed = res * torch.rsqrt(variance + eps) * weight
+            if bias is not None:
+                normed = normed + bias
+        else:
+            mean = res.mean(-1, keepdim=True)
+            var = res.var(-1, keepdim=True, unbiased=False)
+            normed = (res - mean) * torch.rsqrt(var + eps) * weight
+            if bias is not None:
+                normed = normed + bias
+                
+        if prenorm:
+            return normed, res_out
+        else:
+            return normed
 
 
 class Block(nn.Module):
