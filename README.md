@@ -1,10 +1,12 @@
 ## KING TWEAK EDITION!
 If youre having problems installing mamba-ssm, follow these steps:
 
+git clone the mamba repo as /root/mamba_src (or whatever your working directory is)
 touch /root/mamba_src/selective_scan_cuda.py
 export PYTHONPATH=/root/mamba_src:$PYTHONPATH
 python -c "from mamba_ssm.modules.mamba3 import Mamba3; print('ok')"
 
+just know that if you dont install triton==3.7.0 it wont work.
 
 # Mamba
 
