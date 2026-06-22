@@ -1,3 +1,11 @@
+## KING TWEAK EDITION!
+If youre having problems installing mamba-ssm, follow these steps:
+
+touch /root/mamba_src/selective_scan_cuda.py
+export PYTHONPATH=/root/mamba_src:$PYTHONPATH
+python -c "from mamba_ssm.modules.mamba3 import Mamba3; print('ok')"
+
+
 # Mamba
 
 
