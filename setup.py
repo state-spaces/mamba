@@ -99,27 +99,28 @@ def get_torch_hip_version():
         return None
 
 
-def check_if_hip_home_none(global_option: str) -> None:
-
-    if HIP_HOME is not None:
-        return
-    # warn instead of error because user could be downloading prebuilt wheels, so hipcc won't be necessary
-    # in that case.
+def check_if_hip_home_none(global_option: str):
+    if HIP_HOME is None:
+        raise RuntimeError(
+            f"{global_option} was requested, but the ROCm/HIP installation is incomplete. "
+            'Please make sure ROCm is properly installed and HIP_HOME environment variable is set.\n'
+            'On Ubuntu, you may need to install: rocm-libs hipcc hiprt hipcub rocprim rocrand rocthrust rocblas hipblas rocsolver hipsparse rocsparse hipfft rocfft rocthrust rocrand'
+        )
     warnings.warn(
         f"{global_option} was requested, but hipcc was not found.  Are you sure your environment has hipcc available?"
     )
 
 
 def check_if_cuda_home_none(global_option: str) -> None:
-    if CUDA_HOME is not None:
-        return
-    # warn instead of error because user could be downloading prebuilt wheels, so nvcc won't be necessary
-    # in that case.
-    warnings.warn(
-        f"{global_option} was requested, but nvcc was not found.  Are you sure your environment has nvcc available?  "
-        "If you're installing within a container from https://hub.docker.com/r/pytorch/pytorch, "
-        "only images whose names contain 'devel' will provide nvcc."
-    )
+    if CUDA_HOME is None:
+        raise RuntimeError(
+            f"{global_option} was requested, but CUDA installation was not found. "
+            'Please ensure CUDA is properly installed and the CUDA_HOME environment variable is set.\n'
+            'Common solutions include:\n'
+            '1. Install CUDA from NVIDIA: https://developer.nvidia.com/cuda-downloads\n'
+            '2. Set CUDA_HOME to your CUDA installation directory (e.g., /usr/local/cuda-11.8)\n'
+            '3. Add CUDA to your PATH: export PATH=$PATH:$CUDA_HOME/bin'
+        )
 
 
 def append_nvcc_threads(nvcc_extra_args):
@@ -157,8 +158,6 @@ if not SKIP_CUDA_BUILD:
                     "Refer to the README.md for detailed instructions.",
                     UserWarning
                 )
-
-        cc_flag.append("-DBUILD_PYTHON_PACKAGE")
 
     else:
         check_if_cuda_home_none(PACKAGE_NAME)

@@ -10,18 +10,31 @@ from einops import rearrange, repeat
 
 try:
     from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
-except ImportError:
-    causal_conv1d_fn, causal_conv1d_update = None, None
+except ImportError as e:
+    raise ImportError(
+        "causal_conv1d package not found. Please install it with: "
+        "pip install causal-conv1d>=1.4.0"
+    ) from e
 
 try:
     from causal_conv1d.causal_conv1d_varlen import causal_conv1d_varlen_states
-except ImportError:
+except ImportError as e:
     causal_conv1d_varlen_states = None
+    import warnings
+    warnings.warn(
+        "causal_conv1d_varlen module not found. Variable length sequences will not be supported. "
+        "Install the latest causal_conv1d package for full functionality."
+    )
 
 try:
     from mamba_ssm.ops.triton.selective_state_update import selective_state_update
-except ImportError:
+except ImportError as e:
     selective_state_update = None
+    import warnings
+    warnings.warn(
+        "selective_state_update module not found. Performance may be degraded. "
+        "Make sure to install with the 'triton' extra: pip install mamba-ssm[triton]"
+    )
 
 from mamba_ssm.ops.triton.layernorm_gated import RMSNorm as RMSNormGated
 
@@ -221,9 +234,12 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
                     conv_state.copy_(F.pad(xBC_t, (self.d_conv - xBC_t.shape[-1], 0)))  # Update state (B D W)
                 else:
                     assert causal_conv1d_varlen_states is not None, "varlen inference requires causal_conv1d package"
-                    assert batch == 1, "varlen inference only supports batch dimension 1"
+                    # The 'batch' variable here might be misleading when cu_seqlens is used.
+                    # The actual number of sequences is cu_seqlens.shape[0] - 1.
+                    # conv_state is already shaped (inference_batch, ...).
+                    # xBC should be (total_tokens, features) when cu_seqlens is present.
                     conv_varlen_states = causal_conv1d_varlen_states(
-                        xBC.squeeze(0), cu_seqlens, state_len=conv_state.shape[-1]
+                        xBC, cu_seqlens, state_len=conv_state.shape[-1]
                     )
                     conv_state.copy_(conv_varlen_states)
             assert self.activation in ["silu", "swish"]
@@ -308,16 +324,55 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
 
         # SSM step
         if selective_state_update is None:
-            assert self.ngroups == 1, "Only support ngroups=1 for this inference code path"
+            assert self.nheads % self.ngroups == 0, "nheads must be divisible by ngroups for PyTorch step fallback"
+            k = self.nheads // self.ngroups
+
             # Discretize A and B
+            # dt is already (batch, nheads) from xBC split and projection
             dt = F.softplus(dt + self.dt_bias.to(dtype=dt.dtype))  # (batch, nheads)
-            dA = torch.exp(dt * A)  # (batch, nheads)
-            x = rearrange(x, "b (h p) -> b h p", p=self.headdim)
-            dBx = torch.einsum("bh,bn,bhp->bhpn", dt, B, x)
-            ssm_state.copy_(ssm_state * rearrange(dA, "b h -> b h 1 1") + dBx)
-            y = torch.einsum("bhpn,bn->bhp", ssm_state.to(dtype), C)
-            y = y + rearrange(self.D.to(dtype), "h -> h 1") * x
-            y = rearrange(y, "b h p -> b (h p)")
+            # A is (nheads,)
+
+            # Reshape for grouped operations
+            # x: (B, d_ssm) -> (B, ngroups, k, headdim)
+            x_r = rearrange(x, "b (g k p) -> b g k p", g=self.ngroups, k=k, p=self.headdim)
+            # dt: (B, nheads) -> (B, ngroups, k)
+            dt_r = rearrange(dt, "b (g k) -> b g k", g=self.ngroups, k=k)
+            # A: (nheads,) -> (ngroups, k)
+            A_r = rearrange(A, "(g k) -> g k", g=self.ngroups, k=k)
+            # dA: (B, ngroups, k)
+            dA_r = torch.exp(dt_r * A_r.unsqueeze(0)) 
+
+            # B: (B, ngroups * d_state) -> (B, ngroups, d_state)
+            B_r = rearrange(B, "b (g n) -> b g n", g=self.ngroups)
+            # C: (B, ngroups * d_state) -> (B, ngroups, d_state)
+            C_r = rearrange(C, "b (g n) -> b g n", g=self.ngroups)
+            # ssm_state: (B, nheads, headdim, d_state) -> (B, ngroups, k, headdim, d_state)
+            ssm_state_r = rearrange(ssm_state, "b (g k) p n -> b g k p n", g=self.ngroups, k=k)
+
+            # SSM recurrence: h_new = dA * h_old + dB * x
+            # dB = dt * B
+            # dB_scaled_by_dt: (B, ngroups, k, d_state)
+            dB_scaled_by_dt = torch.einsum("bgk,bgn->bgkn", dt_r, B_r)
+            # dBx: (B, ngroups, k, headdim, d_state)
+            dBx = torch.einsum("bgkp,bgkn->bgkpn", x_r, dB_scaled_by_dt)
+            
+            ssm_state_new_r = dA_r.unsqueeze(-1).unsqueeze(-1) * ssm_state_r + dBx
+            ssm_state.copy_(rearrange(ssm_state_new_r, "b g k p n -> b (g k) p n"))
+
+            # Output: y = C * h_new + D * x
+            # y_interim: (B, ngroups, k, headdim)
+            y_interim = torch.einsum("bgkpn,bgn->bgkp", ssm_state_new_r.to(dtype), C_r)
+            
+            D_param = self.D.to(dtype)
+            if self.D_has_hdim: # D is (d_ssm) = (nheads * headdim)
+                D_r = rearrange(D_param, "(g k p) -> g k p", g=self.ngroups, k=k, p=self.headdim)
+                y_r = y_interim + D_r.unsqueeze(0) * x_r
+            else: # D is (nheads)
+                D_r = rearrange(D_param, "(g k) -> g k", g=self.ngroups, k=k)
+                y_r = y_interim + D_r.unsqueeze(0).unsqueeze(-1) * x_r
+            
+            y = rearrange(y_r, "b g k p -> b (g k p)") # (B, d_ssm)
+
             if not self.rmsnorm:
                 y = y * self.act(z)  # (B D)
         else:
@@ -376,8 +431,26 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
             inference_params.key_value_memory_dict[self.layer_idx] = (conv_state, ssm_state)
         else:
             conv_state, ssm_state = inference_params.key_value_memory_dict[self.layer_idx]
-            # TODO: What if batch size changes between generation, and we reuse the same states?
-            if initialize_states:
+            # Handle batch size changes or explicit initialization
+            if initialize_states or conv_state.shape[0] != batch_size or ssm_state.shape[0] != batch_size:
+                # Re-initialize states if batch size changed or if explicitly requested
+                conv_state = torch.zeros(
+                    batch_size,
+                    self.conv1d.weight.shape[0], # out_channels
+                    self.d_conv,                  # kernel_size
+                    device=self.conv1d.weight.device,
+                    dtype=self.conv1d.weight.dtype,
+                )
+                ssm_state = torch.zeros(
+                    batch_size,
+                    self.nheads,
+                    self.headdim,
+                    self.d_state,
+                    device=self.in_proj.weight.device,
+                    dtype=self.in_proj.weight.dtype,
+                )
+                inference_params.key_value_memory_dict[self.layer_idx] = (conv_state, ssm_state)
+            elif initialize_states: # Original condition if batch sizes matched but re-init was true
                 conv_state.zero_()
                 ssm_state.zero_()
         return conv_state, ssm_state
