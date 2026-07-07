@@ -391,7 +391,7 @@ setup(
     else {
         "bdist_wheel": CachedWheelsCommand,
     },
-    python_requires=">=3.9",
+    python_requires=">=3.10",
     install_requires=[
         "torch",
         "packaging",

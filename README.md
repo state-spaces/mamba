@@ -56,6 +56,7 @@ For the CUDA selective scan extension, add `MAMBA_KEEP_CUDA_BUILD=TRUE`; add
 
 Core requirements:
 - Linux
+- Python 3.10+
 - PyTorch 1.12+
 
 Additional requirements for CUDA `selective_scan_cuda` builds and GPU execution:
