@@ -75,6 +75,8 @@ def rotary_qk_inference_kernel(
     # Match angle_dt: tanh(angle_proj) * dt * pi
     angle_proj = tl.sigmoid(2.0 * angle_proj) * 2.0 - 1.0  # tanh
     angle = angle_state + angle_proj * dt * 3.141592653589793  # (rotary_dim // 2)
+    TWO_PI: tl.constexpr = 6.283185307179586
+    angle = angle - TWO_PI * tl.floor(angle / TWO_PI)
 
     OUT_ANGLE_STATE = OUT_ANGLE_STATE + rd_half * stride_out_angle_state[2]
     tl.store(OUT_ANGLE_STATE, angle, mask=mask_angle)
@@ -254,6 +256,7 @@ def apply_rotary_qk_inference_reference(
     # Match angle_dt: tanh(angle_proj) * dt * pi
     angle_proj = torch.tanh(angle_proj)
     angle = angle_state + angle_proj * dt[:, :, None] * math.pi  # (B, N, S)
+    angle = torch.remainder(angle, 2 * math.pi)
     angle_state_new = angle
     angle = angle.unsqueeze(1).expand(-1, mimo_dim, -1, -1)  # (B, R, N, S)
 
