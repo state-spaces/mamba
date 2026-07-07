@@ -260,6 +260,71 @@ def test_step_matches_forward_fp32(variant: VariantConfig, is_outproj_norm: bool
         )
 
 
+@pytest.mark.parametrize("variant", [pytest.param(SISO, id="siso"), pytest.param(MIMO, id="mimo")])
+@pytest.mark.parametrize(
+    "is_outproj_norm",
+    [
+        pytest.param(False, id="outproj_norm_false"),
+        pytest.param(True, id="outproj_norm_true"),
+    ],
+)
+def test_forward_decode_dispatch_matches_step(
+    variant: VariantConfig, is_outproj_norm: bool
+) -> None:
+    """Regression: ``Mamba3.forward(inference_params=..., seqlen_offset>0)`` must
+    route a ``(batch, 1, dim)`` token through ``step()`` and return ``(batch, 1, dim)``.
+
+    This is the path autoregressive generation actually exercises, and it was
+    previously untested: ``test_step_matches_forward_fp32`` drives ``step()``
+    directly with 2D ``(batch, dim)`` tensors, while ``forward`` handed ``step()``
+    a 3D tensor — crashing ``_preprocess``'s rearrange. We compare the forward
+    decode path against the (already-validated) direct ``step()`` reference.
+    """
+    Mamba3 = _mamba3_cls()
+    cfg = _case_config(variant, is_outproj_norm=is_outproj_norm)
+    config_label = f"forward_decode[variant={variant.mimo_dim}, is_outproj_norm={is_outproj_norm}]"
+
+    torch.manual_seed(42)
+    torch.cuda.manual_seed_all(42)
+    model = Mamba3(**cfg)
+    model.eval()
+
+    u = torch.randn(BATCH, SEQLEN, cfg["d_model"], device=DEVICE, dtype=DTYPE)
+
+    with torch.no_grad():
+        # Reference: drive step() directly, token by token (the tested 2D contract).
+        state = model.allocate_inference_cache(BATCH, 1, device=DEVICE, dtype=DTYPE)
+        ref_steps = []
+        for t in range(SEQLEN):
+            out_step, *state = model.step(u[:, t], *state)
+            ref_steps.append(out_step)
+        ref = torch.stack(ref_steps, dim=1)  # (batch, seqlen, dim)
+
+        # Path under test: forward()'s decode dispatch. One-token prefill populates
+        # the cache (seqlen_offset == 0), then each subsequent token takes the
+        # seqlen_offset > 0 branch that forwards a (batch, 1, dim) tensor to step().
+        inference_params = InferenceParams(max_seqlen=SEQLEN, max_batch_size=BATCH)
+        decode_outs = [model(u[:, :1], inference_params=inference_params)]
+        for t in range(1, SEQLEN):
+            inference_params.seqlen_offset = t
+            out = model(u[:, t : t + 1], inference_params=inference_params)
+            assert out.shape == (BATCH, 1, cfg["d_model"]), (
+                f"forward decode must return (batch, 1, dim), got {tuple(out.shape)} "
+                f"for {config_label}"
+            )
+            decode_outs.append(out)
+        decode = torch.cat(decode_outs, dim=1)  # (batch, seqlen, dim)
+
+    for t in range(SEQLEN):
+        _assert_close(
+            decode[:, t],
+            ref[:, t],
+            label="forward-decode-vs-step",
+            cfg=config_label,
+            step=t,
+        )
+
+
 def run_step_benchmark(variant: VariantConfig, *, is_outproj_norm: bool) -> None:
     _require_cuda_and_kernel_deps()
     from triton.testing import do_bench_cudagraph
