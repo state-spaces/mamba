@@ -8,7 +8,7 @@ import pytest
 from einops import rearrange, repeat
 
 from mamba_ssm.ops.triton.ssd_chunk_state import chunk_state, chunk_state_ref
-from mamba_ssm.ops.triton.ssd_chunk_state import _chunk_cumsum_fwd, _chunk_state_fwd
+from mamba_ssm.ops.triton.ssd_chunk_state import _chunk_cumsum_fwd, _chunk_cumsum_bwd, _chunk_state_fwd
 from mamba_ssm.ops.triton.ssd_chunk_state import chunk_state_varlen
 from mamba_ssm.ops.triton.ssd_state_passing import state_passing, state_passing_ref
 from mamba_ssm.ops.triton.ssd_state_passing import _state_passing_fwd
@@ -78,16 +78,17 @@ def test_chunk_state_varlen(chunk_size, ngroups, dtype):
     assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
 
 
-def test_chunk_cumsum_fwd_noncontiguous_wide_view_no_overflow():
-    # Regression test for a 32-bit pointer-arithmetic overflow in
-    # _chunk_cumsum_fwd_kernel (and the identical pattern in
-    # _chunk_cumsum_bwd_kernel): `pid_c * chunk_size * stride_dt_seqlen` was
-    # computed in 32-bit and silently wrapped once it exceeded 2**31 - 1,
-    # corrupting the pointer offset into `dt` and causing a CUDA illegal
-    # memory access. This only shows up when `dt` is a non-contiguous view
-    # into a much wider parent tensor (large stride(1)), not for an
-    # ordinarily contiguous `dt` -- see
-    # https://github.com/triton-lang/triton/issues/1058.
+def test_chunk_cumsum_fwd_bwd_noncontiguous_wide_view_no_overflow():
+    # Regression test for a 32-bit pointer-arithmetic overflow shared by
+    # _chunk_cumsum_fwd_kernel and _chunk_cumsum_bwd_kernel:
+    # `pid_c * chunk_size * stride_dt_seqlen` was computed in 32-bit and
+    # silently wrapped once it exceeded 2**31 - 1, corrupting the pointer
+    # offset into `dt` and causing a CUDA illegal memory access. This only
+    # shows up when `dt` is a non-contiguous view into a much wider parent
+    # tensor (large stride(1)), not for an ordinarily contiguous `dt` -- see
+    # https://github.com/triton-lang/triton/issues/1058. Both kernels have
+    # the identical uncast pattern and received the identical fix, so both
+    # are exercised here.
     device = 'cuda'
     torch.manual_seed(0)
     seqlen = 115_866
@@ -104,6 +105,9 @@ def test_chunk_cumsum_fwd_noncontiguous_wide_view_no_overflow():
 
     with torch.no_grad():
         dA_cumsum, dt_out = _chunk_cumsum_fwd(dt, A, chunk_size, dt_bias=dt_bias, dt_softplus=True)
+        ddA = torch.randn_like(dA_cumsum)
+        ddt_out = torch.randn_like(dt_out)
+        ddt, dA, ddt_bias = _chunk_cumsum_bwd(ddA, ddt_out, dt, A, dt_bias=dt_bias, dt_softplus=True)
     torch.cuda.synchronize(device)
 
     nchunks = math.ceil(seqlen / chunk_size)
@@ -111,3 +115,9 @@ def test_chunk_cumsum_fwd_noncontiguous_wide_view_no_overflow():
     assert dt_out.shape == (1, nheads, nchunks, chunk_size)
     assert torch.isfinite(dA_cumsum).all()
     assert torch.isfinite(dt_out).all()
+
+    assert ddt.shape == dt.shape
+    assert dA.shape == (nheads,)
+    assert torch.isfinite(ddt).all()
+    assert torch.isfinite(dA).all()
+    assert torch.isfinite(ddt_bias).all()
