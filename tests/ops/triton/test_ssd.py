@@ -121,3 +121,48 @@ def test_chunk_cumsum_fwd_bwd_noncontiguous_wide_view_no_overflow():
     assert torch.isfinite(ddt).all()
     assert torch.isfinite(dA).all()
     assert torch.isfinite(ddt_bias).all()
+
+
+def test_mamba_chunk_scan_combined_noncontiguous_wide_view_no_overflow():
+    # Regression test for the same 32-bit pointer-arithmetic overflow class
+    # as test_chunk_cumsum_fwd_bwd_noncontiguous_wide_view_no_overflow above,
+    # but hit through the full mamba_chunk_scan_combined path instead of
+    # _chunk_cumsum_fwd/_chunk_cumsum_bwd directly. This exercises
+    # _chunk_state_fwd_kernel, _chunk_state_bwd_dx_kernel,
+    # _chunk_state_bwd_db_kernel, _chunk_state_bwd_ddAcs_stable_kernel, and
+    # _chunk_state_varlen_kernel in ssd_chunk_state.py; the eleven
+    # pid_bc-derived kernels in ssd_chunk_scan.py; the fused kernel in
+    # ssd_combined.py; and the two kernels in ssd_bmm.py -- all of which had
+    # the identical uncast `pid_* * chunk_size * stride_*_seqlen` pattern and
+    # received the identical int64-cast fix. `x` is sliced non-contiguously
+    # out of a much wider parent tensor here, exactly as e.g. transformers'
+    # NemotronHMamba2Mixer slices x/B/C/dt out of a wide fused in_proj
+    # output -- see https://github.com/triton-lang/triton/issues/1058.
+    device = 'cuda'
+    torch.manual_seed(0)
+    batch = 1
+    seqlen = 115_866
+    nheads = 128
+    headdim = 64
+    ngroups = 1
+    dstate = 32
+    chunk_size = 128
+    parent_width = 18_560  # same width that overflowed in the ssd_chunk_state.py bug
+    width = nheads * headdim
+    assert parent_width >= width
+
+    parent_x = torch.randn((batch, seqlen, parent_width), dtype=torch.bfloat16, device=device)
+    x = parent_x[:, :, -width:].view(batch, seqlen, nheads, headdim)
+    assert not x.is_contiguous()
+
+    dt = F.softplus(torch.randn(batch, seqlen, nheads, dtype=torch.float32, device=device) - 4)
+    A = -torch.exp(torch.randn(nheads, dtype=torch.float32, device=device))
+    B = torch.randn(batch, seqlen, ngroups, dstate, dtype=torch.bfloat16, device=device) / 5
+    C = torch.randn(batch, seqlen, ngroups, dstate, dtype=torch.bfloat16, device=device) / 5
+
+    with torch.no_grad():
+        out = mamba_chunk_scan_combined(x, dt, A, B, C, chunk_size)
+    torch.cuda.synchronize(device)
+
+    assert out.shape == (batch, seqlen, nheads, headdim)
+    assert torch.isfinite(out).all()

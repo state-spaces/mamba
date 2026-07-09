@@ -120,7 +120,9 @@ def _chunk_scan_chunk_state_bwd_dx_kernel(
     IS_TRITON_22: tl.constexpr,
     DETERMINISTIC_REDUCTION: tl.constexpr,
 ):
-    pid_bc = tl.program_id(axis=1)
+    # if chunk_size/batch/stride products are large, may overflow int32, so use 64 bit
+    # https://github.com/triton-lang/triton/issues/1058
+    pid_bc = tl.program_id(axis=1).to(tl.int64)
     pid_c = pid_bc // batch
     pid_b = pid_bc - pid_c * batch
     pid_h = tl.program_id(axis=2)
