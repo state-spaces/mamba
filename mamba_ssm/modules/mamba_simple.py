@@ -58,6 +58,12 @@ class Mamba(nn.Module):
         self.dt_rank = math.ceil(self.d_model / 16) if dt_rank == "auto" else dt_rank
         self.use_fast_path = use_fast_path
         self.layer_idx = layer_idx
+        self.d_inner = int(self.expand * self.d_model)
+        # Ensure d_inner does not exceed the shared memory limit
+        MAX_SAFE_D_INNER = 256  # Safe maximum value for d_inner
+        if self.d_inner > MAX_SAFE_D_INNER:
+            print(f"Warning: d_inner ({self.d_inner}) exceeds the safe maximum value. Setting d_inner to {MAX_SAFE_D_INNER}.")
+            self.d_inner = MAX_SAFE_D_INNER
 
         self.in_proj = nn.Linear(self.d_model, self.d_inner * 2, bias=bias, **factory_kwargs)
 
