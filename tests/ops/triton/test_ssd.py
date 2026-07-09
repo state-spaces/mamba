@@ -76,3 +76,38 @@ def test_chunk_state_varlen(chunk_size, ngroups, dtype):
     out_ref = torch.cat(out_ref, dim=0)
     print(f"Max diff = {(out - out_ref).abs().max().item()}")
     assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
+
+
+def test_chunk_cumsum_fwd_noncontiguous_wide_view_no_overflow():
+    # Regression test for a 32-bit pointer-arithmetic overflow in
+    # _chunk_cumsum_fwd_kernel (and the identical pattern in
+    # _chunk_cumsum_bwd_kernel): `pid_c * chunk_size * stride_dt_seqlen` was
+    # computed in 32-bit and silently wrapped once it exceeded 2**31 - 1,
+    # corrupting the pointer offset into `dt` and causing a CUDA illegal
+    # memory access. This only shows up when `dt` is a non-contiguous view
+    # into a much wider parent tensor (large stride(1)), not for an
+    # ordinarily contiguous `dt` -- see
+    # https://github.com/triton-lang/triton/issues/1058.
+    device = 'cuda'
+    torch.manual_seed(0)
+    seqlen = 115_866
+    nheads = 128
+    chunk_size = 128
+    parent_width = 18_560  # wide enough that (nchunks - 1) * chunk_size * stride(1) overflows int32
+
+    A = -torch.exp(torch.randn(nheads, dtype=torch.float32, device=device))
+    dt_bias = torch.randn(nheads, dtype=torch.float32, device=device)
+
+    parent = torch.zeros((1, seqlen, parent_width), dtype=torch.bfloat16, device=device)
+    dt = parent[:, :, -nheads:]
+    assert not dt.is_contiguous()
+
+    with torch.no_grad():
+        dA_cumsum, dt_out = _chunk_cumsum_fwd(dt, A, chunk_size, dt_bias=dt_bias, dt_softplus=True)
+    torch.cuda.synchronize(device)
+
+    nchunks = math.ceil(seqlen / chunk_size)
+    assert dA_cumsum.shape == (1, nheads, nchunks, chunk_size)
+    assert dt_out.shape == (1, nheads, nchunks, chunk_size)
+    assert torch.isfinite(dA_cumsum).all()
+    assert torch.isfinite(dt_out).all()
