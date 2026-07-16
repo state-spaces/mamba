@@ -46,10 +46,12 @@ def mamba_mimo_fwd(
     hasZ,
     hasD,
     reduceO,
+    fuse_pregate_headwise_rms_norm=False,
     return_final_state=False,
     chunk_size: int = 16,
     rotary_dim_divisor = 4,
     dtype: str = 'bfloat16',
+    outproj_norm_eps: float = 1e-5,
     threads: int = 128,
     num_stages: int = 0,
 ) -> torch.Tensor:
@@ -76,6 +78,7 @@ def mamba_mimo_fwd(
             K_BIAS: T.Tensor([H, R, N], T.float32),  # type: ignore
             MIMO_V: T.Tensor([H, R, P], T.float32), # type: ignore
             MIMO_O: T.Tensor([H, R, P], T.float32), # type: ignore
+            OUT_NORM_WEIGHT: T.Tensor([H, P], T.float32), # type: ignore
             Z: T.Tensor([B, S, H, P], dtype),  # type: ignore
             D: T.Tensor([H], T.float32),  # type: ignore
             MIMO_Z: T.Tensor([H, R, P], T.float32), # type: ignore
@@ -95,15 +98,34 @@ def mamba_mimo_fwd(
             Computes interchunk and intrachunk contributions with optional D and Z paths,
             then writes output activations.
 
+            The kernel supports three output modes:
+            - ``reduceO=False``: write the full per-rank MIMO output
+              ``raw_y`` with shape ``[B, S, R, H, P]``.
+            - ``reduceO=True`` and ``fuse_pregate_headwise_rms_norm=False``:
+              apply the MIMO output projection with ``MIMO_O`` inside the
+              kernel and write ``[B, S, H, P]``.
+            - ``reduceO=True`` and ``fuse_pregate_headwise_rms_norm=True``:
+              form each per-rank ``raw_y`` and projected gate ``z_r`` in
+              shared/register memory, apply
+              ``RMSNorm(raw_y) * silu(z_r)`` with the RMS reduction over the
+              headdim ``P``, then apply ``MIMO_O`` and write ``[B, S, H, P]``.
+              This fused path consumes ``Z``, ``MIMO_Z``, ``MIMO_O``, and
+              ``OUT_NORM_WEIGHT`` and avoids materializing full
+              ``[B, S, R, H, P]`` MIMO outputs in global memory.  The public
+              wrapper passes a unit norm weight when no explicit
+              ``outproj_norm_weight`` is provided.
+
         Inputs:
             - Activations: Q, K, V.
-            - Projection parameters/biases: MIMO_V (Psi), MIMO_O (Phi), optional MIMO_Z (Zeta), ANGLES,
-              and Q_BIAS/K_BIAS.
-            - Optional modifiers: Z, and D.
+            - Projection parameters/biases: MIMO_V (Psi), MIMO_O (Phi),
+              optional MIMO_Z (Zeta), optional OUT_NORM_WEIGHT, ANGLES, and
+              Q_BIAS/K_BIAS.
+            - Optional modifiers: Z and D.
             - Discretization tensors: DA_CS, DA_CS_REV, DT, TRAP, and SEGSUM.
 
         Outputs:
-            - O: fused forward output activations.
+            - O: forward output activations. Shape is ``[B, S, H, P]`` when
+              ``reduceO`` is true, otherwise ``[B, S, R, H, P]``.
             - FINAL_STATE: final recurrent states (if return_final_state is True).
             - FINAL_K: final K tensor (if return_state is True, for use in decode)
 
@@ -337,7 +359,27 @@ def mamba_mimo_fwd(
 
                 # --- Optional Z Gating + Down-Projection ---
                 if reduceO:
-                    if hasZ:
+                    if fuse_pregate_headwise_rms_norm:
+                        o_sq_frag = T.alloc_fragment([chunk_size, R, P], T.float32)
+                        for cs, r, p in T.Parallel(chunk_size, R, P):
+                            o_sq_frag[cs, r, p] = (
+                                o_mimo_accum_frag[cs * R + r, p]
+                                * o_mimo_accum_frag[cs * R + r, p]
+                            )
+                        o_rstd_frag = T.alloc_fragment([chunk_size, R], T.float32)
+                        T.reduce_sum(o_sq_frag, o_rstd_frag, dim=-1, clear=True)
+                        for cs, r in T.Parallel(chunk_size, R):
+                            o_rstd_frag[cs, r] = 1.0 / T.sqrt(
+                                o_rstd_frag[cs, r] / P + outproj_norm_eps
+                            )
+                        z_frag = T.alloc_fragment([chunk_size, P], dtype)
+                        T.copy(Z[i_b, chunk_start:chunk_start+chunk_size, i_h, :], z_frag)
+                        z_expanded_frag = T.alloc_fragment([chunk_size, R, P], dtype)
+                        for cs, r, p in T.Parallel(chunk_size, R, P):
+                            # Apply SiLU to z_expanded_frag[cs, r, p]:
+                            o_gated = z_frag[cs, p] * MIMO_Z[i_h, r, p] * 0.5
+                            z_expanded_frag[cs, r, p] = o_gated * T.tanh(o_gated) + o_gated
+                    elif hasZ:
                         z_frag = T.alloc_fragment([chunk_size, P], dtype)
                         T.copy(Z[i_b, chunk_start:chunk_start+chunk_size, i_h, :], z_frag)
                         z_expanded_frag = T.alloc_fragment([chunk_size, R, P], dtype)
@@ -347,7 +389,15 @@ def mamba_mimo_fwd(
                             z_expanded_frag[cs, r, p] = o_gated * T.tanh(o_gated) + o_gated
 
                     lqk_PsiV_reshaped_frag = T.view(o_mimo_accum_frag, shape=[chunk_size, R, P])
-                    if hasZ:
+                    if fuse_pregate_headwise_rms_norm:
+                        for cs, r, p in T.Parallel(chunk_size, R, P):
+                            lqk_PsiV_reshaped_frag[cs, r, p] *= (
+                                o_rstd_frag[cs, r]
+                                * OUT_NORM_WEIGHT[i_h, p]
+                                * phi_frag_intrachunk[r, p]
+                                * z_expanded_frag[cs, r, p]
+                            )
+                    elif hasZ:
                         for cs, r, p in T.Parallel(chunk_size, R, P):
                             lqk_PsiV_reshaped_frag[cs, r, p] *= phi_frag_intrachunk[r, p] * z_expanded_frag[cs, r, p]
                     else:
@@ -427,6 +477,9 @@ def mamba_mimo_forward(q, k, v,
                        segsum,
                        chunk_size, rotary_dim_divisor, dtype, 
                        return_state=False,
+                       fuse_pregate_headwise_rms_norm=False,
+                       outproj_norm_weight=None,
+                       outproj_norm_eps=1e-5,
                        threads=128, 
                        num_stages=0):
     B, S, R, G, N = q.shape
@@ -436,18 +489,25 @@ def mamba_mimo_forward(q, k, v,
     else:
         tl_dtype = dtype
     reduceO = mimo_o is not None
-    kernel = mamba_mimo_fwd(T.dynamic("B"),
-                            T.dynamic("S"), 
-                            T.dynamic("H"), 
-                            T.dynamic("G"), 
+    if fuse_pregate_headwise_rms_norm:
+        if not reduceO:
+            raise ValueError("fuse_pregate_headwise_rms_norm=True requires mimo_o.")
+        if z is None or mimo_z is None:
+            raise ValueError("fuse_pregate_headwise_rms_norm=True requires z and mimo_z.")
+    kernel = mamba_mimo_fwd(B,
+                            S,
+                            H,
+                            G,
                             N, P, R, 
                             z is not None, 
                             D is not None, 
                             reduceO,
+                            fuse_pregate_headwise_rms_norm,
                             return_final_state=return_state,
                             chunk_size=chunk_size, 
                             rotary_dim_divisor=rotary_dim_divisor, 
                             dtype=tl_dtype, 
+                            outproj_norm_eps=outproj_norm_eps,
                             threads=threads, 
                             num_stages=num_stages)
     # print(kernel.get_kernel_source()) # NOTE: prints compiled CUDA code
@@ -455,11 +515,31 @@ def mamba_mimo_forward(q, k, v,
         o = torch.empty((B, S, H, P), device='cuda', dtype=dtype)
     else:
         o = torch.empty((B, S, R, H, P), device='cuda', dtype=dtype)
-    # Kernel always declares all tensor parameters; pass dummies for None args
-    mimo_o_arg = mimo_o if reduceO else torch.empty((H, R, P), device=q.device, dtype=torch.float32)
-    z_arg = z if z is not None else torch.empty((B, S, H, P), device=q.device, dtype=dtype)
-    D_arg = D if D is not None else torch.empty((H,), device=q.device, dtype=torch.float32)
-    mimo_z_arg = mimo_z if mimo_z is not None else torch.empty((H, R, P), device=q.device, dtype=torch.float32)
+    # TileLang accepts None for tensor arguments that are compile-time unused.
+    mimo_o_arg = mimo_o if reduceO else None
+    if not fuse_pregate_headwise_rms_norm:
+        outproj_norm_weight_arg = None
+    elif outproj_norm_weight is None:
+        outproj_norm_weight_arg = torch.ones((H, P), device=q.device, dtype=torch.float32)
+    else:
+        if outproj_norm_weight.ndim == 1:
+            if outproj_norm_weight.numel() != H * P:
+                raise ValueError(
+                    f"Expected flattened outproj_norm_weight to have {H * P} elements, "
+                    f"got {outproj_norm_weight.numel()}."
+                )
+            outproj_norm_weight_arg = outproj_norm_weight.reshape(H, P).contiguous()
+        elif outproj_norm_weight.shape == (H, P):
+            outproj_norm_weight_arg = outproj_norm_weight.contiguous()
+        else:
+            raise ValueError(
+                f"Expected outproj_norm_weight to have shape ({H}, {P}) or ({H * P},), "
+                f"got {tuple(outproj_norm_weight.shape)}."
+            )
+        outproj_norm_weight_arg = outproj_norm_weight_arg.to(device=q.device, dtype=torch.float32)
+    z_arg = z
+    D_arg = D
+    mimo_z_arg = mimo_z
 
     h = torch.empty((B, H, N, P), device='cuda', dtype=torch.float32) if return_state else None
     k_final = torch.empty((B, R, H, N), device='cuda', dtype=dtype) if return_state else None
@@ -469,6 +549,7 @@ def mamba_mimo_forward(q, k, v,
             v, o,
             q_bias, k_bias,
             mimo_v, mimo_o_arg,
+            outproj_norm_weight_arg,
             z_arg, D_arg, mimo_z_arg,
             angles,
             dA_cs,
