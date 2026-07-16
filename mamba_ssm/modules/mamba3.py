@@ -1,6 +1,7 @@
 # Copyright (c) 2026, Dao AI Lab, Goombalab.
 
 import math
+import logging
 from einops import rearrange, repeat
 
 import torch
@@ -9,6 +10,20 @@ import torch.nn.functional as F
 
 from mamba_ssm.ops.triton.layernorm_gated import RMSNorm as RMSNormGated
 
+# GPU-aware MIMO kernel selector
+try:
+    from mamba_ssm.ops.gpu_selector.mimo_kernel_selector import (
+        get_mimo_kernel,
+        mamba3_mimo_combined_auto,
+        MIMOKernelSelector,
+    )
+    gpu_selector_available = True
+except ImportError:
+    gpu_selector_available = False
+    get_mimo_kernel = None
+    mamba3_mimo_combined_auto = None
+
+# Fallback to original TileLang kernel for backward compatibility
 try:
     from mamba_ssm.ops.tilelang.mamba3.mamba3_mimo import mamba3_mimo as mamba3_mimo_combined
 except ImportError:
@@ -22,6 +37,8 @@ try:
     from mamba_ssm.ops.cute.mamba3.mamba3_step_fn import mamba3_step_fn
 except ImportError:    
     mamba3_step_fn = None
+
+logger = logging.getLogger(__name__)
 
 
 def heavy_tail_activation(x: torch.Tensor) -> torch.Tensor:
@@ -39,6 +56,7 @@ def heavy_tail_activation(x: torch.Tensor) -> torch.Tensor:
     neg = x.clamp_max(0)
     pos = x.clamp_min(0)
     return pos + torch.reciprocal(1 - neg)
+
 
 class Mamba3(nn.Module):
     def __init__(
@@ -67,6 +85,7 @@ class Mamba3(nn.Module):
         n_layer=None,  # Absorb kwarg for general module
         device=None,
         dtype=None,
+        use_gpu_selector=True,  # Enable GPU-aware kernel selection
         **kwargs,
     ):
         factory_kwargs = {"device": device, "dtype": dtype}
@@ -84,10 +103,22 @@ class Mamba3(nn.Module):
         self.fuse_pregate_headwise_norm = bool(
             fuse_pregate_headwise_norm and self.is_mimo and self.is_outproj_norm
         )
+        self.use_gpu_selector = use_gpu_selector and gpu_selector_available
+        self._mimo_kernel = None
+        self._mimo_kernel_name = None
+        
         if not self.is_mimo:
             self.mimo_rank = 1
         else:
-            assert mamba3_mimo_combined is not None, "Fails to import Mamba-3 MIMO kernels. Please ensure you installed the necessary dependencies, such as TileLang."
+            if self.use_gpu_selector:
+                logger.info("GPU-aware MIMO kernel selector enabled")
+            else:
+                # Fallback: require TileLang for MIMO
+                if mamba3_mimo_combined is None:
+                    raise RuntimeError(
+                        "MIMO mode requires either GPU-aware kernel selector or TileLang. "
+                        "Please install TileLang or enable use_gpu_selector=True."
+                    )
 
         self.d_inner = int(self.expand * self.d_model)
         assert self.d_inner % self.headdim == 0
@@ -156,6 +187,25 @@ class Mamba3(nn.Module):
         # Output projection
         self.out_proj = nn.Linear(self.d_inner, self.d_model, bias=False, **factory_kwargs)
 
+    def _get_mimo_kernel(self):
+        """Lazily initialize MIMO kernel based on device at first use."""
+        if self._mimo_kernel is None and self.is_mimo:
+            if self.use_gpu_selector:
+                try:
+                    device_idx = int(self.in_proj.weight.device.index) if self.in_proj.weight.device.index is not None else 0
+                    kernel, kernel_name, gpu_info = get_mimo_kernel(device_idx, verbose=True)
+                    self._mimo_kernel = kernel
+                    self._mimo_kernel_name = kernel_name
+                    logger.info(f"Selected {kernel_name} kernel on {gpu_info.device_name}")
+                except Exception as e:
+                    logger.warning(f"Failed to use GPU selector: {e}. Falling back to default kernel.")
+                    self._mimo_kernel = mamba3_mimo_combined
+                    self._mimo_kernel_name = "tilelang_hopper"
+            else:
+                self._mimo_kernel = mamba3_mimo_combined
+                self._mimo_kernel_name = "tilelang_hopper"
+        
+        return self._mimo_kernel
 
     def forward(self, u, seq_idx=None, cu_seqlens=None, inference_params=None):
         """
@@ -207,7 +257,9 @@ class Mamba3(nn.Module):
         
         # Apply Mamba-3 kernel
         if self.is_mimo:
-            y = mamba3_mimo_combined(
+            mimo_kernel = self._get_mimo_kernel()
+            
+            y = mimo_kernel(
                 Q=C,
                 K=B,
                 V=x,
@@ -276,7 +328,7 @@ class Mamba3(nn.Module):
         
         out = self.out_proj(y.to(x.dtype))
         return out
-    
+     
 
     def _preprocess(self, A_proj, dd_dt, B, C, x, z, trap_proj, angle_proj):
         _A = -heavy_tail_activation(A_proj.to(torch.float32))
@@ -438,7 +490,7 @@ class Mamba3(nn.Module):
         v_state.copy_(nxt_v_state)
 
         return out, nxt_angle_state, ssm_state, nxt_k_state, nxt_v_state
-    
+     
     def allocate_inference_cache(self, batch_size, max_seqlen, device=None, dtype=None, inplace_state=None, **kwargs):
         device = self.in_proj.weight.device if device is None else device
         dtype = self.in_proj.weight.dtype if dtype is None else dtype
@@ -480,7 +532,7 @@ class Mamba3(nn.Module):
         )
 
         return (angle_dt_state, ssm_state, k_state, v_state)
-    
+     
     def _get_states_from_cache(self, inference_params, batch_size, initialize_states=False):
         assert self.layer_idx is not None
         device = self.in_proj.weight.device
