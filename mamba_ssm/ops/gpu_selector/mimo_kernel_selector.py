@@ -3,9 +3,10 @@ GPU device detection and kernel selection for Mamba3 MIMO.
 
 This module provides automatic selection between different kernel implementations
 based on the target GPU architecture, enabling seamless compatibility across
-Hopper, Ada, Ampere, Volta, and other NVIDIA GPU architectures.
+Blackwell, Hopper, Ada, Ampere, Volta, and other NVIDIA GPU architectures.
 
 Supported GPUs:
+- Blackwell (RTX 50xx, GB100, GB200): Uses optimized TileLang kernel with TMA
 - Hopper (H100, H200): Uses optimized TileLang kernel with TMA
 - Ada (RTX 40xx, L40, L40S): Uses GPU-compatible TileLang kernel
 - Ampere (RTX 30xx, A100): Uses Triton fallback kernel
@@ -23,6 +24,18 @@ logger = logging.getLogger(__name__)
 
 # GPU Architecture Detection Mapping
 GPU_ARCHITECTURE_MAP = {
+    # Blackwell (10.0)
+    "NVIDIA GeForce RTX 5050": (10, 0),
+    "NVIDIA GeForce RTX 5050 Laptop GPU": (10, 0),
+    "NVIDIA GeForce RTX 5060": (10, 0),
+    "NVIDIA GeForce RTX 5060 Laptop GPU": (10, 0),
+    "NVIDIA GeForce RTX 5070": (10, 0),
+    "NVIDIA GeForce RTX 5070 Laptop GPU": (10, 0),
+    "NVIDIA GeForce RTX 5080": (10, 0),
+    "NVIDIA GeForce RTX 5090": (10, 0),
+    "GB100": (10, 0),
+    "GB200": (10, 0),
+    
     # Hopper (9.0)
     "H100": (9, 0),
     "H200": (9, 0),
@@ -66,6 +79,7 @@ GPU_ARCHITECTURE_MAP = {
 }
 
 # Compute capability ranges for kernel selection
+BLACKWELL_MIN_CC = (10, 0)
 HOPPER_MIN_CC = (9, 0)
 ADA_MIN_CC = (8, 9)
 AMPERE_MIN_CC = (8, 0)
@@ -86,29 +100,36 @@ class GPUArchitecture:
         logger.info(f"Compute Capability: {self.major}.{self.minor}")
     
     @property
+    def is_blackwell(self) -> bool:
+        """Check if GPU is Blackwell architecture."""
+        return self.compute_capability >= BLACKWELL_MIN_CC
+    
+    @property
     def is_hopper(self) -> bool:
         """Check if GPU is Hopper architecture."""
-        return self.compute_capability >= HOPPER_MIN_CC
+        return self.compute_capability >= HOPPER_MIN_CC and not self.is_blackwell
     
     @property
     def is_ada(self) -> bool:
         """Check if GPU is Ada architecture."""
-        return self.compute_capability >= ADA_MIN_CC and not self.is_hopper
+        return self.compute_capability >= ADA_MIN_CC and not self.is_blackwell and not self.is_hopper
     
     @property
     def is_ampere(self) -> bool:
         """Check if GPU is Ampere architecture."""
-        return self.compute_capability >= AMPERE_MIN_CC and not self.is_hopper and not self.is_ada
+        return self.compute_capability >= AMPERE_MIN_CC and not self.is_blackwell and not self.is_hopper and not self.is_ada
     
     @property
     def is_volta(self) -> bool:
         """Check if GPU is Volta architecture."""
-        return self.compute_capability >= VOLTA_MIN_CC and not self.is_hopper and not self.is_ada and not self.is_ampere
+        return self.compute_capability >= VOLTA_MIN_CC and not self.is_blackwell and not self.is_hopper and not self.is_ada and not self.is_ampere
     
     @property
     def architecture_name(self) -> str:
         """Get human-readable architecture name."""
-        if self.is_hopper:
+        if self.is_blackwell:
+            return "Blackwell"
+        elif self.is_hopper:
             return "Hopper"
         elif self.is_ada:
             return "Ada"
@@ -129,7 +150,7 @@ class MIMOKernelSelector:
     
     Provides a unified interface for kernel selection across different GPU types,
     with automatic fallback chain:
-    1. Try optimized Hopper TileLang kernel
+    1. Try optimized Blackwell/Hopper TileLang kernel (with TMA)
     2. Fall back to compatible TileLang kernel (Ada/Ampere)
     3. Fall back to Triton kernel (older GPUs, fallback)
     """
@@ -148,7 +169,7 @@ class MIMOKernelSelector:
         try:
             from mamba_ssm.ops.tilelang.mamba3.mamba3_mimo import mamba3_mimo as mamba3_mimo_combined
             self._tilelang_hopper_kernel = mamba3_mimo_combined
-            logger.debug("Loaded Hopper-optimized TileLang kernel")
+            logger.debug("Loaded Hopper-optimized TileLang kernel (works on Blackwell/Hopper)")
         except (ImportError, Exception) as e:
             logger.debug(f"Could not load Hopper TileLang kernel: {e}")
         
@@ -176,13 +197,13 @@ class MIMOKernelSelector:
         Returns:
             Tuple of (kernel_function, kernel_name_str)
         """
-        if self.gpu.is_hopper:
+        if self.gpu.is_blackwell or self.gpu.is_hopper:
             if self._tilelang_hopper_kernel is not None:
                 if verbose:
-                    logger.info(f"Using Hopper-optimized TileLang kernel on {self.gpu.device_name}")
-                return self._tilelang_hopper_kernel, "hopper_tilelang"
+                    logger.info(f"Using {self.gpu.architecture_name}-optimized TileLang kernel on {self.gpu.device_name}")
+                return self._tilelang_hopper_kernel, f"{self.gpu.architecture_name.lower()}_tilelang"
         
-        if self.gpu.is_hopper or self.gpu.is_ada or self.gpu.is_ampere:
+        if self.gpu.is_blackwell or self.gpu.is_hopper or self.gpu.is_ada or self.gpu.is_ampere:
             if self._tilelang_compat_kernel is not None:
                 if verbose:
                     logger.info(f"Using GPU-compatible TileLang kernel on {self.gpu.architecture_name} ({self.gpu.device_name})")
@@ -205,9 +226,10 @@ class MIMOKernelSelector:
         has_triton = self._triton_kernel is not None
         
         return {
+            "blackwell_optimized": has_hopper and self.gpu.is_blackwell,
             "hopper_optimized": has_hopper and self.gpu.is_hopper,
-            "tma_support": has_hopper and self.gpu.is_hopper,
-            "warp_specialized": has_hopper and self.gpu.is_hopper,
+            "tma_support": has_hopper and (self.gpu.is_blackwell or self.gpu.is_hopper),
+            "warp_specialized": has_hopper and (self.gpu.is_blackwell or self.gpu.is_hopper),
             "tilelang_compatible": has_compat,
             "triton_fallback": has_triton,
         }
