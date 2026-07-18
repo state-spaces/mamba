@@ -62,8 +62,22 @@ class _Mamba3Function(torch.autograd.Function):
         ctx.dtype = dtype
         ctx.fuse_pregate_headwise_rms_norm = fuse_pregate_headwise_rms_norm
         ctx.outproj_norm_eps = outproj_norm_eps
+
+        def _ensure_tilelang_contiguous(t: Optional[Tensor]) -> Optional[Tensor]:
+            """Make tensor truly contiguous with last-stride=1.
+
+            PyTorch's .contiguous() treats a size-1 trailing dimension as contiguous even when
+            stride(-1) != 1 (e.g. after transpose). TileLang kernels require physical stride 1.
+            """
+            if t is None:
+                return None
+            t = t.contiguous()
+            if t.stride(-1) != 1:
+                t = torch.empty(t.shape, device=t.device, dtype=t.dtype).copy_(t)
+            return t
+
         (Q, K, V, ADT, DT, Trap, Q_bias, K_bias, MIMO_V, MIMO_Z, MIMO_Out, Out_Norm_Weight, Angles, D, Z) = tuple(
-            t.contiguous() if t is not None else None
+            _ensure_tilelang_contiguous(t)
             for t in (
                 Q, K, V, ADT, DT, Trap, Q_bias, K_bias, MIMO_V, MIMO_Z, MIMO_Out, Out_Norm_Weight, Angles, D, Z,
             )
