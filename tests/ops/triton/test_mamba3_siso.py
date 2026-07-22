@@ -11,6 +11,7 @@ from typing import Optional, Tuple
 import pytest
 import torch
 import torch.nn.functional as F
+import triton
 from einops import rearrange, repeat
 
 from mamba_ssm.ops.triton.mamba3.mamba3_siso_combined import mamba3_siso_combined
@@ -896,6 +897,110 @@ def test_mamba3_siso_step_ref_vs_fwd_ref(nheads_qk=4, has_Z=True, has_D=True):
         err = relative_error(step_state, fwd_state, name=f"Final_{state_name}_State",
                              angle=(state_name == 'Angle'), ref_mag_mask=1e-3)
         print(f"Final_{state_name}_State error: {err:.2e}")
+
+
+# ==================================================================
+# Autotune Config Pruning Tests
+# ==================================================================
+
+@pytest.mark.parametrize("major,minor,expect_pruned", [
+    (9,  0, False),   # SM90 (Hopper) -- full config space
+    (10, 0, True),    # SM100 (Blackwell B200) -- restrict to num_stages=1
+    (10, 3, True),    # SM103 (Blackwell GB300) -- restrict to num_stages=1
+    (12, 0, True),    # SM120 (consumer Blackwell) -- restrict to num_stages=1
+])
+def test_prune_mamba3_siso_fwd_configs(major, minor, expect_pruned):
+    """Test that _prune_mamba3_siso_fwd_configs restricts num_stages on Blackwell GPUs
+    (compute capability major 10 or 12) while leaving other architectures unchanged.
+    """
+    from unittest.mock import MagicMock, patch
+    from mamba_ssm.ops.triton.mamba3.mamba3_siso_fwd import _prune_mamba3_siso_fwd_configs
+
+    all_configs = [
+        triton.Config({}, num_stages=s, num_warps=w, maxnreg=r)
+        for s in [1, 2, 3]
+        for w in [2, 4, 8]
+        for r in [None, 128, 256]
+    ]
+
+    fake_tensor = MagicMock()
+    fake_tensor.device = "cuda:0"
+    named_args = {"Q": fake_tensor}
+
+    with patch("torch.cuda.get_device_capability", return_value=(major, minor)):
+        result = _prune_mamba3_siso_fwd_configs(all_configs, named_args)
+
+    result_stages = {c.num_stages for c in result}
+    if expect_pruned:
+        assert result_stages == {1}, (
+            f"Expected only num_stages=1 for SM{major}{minor:02d}, got {result_stages}"
+        )
+    else:
+        assert result_stages == {1, 2, 3}, (
+            f"Expected full stage set for SM{major}{minor:02d}, got {result_stages}"
+        )
+
+
+# ==================================================================
+# Blackwell-only 2048-token Forward Regression Test
+# ==================================================================
+
+def test_mamba3_siso_fwd_blackwell_regression(nheads_qk=4, has_Z=True, has_D=True):
+    """Regression test: on Blackwell GPUs, the Triton forward kernel must match
+    the reference recurrence at seqlen=2048.  On non-Blackwell hardware the test
+    is skipped because the bug only manifests there.
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
+    major, _ = torch.cuda.get_device_capability()
+    if major not in (10, 12):
+        pytest.skip(f"Blackwell-specific regression -- skipping on compute capability {major}.x")
+
+    device = "cuda"
+    rtol = 5e-2
+    dtype = torch.bfloat16
+    torch.random.manual_seed(42)
+
+    batch = 16
+    seqlen = 2048
+    nheads = 32
+    headdim_qk = 128
+    headdim_v = 64
+    chunk_size = 64
+
+    inputs = create_mamba3_siso_inputs(
+        batch, seqlen, nheads, nheads_qk, headdim_qk, headdim_v,
+        dtype, device, has_D=has_D, has_Z=has_Z, has_input_states=True,
+        requires_grad=False,
+    )
+
+    # Reference: recurrent step-by-step implementation
+    out_ref, _ = mamba3_siso_step_ref(
+        inputs["Q"], inputs["K"], inputs["V"],
+        inputs["ADT"], inputs["DT"], inputs["Trap"],
+        inputs["Q_bias"], inputs["K_bias"], inputs["Angles"],
+        inputs["D"], inputs["Z"],
+        Input_States=inputs["Input_States"],
+    )
+
+    # Kernel: full-sequence Triton forward via mamba3_siso_combined
+    out_kernel, *_ = mamba3_siso_combined(
+        inputs["Q"], inputs["K"], inputs["V"],
+        inputs["ADT"], inputs["DT"], inputs["Trap"],
+        inputs["Q_bias"], inputs["K_bias"], inputs["Angles"],
+        inputs["D"], inputs["Z"] if has_Z else None,
+        inputs["Input_States"],
+        chunk_size=chunk_size,
+        return_final_states=False,
+    )
+
+    err = relative_error(out_kernel, out_ref, name="Output")
+    print(f"Blackwell 2048-token forward error: {err:.2e}")
+    assert err < rtol, (
+        f"Forward output error {err:.2e} exceeds {rtol} on Blackwell — "
+        "possible num_stages > 1 corruption"
+    )
 
 
 # Main function
