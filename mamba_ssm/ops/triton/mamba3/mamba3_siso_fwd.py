@@ -15,6 +15,22 @@ import triton
 import triton.language as tl
 from mamba_ssm.ops.triton.mamba3.utils import cos_approx, sin_approx, tanh_approx, silu, sigmoid_approx
 
+
+def _prune_mamba3_siso_fwd_configs(configs, named_args, **kwargs):
+    """Prune autotuning configs for mamba3_siso_fwd_kernel based on GPU architecture.
+
+    On Blackwell GPUs (compute capability major 10 or 12), multi-stage software
+    pipelining (num_stages > 1) silently corrupts the forward pass output of this
+    recurrent kernel. This is a Triton codegen issue reproduced across Triton 3.5.1,
+    3.6.0, and 3.7.0. Restrict to num_stages=1 on Blackwell to ensure correctness.
+    Non-Blackwell architectures (e.g., Hopper/SM90) retain the full autotune space.
+    """
+    major, _ = torch.cuda.get_device_capability(named_args["Q"].device)
+    if major in (10, 12):
+        return [config for config in configs if config.num_stages == 1]
+    return configs
+
+
 @triton.autotune(
     configs=[
         triton.Config({}, num_stages=s, num_warps=w, maxnreg=r)
@@ -25,6 +41,9 @@ from mamba_ssm.ops.triton.mamba3.utils import cos_approx, sin_approx, tanh_appro
     key=[
         "CHUNK_SIZE", "HEADDIM_QK", "HEADDIM_V", "STORE_SSM_STATES_ADT_OUTV", "HAS_D",
         "HAS_Z", "HAS_INITIAL_STATES", "RETURN_FINAL_STATES", "IS_VARLEN"],
+    prune_configs_by={
+        "early_config_prune": _prune_mamba3_siso_fwd_configs,
+    },
 )
 @triton.jit
 def mamba3_siso_fwd_kernel(
