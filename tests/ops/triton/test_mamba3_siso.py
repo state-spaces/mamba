@@ -904,10 +904,10 @@ def test_mamba3_siso_step_ref_vs_fwd_ref(nheads_qk=4, has_Z=True, has_D=True):
 # ==================================================================
 
 @pytest.mark.parametrize("major,minor,expect_pruned", [
-    (9,  0, False),   # SM90 (Hopper) — full config space
-    (10, 0, True),    # SM100 (Blackwell B200) — restrict to num_stages=1
-    (10, 3, True),    # SM103 (Blackwell GB300) — restrict to num_stages=1
-    (12, 0, True),    # SM120 (consumer Blackwell) — restrict to num_stages=1
+    (9,  0, False),   # SM90 (Hopper) -- full config space
+    (10, 0, True),    # SM100 (Blackwell B200) -- restrict to num_stages=1
+    (10, 3, True),    # SM103 (Blackwell GB300) -- restrict to num_stages=1
+    (12, 0, True),    # SM120 (consumer Blackwell) -- restrict to num_stages=1
 ])
 def test_prune_mamba3_siso_fwd_configs(major, minor, expect_pruned):
     """Test that _prune_mamba3_siso_fwd_configs restricts num_stages on Blackwell GPUs
@@ -955,7 +955,7 @@ def test_mamba3_siso_fwd_blackwell_regression(nheads_qk=4, has_Z=True, has_D=Tru
 
     major, _ = torch.cuda.get_device_capability()
     if major not in (10, 12):
-        pytest.skip(f"Blackwell-specific regression — skipping on compute capability {major}.x")
+        pytest.skip(f"Blackwell-specific regression -- skipping on compute capability {major}.x")
 
     device = "cuda"
     rtol = 5e-2
