@@ -101,3 +101,30 @@ def test_layer_norm_gated(d, dtype, wtype, has_bias, has_z, is_rms_norm, has_gro
     assert (weight.grad - weight_ref.grad).abs().max().item() <= 2 * (weight_pt.grad - weight_ref.grad).abs().max().item() + atol
     if has_bias:
         assert (bias.grad - bias_ref.grad).abs().max().item() <= 2 * (bias_pt.grad - bias_ref.grad).abs().max().item() + atol
+
+
+def test_layer_norm_gated_large_row_count_no_overflow():
+    # Regression test for a 32-bit pointer-arithmetic overflow in
+    # _layer_norm_fwd_1pass_kernel and _layer_norm_bwd_kernel:
+    # `row * stride_x_row` (fwd) / `row_start * stride_x_row` (bwd) was
+    # computed in 32-bit and silently wrapped once it exceeded 2**31 - 1,
+    # corrupting the pointer offset into `x` and causing a CUDA illegal
+    # memory access. Unlike the ssd_chunk_state.py overflow, this doesn't
+    # need a non-contiguous view -- an ordinarily contiguous (M, N) input is
+    # enough once M * N is large, since `row` ranges over all M flattened
+    # rows and stride_x_row == N. See
+    # https://github.com/triton-lang/triton/issues/1058.
+    device = 'cuda'
+    torch.manual_seed(0)
+    M = 115_866
+    N = 18_560  # (M - 1) * N > 2**31 - 1
+
+    x = torch.randn(M, N, dtype=torch.bfloat16, device=device)
+    weight = torch.randn(N, dtype=torch.float32, device=device)
+
+    with torch.no_grad():
+        out = layernorm_fn(x, weight, bias=None, is_rms_norm=True)
+    torch.cuda.synchronize(device)
+
+    assert out.shape == (M, N)
+    assert torch.isfinite(out).all()
