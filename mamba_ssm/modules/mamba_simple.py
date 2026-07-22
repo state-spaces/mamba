@@ -141,6 +141,7 @@ class Mamba(nn.Module):
             xz = xz + rearrange(self.in_proj.bias.to(dtype=xz.dtype), "d -> d 1")
 
         A = -torch.exp(self.A_log.float())  # (d_inner, d_state)
+        A = torch.clamp(A, max=-1e-4)  # Prevent A→0: ensures minimum decay |A| ≥ 1e-4
         # In the backward pass we write dx and dz next to each other to avoid torch.cat
         if self.use_fast_path and causal_conv1d_fn is not None and inference_params is None:  # Doesn't support outputting the states
             out = mamba_inner_fn(
@@ -233,6 +234,7 @@ class Mamba(nn.Module):
         # Don't add dt_bias here
         dt = F.linear(dt, self.dt_proj.weight)  # (B d_inner)
         A = -torch.exp(self.A_log.float())  # (d_inner, d_state)
+        A = torch.clamp(A, max=-1e-4)  # Prevent A→0: ensures minimum decay |A| ≥ 1e-4
 
         # SSM step
         if selective_state_update is None:

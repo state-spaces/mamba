@@ -130,6 +130,7 @@ class Mamba2Simple(nn.Module):
 
         zxbcdt = self.in_proj(u)  # (B, L, d_in_proj)
         A = -torch.exp(self.A_log)  # (nheads) or (d_inner, d_state)
+        A = torch.clamp(A, max=-1e-4)  # Prevent A→0: ensures minimum decay |A| ≥ 1e-4
         initial_states=repeat(self.init_states, "... -> b ...", b=batch) if self.learnable_init_states else None
         dt_limit_kwargs = {} if self.dt_limit == (0.0, float("inf")) else dict(dt_limit=self.dt_limit)
 
