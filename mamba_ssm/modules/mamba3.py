@@ -169,8 +169,13 @@ class Mamba3(nn.Module):
             inference_batch = cu_seqlens.shape[0] - 1 if cu_seqlens is not None else batch
             angle_dt_state, ssm_state, k_state, v_state = self._get_states_from_cache(inference_params, inference_batch)
             if inference_params.seqlen_offset > 0:
-                out, _, _, _, _ = self.step(u, angle_dt_state, ssm_state, k_state, v_state)
-                return out
+                # Decode: forward receives (batch, 1, dim) but step operates on
+                # (batch, dim). Squeeze the singleton seqlen going in and restore it
+                # coming out so the caller sees the same (batch, seqlen, dim) layout
+                # as the prefill path.
+                assert seqlen == 1, "Mamba3 decode step expects a single token (seqlen=1)."
+                out, _, _, _, _ = self.step(u.squeeze(1), angle_dt_state, ssm_state, k_state, v_state)
+                return out.unsqueeze(1)
 
         # Apply in_proj
         zxBCdtAtrap = self.in_proj(u)
