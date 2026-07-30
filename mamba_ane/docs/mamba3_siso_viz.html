@@ -1,0 +1,1294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mamba-3 SISO — Interactive ANE Porting Guide</title>
+<style>
+:root {
+  --bg: #0d1117; --bg-card: #161b22; --bg-code: #0a0e14;
+  --border: #30363d; --text: #e6edf3; --muted: #7d8590; --dim: #3d444d;
+  --green: #22c55e; --orange: #f97316; --blue: #60a5fa;
+  --purple: #a78bfa; --red: #ef4444; --yellow: #fbbf24;
+  --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --mono: 'Cascadia Code', 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; }
+body { font-family: var(--font); background: var(--bg); color: var(--text); font-size: 14px; line-height: 1.6; }
+.container { max-width: 1380px; margin: 0 auto; padding: 0 24px; }
+section { padding: 48px 0; border-bottom: 1px solid var(--border); }
+h1 { font-size: 2rem; font-weight: 700; letter-spacing: -0.02em; }
+h2 { font-size: 1.35rem; font-weight: 600; margin-bottom: 8px; }
+h3 { font-size: 1rem; font-weight: 600; margin-bottom: 10px; }
+h4 { font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin-bottom: 10px; }
+p { color: var(--muted); margin-bottom: 10px; line-height: 1.7; }
+code { font-family: var(--mono); font-size: .82em; background: rgba(255,255,255,.05); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; }
+pre { font-family: var(--mono); font-size: .78rem; background: var(--bg-code); border: 1px solid var(--border); border-radius: 8px; padding: 16px; overflow-x: auto; line-height: 1.75; }
+pre code { background: none; border: none; padding: 0; font-size: inherit; }
+
+/* ── HERO ── */
+.hero { padding: 40px 0 32px; border-bottom: 1px solid var(--border); }
+.badges { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
+.badge { display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 20px; font-size: .72rem; font-weight: 600; border: 1px solid; }
+.badge.triton { color: var(--orange); border-color: var(--orange); background: rgba(249,115,22,.1); }
+.badge.pytorch { color: var(--green); border-color: var(--green); background: rgba(34,197,94,.1); }
+.badge.ane { color: var(--blue); border-color: var(--blue); background: rgba(96,165,250,.1); }
+.badge.state { color: var(--purple); border-color: var(--purple); background: rgba(167,139,250,.1); }
+.subtitle { color: var(--muted); font-size: 1.05rem; margin: 8px 0 28px; }
+.config-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px,1fr)); gap: 10px; margin-top: 16px; }
+.cfg { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; }
+.cfg-k { font-family: var(--mono); font-size: .75rem; color: var(--muted); }
+.cfg-v { font-family: var(--mono); font-size: 1.15rem; font-weight: 700; color: var(--blue); margin-top: 3px; }
+.cfg-d { font-size: .7rem; color: var(--dim); margin-top: 2px; }
+
+/* ── PIPELINE ── */
+.pipe-wrap { overflow-x: auto; padding: 8px 0 24px; margin-bottom: 4px; }
+.pipe-svg { min-width: 1100px; display: block; }
+.pnode { cursor: pointer; }
+.pnode rect { transition: filter .18s; }
+.pnode:hover rect { filter: brightness(1.3); }
+.pnode.active rect { filter: brightness(1.5); stroke-width: 2.5 !important; }
+.legend { display: flex; gap: 20px; flex-wrap: wrap; margin-top: 4px; }
+.legend-i { display: flex; align-items: center; gap: 7px; font-size: .75rem; color: var(--muted); }
+.legend-dot { width: 11px; height: 11px; border-radius: 3px; flex-shrink: 0; }
+
+/* ── STAGE PANELS ── */
+.stage-panels { margin-top: 28px; }
+.spanel { display: none; }
+.spanel.active { display: block; animation: fadeUp .2s ease; }
+@keyframes fadeUp { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
+.sp-header { display: flex; align-items: center; gap: 14px; margin-bottom: 20px; }
+.sp-num { width: 36px; height: 36px; border-radius: 9px; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 1rem; flex-shrink: 0; }
+.sp-title { font-size: 1.1rem; font-weight: 600; }
+.sp-tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: .7rem; font-weight: 600; margin-left: 10px; }
+.tag-safe   { background: rgba(34,197,94,.15);   color: var(--green); }
+.tag-defuse { background: rgba(249,115,22,.15);  color: var(--orange); }
+.tag-kernel { background: rgba(239,68,68,.15);   color: var(--red); }
+
+.sp-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+@media(max-width:900px){ .sp-grid { grid-template-columns: 1fr; } }
+.sp-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; padding: 18px; }
+.sp-card.math  { border-color: rgba(96,165,250,.35); }
+.sp-card.shape { border-color: rgba(167,139,250,.35); }
+.sp-card.triton-c { border-color: rgba(249,115,22,.35); }
+.sp-card.torch-c  { border-color: rgba(34,197,94,.35); }
+.sp-card.wide { grid-column: 1 / -1; }
+
+/* tensor shape pills */
+.trows { display: flex; flex-direction: column; gap: 7px; }
+.trow  { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tname { font-family: var(--mono); font-size: .78rem; color: var(--muted); min-width: 90px; }
+.tshape { font-family: var(--mono); font-size: .78rem; background: rgba(96,165,250,.1); border: 1px solid rgba(96,165,250,.3); color: var(--blue); border-radius: 5px; padding: 1px 8px; }
+.tarrow { color: var(--dim); }
+
+/* math display */
+.math-block { background: rgba(20,30,50,.6); border: 1px solid rgba(96,165,250,.2); border-radius: 7px; padding: 13px 16px; margin: 6px 0; font-family: var(--mono); font-size: .82rem; line-height: 2; }
+.ml { color: var(--yellow); }
+.mf { color: var(--blue); }
+.mv { color: var(--purple); }
+.mn { color: var(--text); }
+
+/* notes */
+.note { border-left: 3px solid; border-radius: 0 7px 7px 0; padding: 10px 14px; margin-top: 10px; font-size: .8rem; color: var(--muted); }
+.note.ok  { border-color: var(--green); background: rgba(34,197,94,.06); }
+.note.warn{ border-color: var(--orange); background: rgba(249,115,22,.06); }
+.note.info{ border-color: var(--blue); background: rgba(96,165,250,.06); }
+
+/* ── VISUALIZERS ── */
+.viz-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+@media(max-width:900px){ .viz-grid { grid-template-columns: 1fr; } }
+.viz-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+.viz-head { padding: 14px 18px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+.viz-head h3 { margin: 0; }
+canvas { display: block; background: #070b10; }
+.viz-controls { padding: 12px 18px; border-top: 1px solid var(--border); display: flex; gap: 16px; flex-wrap: wrap; align-items: center; }
+.cg { display: flex; align-items: center; gap: 7px; }
+label { font-size: .78rem; color: var(--muted); white-space: nowrap; }
+input[type=range] { accent-color: var(--blue); width: 80px; cursor: pointer; }
+.vval { font-family: var(--mono); font-size: .78rem; color: var(--blue); min-width: 42px; }
+button { background: rgba(96,165,250,.12); border: 1px solid rgba(96,165,250,.35); color: var(--blue); border-radius: 6px; padding: 5px 13px; font-size: .78rem; cursor: pointer; transition: background .15s; }
+button:hover { background: rgba(96,165,250,.25); }
+
+/* ── CODE COMPARE ── */
+.code-compare { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media(max-width:900px){ .code-compare { grid-template-columns: 1fr; } }
+.cpanel { border-radius: 10px; overflow: hidden; border: 1px solid var(--border); }
+.cp-head { padding: 10px 16px; font-size: .78rem; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+.cp-head.triton-h { background: rgba(249,115,22,.1); border-bottom: 1px solid rgba(249,115,22,.3); color: var(--orange); }
+.cp-head.torch-h  { background: rgba(34,197,94,.1);  border-bottom: 1px solid rgba(34,197,94,.3);  color: var(--green); }
+.cpanel pre { border: none; border-radius: 0; margin: 0; font-size: .75rem; max-height: 680px; overflow-y: auto; }
+
+/* syntax */
+.kw { color: #f97316; } .fn { color: #60a5fa; } .cm { color: #484f58; font-style: italic; }
+.num { color: #fbbf24; } .cls { color: #a78bfa; } .str { color: #86efac; }
+.hl-rm { background: rgba(239,68,68,.12); display: block; }
+.hl-add { background: rgba(34,197,94,.1); display: block; }
+.hl-chg { background: rgba(249,115,22,.1); display: block; }
+
+/* ── SHAPE TABLE ── */
+.shape-table { width: 100%; border-collapse: collapse; font-size: .83rem; }
+.shape-table th { text-align: left; padding: 9px 14px; border-bottom: 2px solid var(--border); color: var(--muted); font-size: .72rem; text-transform: uppercase; letter-spacing: .05em; }
+.shape-table td { padding: 9px 14px; border-bottom: 1px solid var(--border); font-family: var(--mono); vertical-align: top; }
+.shape-table tr:hover td { background: rgba(255,255,255,.02); }
+.shape-table td:first-child { color: var(--yellow); }
+.shape-table td:nth-child(2) { color: var(--blue); }
+.shape-table td:nth-child(3) { color: var(--muted); font-family: var(--font); font-size: .8rem; }
+</style>
+</head>
+<body>
+
+<!-- ═══════════════════════════ HERO ═══════════════════════════ -->
+<header class="hero">
+<div class="container">
+  <div class="badges">
+    <span class="badge triton">⚡ Triton / CuteDSL — needs defusing</span>
+    <span class="badge pytorch">✓ Pure PyTorch — ANE-safe</span>
+    <span class="badge ane">🍎 Apple ANE / Metal target</span>
+    <span class="badge state">◈ Stateful Inference API</span>
+  </div>
+  <h1>Mamba-3 SISO</h1>
+  <p class="subtitle">Interactive implementation guide — from CUDA kernels to pure PyTorch for CoreML / ANE</p>
+
+  <h4>Locked Configuration</h4>
+  <div class="config-grid">
+    <div class="cfg"><div class="cfg-k">d_model</div><div class="cfg-v">256</div></div>
+    <div class="cfg"><div class="cfg-k">d_inner</div><div class="cfg-v">512</div><div class="cfg-d">expand=2 × d_model</div></div>
+    <div class="cfg"><div class="cfg-k">nheads (H)</div><div class="cfg-v">8</div><div class="cfg-d">d_inner / headdim</div></div>
+    <div class="cfg"><div class="cfg-k">headdim (P)</div><div class="cfg-v">64</div></div>
+    <div class="cfg"><div class="cfg-k">d_state (S)</div><div class="cfg-v">64</div></div>
+    <div class="cfg"><div class="cfg-k">ngroups</div><div class="cfg-v">1</div><div class="cfg-d">num_bc_heads</div></div>
+    <div class="cfg"><div class="cfg-k">rope_fraction</div><div class="cfg-v">0.5</div><div class="cfg-d">pairwise</div></div>
+    <div class="cfg"><div class="cfg-k">num_rope_angles</div><div class="cfg-v">16</div><div class="cfg-d">d_state×0.5/2</div></div>
+    <div class="cfg"><div class="cfg-k">rotary_dim</div><div class="cfg-v">32</div><div class="cfg-d">first 32 of 64 dims</div></div>
+    <div class="cfg"><div class="cfg-k">in_proj out</div><div class="cfg-v">1192</div><div class="cfg-d">512+512+64+64+8+8+8+16</div></div>
+    <div class="cfg"><div class="cfg-k">is_mimo</div><div class="cfg-v" style="color:var(--red)">False</div></div>
+    <div class="cfg"><div class="cfg-k">is_outproj_norm</div><div class="cfg-v" style="color:var(--red)">False</div></div>
+  </div>
+</div>
+</header>
+
+<!-- ═══════════════════════════ PIPELINE ═══════════════════════════ -->
+<section id="pipeline">
+<div class="container">
+  <h2>step() Pipeline</h2>
+  <p>Click any stage to see the math, tensor shapes, and Triton → PyTorch translation.</p>
+
+  <div class="pipe-wrap">
+    <svg class="pipe-svg" viewBox="0 0 1100 120" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <!-- arrows -->
+      <defs><marker id="arr" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3 z" fill="#3d444d"/></marker></defs>
+      <line x1="116" y1="60" x2="132" y2="60" stroke="#3d444d" stroke-width="1.5" marker-end="url(#arr)"/>
+      <line x1="252" y1="60" x2="268" y2="60" stroke="#3d444d" stroke-width="1.5" marker-end="url(#arr)"/>
+      <line x1="388" y1="60" x2="404" y2="60" stroke="#3d444d" stroke-width="1.5" marker-end="url(#arr)"/>
+      <line x1="524" y1="60" x2="540" y2="60" stroke="#3d444d" stroke-width="1.5" marker-end="url(#arr)"/>
+      <line x1="660" y1="60" x2="676" y2="60" stroke="#3d444d" stroke-width="1.5" marker-end="url(#arr)"/>
+      <line x1="796" y1="60" x2="812" y2="60" stroke="#3d444d" stroke-width="1.5" marker-end="url(#arr)"/>
+      <line x1="932" y1="60" x2="948" y2="60" stroke="#3d444d" stroke-width="1.5" marker-end="url(#arr)"/>
+
+      <!-- Stage 1: in_proj + split — green -->
+      <g class="pnode" data-stage="1" onclick="showStage(1)">
+        <rect x="2" y="20" width="114" height="80" rx="8" fill="#0f1e14" stroke="#22c55e" stroke-width="1.5"/>
+        <text x="59" y="47" text-anchor="middle" fill="#22c55e" font-size="9" font-weight="700" font-family="monospace">STAGE 1</text>
+        <text x="59" y="62" text-anchor="middle" fill="#e6edf3" font-size="10" font-weight="600">in_proj</text>
+        <text x="59" y="76" text-anchor="middle" fill="#7d8590" font-size="9">+ split×8</text>
+        <text x="59" y="91" text-anchor="middle" fill="#22c55e" font-size="8">✓ safe</text>
+      </g>
+
+      <!-- Stage 2: Activations — green -->
+      <g class="pnode" data-stage="2" onclick="showStage(2)">
+        <rect x="134" y="20" width="114" height="80" rx="8" fill="#0f1e14" stroke="#22c55e" stroke-width="1.5"/>
+        <text x="191" y="47" text-anchor="middle" fill="#22c55e" font-size="9" font-weight="700" font-family="monospace">STAGE 2</text>
+        <text x="191" y="62" text-anchor="middle" fill="#e6edf3" font-size="10" font-weight="600">Activations</text>
+        <text x="191" y="76" text-anchor="middle" fill="#7d8590" font-size="9">A, Δt, λ</text>
+        <text x="191" y="91" text-anchor="middle" fill="#22c55e" font-size="8">✓ safe</text>
+      </g>
+
+      <!-- Stage 3: K/Q Norm — orange (RMSNormGated is Triton) -->
+      <g class="pnode" data-stage="3" onclick="showStage(3)">
+        <rect x="270" y="20" width="114" height="80" rx="8" fill="#1e1408" stroke="#f97316" stroke-width="1.5"/>
+        <text x="327" y="47" text-anchor="middle" fill="#f97316" font-size="9" font-weight="700" font-family="monospace">STAGE 3</text>
+        <text x="327" y="62" text-anchor="middle" fill="#e6edf3" font-size="10" font-weight="600">K, Q Norm</text>
+        <text x="327" y="76" text-anchor="middle" fill="#7d8590" font-size="9">RMSNorm+bcast</text>
+        <text x="327" y="91" text-anchor="middle" fill="#f97316" font-size="8">⚡ defuse</text>
+      </g>
+
+      <!-- Stage 4: RoPE — red (full Triton kernel) -->
+      <g class="pnode" data-stage="4" onclick="showStage(4)">
+        <rect x="406" y="20" width="114" height="80" rx="8" fill="#1e0808" stroke="#ef4444" stroke-width="1.5"/>
+        <text x="463" y="47" text-anchor="middle" fill="#ef4444" font-size="9" font-weight="700" font-family="monospace">STAGE 4</text>
+        <text x="463" y="62" text-anchor="middle" fill="#e6edf3" font-size="10" font-weight="600">RoPE Rotation</text>
+        <text x="463" y="76" text-anchor="middle" fill="#7d8590" font-size="9">angle+bias+rot</text>
+        <text x="463" y="91" text-anchor="middle" fill="#ef4444" font-size="8">⚡ Triton kernel</text>
+      </g>
+
+      <!-- Stage 5: SSM Coefficients — green -->
+      <g class="pnode" data-stage="5" onclick="showStage(5)">
+        <rect x="542" y="20" width="114" height="80" rx="8" fill="#0f1e14" stroke="#22c55e" stroke-width="1.5"/>
+        <text x="599" y="47" text-anchor="middle" fill="#22c55e" font-size="9" font-weight="700" font-family="monospace">STAGE 5</text>
+        <text x="599" y="62" text-anchor="middle" fill="#e6edf3" font-size="10" font-weight="600">SSM Coeffs</text>
+        <text x="599" y="76" text-anchor="middle" fill="#7d8590" font-size="9">α, β, γ</text>
+        <text x="599" y="91" text-anchor="middle" fill="#22c55e" font-size="8">✓ safe</text>
+      </g>
+
+      <!-- Stage 6: State Update — red (CuteDSL) -->
+      <g class="pnode" data-stage="6" onclick="showStage(6)">
+        <rect x="678" y="20" width="114" height="80" rx="8" fill="#1e0808" stroke="#ef4444" stroke-width="1.5"/>
+        <text x="735" y="47" text-anchor="middle" fill="#ef4444" font-size="9" font-weight="700" font-family="monospace">STAGE 6</text>
+        <text x="735" y="62" text-anchor="middle" fill="#e6edf3" font-size="10" font-weight="600">SSM Update</text>
+        <text x="735" y="76" text-anchor="middle" fill="#7d8590" font-size="9">h = αh + Δh</text>
+        <text x="735" y="91" text-anchor="middle" fill="#ef4444" font-size="8">⚡ CuteDSL</text>
+      </g>
+
+      <!-- Stage 7: Output + Gate — green -->
+      <g class="pnode" data-stage="7" onclick="showStage(7)">
+        <rect x="814" y="20" width="114" height="80" rx="8" fill="#0f1e14" stroke="#22c55e" stroke-width="1.5"/>
+        <text x="871" y="47" text-anchor="middle" fill="#22c55e" font-size="9" font-weight="700" font-family="monospace">STAGE 7</text>
+        <text x="871" y="62" text-anchor="middle" fill="#e6edf3" font-size="10" font-weight="600">Output y</text>
+        <text x="871" y="76" text-anchor="middle" fill="#7d8590" font-size="9">h·Q + D·V + gate</text>
+        <text x="871" y="91" text-anchor="middle" fill="#22c55e" font-size="8">✓ safe</text>
+      </g>
+
+      <!-- Stage 8: out_proj — green -->
+      <g class="pnode" data-stage="8" onclick="showStage(8)">
+        <rect x="950" y="20" width="114" height="80" rx="8" fill="#0f1e14" stroke="#22c55e" stroke-width="1.5"/>
+        <text x="1007" y="47" text-anchor="middle" fill="#22c55e" font-size="9" font-weight="700" font-family="monospace">STAGE 8</text>
+        <text x="1007" y="62" text-anchor="middle" fill="#e6edf3" font-size="10" font-weight="600">out_proj</text>
+        <text x="1007" y="76" text-anchor="middle" fill="#7d8590" font-size="9">Linear(512→256)</text>
+        <text x="1007" y="91" text-anchor="middle" fill="#22c55e" font-size="8">✓ safe</text>
+      </g>
+
+      <!-- State inputs (top arrows) -->
+      <text x="679" y="14" text-anchor="middle" fill="#a78bfa" font-size="8">ssm_state, k_state, v_state</text>
+      <line x1="735" y1="16" x2="735" y2="20" stroke="#a78bfa" stroke-width="1" marker-end="url(#arr)"/>
+      <text x="463" y="14" text-anchor="middle" fill="#a78bfa" font-size="8">angle_state</text>
+      <line x1="463" y1="16" x2="463" y2="20" stroke="#a78bfa" stroke-width="1" marker-end="url(#arr)"/>
+    </svg>
+  </div>
+
+  <div class="legend">
+    <div class="legend-i"><div class="legend-dot" style="background:#22c55e"></div>ANE-safe (nn.Linear, F.softplus, F.silu…)</div>
+    <div class="legend-i"><div class="legend-dot" style="background:#f97316"></div>Needs defusing (RMSNormGated Triton)</div>
+    <div class="legend-i"><div class="legend-dot" style="background:#ef4444"></div>Full Triton/CuteDSL kernel — replace entirely</div>
+    <div class="legend-i"><div class="legend-dot" style="background:#a78bfa"></div>Stateful tensors (persist between steps)</div>
+  </div>
+
+  <!-- ── STAGE PANELS ── -->
+  <div class="stage-panels">
+
+    <!-- STAGE 1 -->
+    <div class="spanel" id="sp1">
+      <div class="sp-header">
+        <div class="sp-num" style="background:rgba(34,197,94,.15);color:var(--green)">1</div>
+        <div><div class="sp-title">in_proj + split<span class="sp-tag tag-safe">✓ safe</span></div>
+             <div style="color:var(--muted);font-size:.82rem">nn.Linear → slice — fully CoreML-compatible</div></div>
+      </div>
+      <div class="sp-grid">
+        <div class="sp-card math">
+          <h4>Operation</h4>
+          <div class="math-block">
+            <div class="trow"><span class="ml">zxBCdt</span> <span class="mn">= in_proj(u)</span></div>
+            <div style="margin-top:8px;font-size:.75rem;color:var(--muted)">Split into 8 chunks (dim=-1):</div>
+            <div class="trow" style="margin-top:4px"><span class="ml">z</span><span class="mn">: 512</span></div>
+            <div class="trow"><span class="ml">x</span><span class="mn">: 512 &nbsp;←&nbsp; values (V)</span></div>
+            <div class="trow"><span class="ml">B_raw</span><span class="mn">: 64 &nbsp;←&nbsp; keys (K)</span></div>
+            <div class="trow"><span class="ml">C_raw</span><span class="mn">: 64 &nbsp;←&nbsp; queries (Q)</span></div>
+            <div class="trow"><span class="ml">dd_dt</span><span class="mn">: 8 &nbsp;←&nbsp; Δt̂</span></div>
+            <div class="trow"><span class="ml">dd_A</span><span class="mn">: 8 &nbsp;←&nbsp; Â</span></div>
+            <div class="trow"><span class="ml">trap</span><span class="mn">: 8 &nbsp;←&nbsp; trap</span></div>
+            <div class="trow"><span class="ml">angles</span><span class="mn">: 16 &nbsp;←&nbsp; RoPE increments</span></div>
+          </div>
+        </div>
+        <div class="sp-card shape">
+          <h4>Tensor Shapes</h4>
+          <div class="trows">
+            <div class="trow"><span class="tname">u</span><span class="tshape">(1, 256)</span><span class="tarrow">→</span></div>
+            <div class="trow"><span class="tname">in_proj out</span><span class="tshape">(1, 1192)</span></div>
+            <div class="trow" style="margin-top:8px;"><span class="tname">z, x</span><span class="tshape">(1, 512)</span></div>
+            <div class="trow"><span class="tname">B_raw, C_raw</span><span class="tshape">(1, 64)</span></div>
+            <div class="trow"><span class="tname">dd_dt, dd_A, trap</span><span class="tshape">(1, 8)</span></div>
+            <div class="trow"><span class="tname">angles</span><span class="tshape">(1, 16)</span></div>
+          </div>
+        </div>
+        <div class="sp-card triton-c">
+          <h4>Original Code (no custom kernel)</h4>
+          <pre><code><span class="cm"># mamba3.py step() — standard PyTorch</span>
+zxBCdt = self.in_proj(u)
+z, x, B, C, dd_dt, dd_A, trap, angles = \
+    torch.split(zxBCdt, [
+        self.d_inner,   <span class="cm"># 512</span>
+        self.d_inner,   <span class="cm"># 512</span>
+        self.d_state,   <span class="cm"># 64</span>
+        self.d_state,   <span class="cm"># 64</span>
+        self.nheads,    <span class="cm"># 8</span>
+        self.nheads,    <span class="cm"># 8</span>
+        self.nheads,    <span class="cm"># 8</span>
+        self.num_rope_angles], dim=-1)  <span class="cm"># 16</span></code></pre>
+        </div>
+        <div class="sp-card torch-c">
+          <h4>PyTorch ANE — explicit slice indices</h4>
+          <pre><code><span class="cm"># mamba_ane/modules/mamba3.py — MambaBlock.forward()</span>
+<span class="cm"># _s0..._s7 precomputed in __init__ — no recompute per step</span>
+zxBCdt     = self.in_proj(x)
+z_raw      = zxBCdt[..., :self._s0]
+x_raw      = zxBCdt[..., self._s0:self._s1]
+B_raw      = zxBCdt[..., self._s1:self._s2]
+C_raw      = zxBCdt[..., self._s2:self._s3]
+dd_dt      = zxBCdt[..., self._s3:self._s4]
+dd_A       = zxBCdt[..., self._s4:self._s5]
+trap_raw   = zxBCdt[..., self._s5:self._s6]
+angles_raw = zxBCdt[..., self._s6:self._s7]</code></pre>
+          <div class="note ok">Explicit slicing over torch.split produces a smaller CoreML MIL graph. nn.Linear converts 1:1 to CoreML. Batch is fixed at 1 for inference.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- STAGE 2 -->
+    <div class="spanel" id="sp2">
+      <div class="sp-header">
+        <div class="sp-num" style="background:rgba(34,197,94,.15);color:var(--green)">2</div>
+        <div><div class="sp-title">Data-dependent Activations<span class="sp-tag tag-safe">✓ safe</span></div>
+             <div style="color:var(--muted);font-size:.82rem">softplus, sigmoid, silu — all ANE-compatible</div></div>
+      </div>
+      <div class="sp-grid">
+        <div class="sp-card math">
+          <h4>Equations (per-head scalars)</h4>
+          <div class="math-block">
+            <div class="trow"><span class="ml">A<sub>h</sub></span> <span class="mn">= −(</span><span class="mf">softplus</span><span class="mn">(Â<sub>h</sub>) + ε<sub>A</sub>)</span></div>
+            <div class="trow"><span class="ml">Δt<sub>h</sub></span> <span class="mn">= </span><span class="mf">softplus</span><span class="mn">(Δt̂<sub>h</sub> + b<sup>Δt</sup><sub>h</sub>)</span></div>
+            <div class="trow"><span class="ml">λ<sub>h</sub></span> <span class="mn">= </span><span class="mf">sigmoid</span><span class="mn">(trap<sub>h</sub>)</span></div>
+            <div class="trow"><span class="ml">z</span> <span class="mn">= </span><span class="mf">silu</span><span class="mn">(z_raw) &nbsp;←&nbsp; gate pre-activated</span></div>
+            <div style="margin-top:10px;font-size:.75rem;color:var(--muted)">A_floor = 1e-4 (additive, not clamp)</div>
+            <div style="font-size:.75rem;color:var(--muted)">dt_bias: learned per-head, shape (H=8,)</div>
+          </div>
+        </div>
+        <div class="sp-card shape">
+          <h4>Tensor Shapes</h4>
+          <div class="trows">
+            <div class="trow"><span class="tname">dd_A</span><span class="tshape">(1, 8)</span><span class="tarrow">→</span><span class="tname">A</span><span class="tshape">(1, 8)</span></div>
+            <div class="trow"><span class="tname">dd_dt</span><span class="tshape">(1, 8)</span><span class="tarrow">→</span><span class="tname">DT</span><span class="tshape">(1, 8)</span></div>
+            <div class="trow"><span class="tname">trap</span><span class="tshape">(1, 8)</span><span class="tarrow">→</span><span class="tname">λ</span><span class="tshape">(1, 8)</span></div>
+            <div class="trow"><span class="tname">z_raw</span><span class="tshape">(1, 512)</span><span class="tarrow">→</span><span class="tname">z</span><span class="tshape">(1, 512)</span></div>
+            <div style="margin-top:8px;font-size:.78rem;color:var(--muted)">dt_bias (static param): <span class="tshape">(8,)</span></div>
+          </div>
+        </div>
+        <div class="sp-card triton-c">
+          <h4>Original Code</h4>
+          <pre><code><span class="cm"># in _preprocess — standard torch ops</span>
+_A = -F.softplus(A_proj.to(torch.float32))
+_A = torch.clamp(_A, max=-self.A_floor)
+DT = F.softplus(dd_dt + self.dt_bias)
+trap = torch.sigmoid(trap_proj)</code></pre>
+        </div>
+        <div class="sp-card torch-c">
+          <h4>PyTorch ANE — no .float() casts</h4>
+          <pre><code><span class="cm"># No .float() — ANE stays in fp16</span>
+<span class="cm"># +1e-4 additive floor instead of clamp (avoids CoreML fusion inhibition)</span>
+A   = -(F.softplus(dd_A) + <span class="num">1e-4</span>)
+DT  = F.softplus(dd_dt + self.dt_bias)
+lam = torch.sigmoid(trap_raw)
+<span class="cm"># Gate pre-activated here — applied flat in Stage 8</span>
+z   = F.silu(z_raw)</code></pre>
+          <div class="note ok">F.softplus, torch.sigmoid, F.silu all map to CoreML mlprogram ops. No .float() casts keep activations in the model's native dtype (fp16 on ANE).</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- STAGE 3 -->
+    <div class="spanel" id="sp3">
+      <div class="sp-header">
+        <div class="sp-num" style="background:rgba(249,115,22,.15);color:var(--orange)">3</div>
+        <div><div class="sp-title">K, Q — Reshape + RMSNorm + Broadcast<span class="sp-tag tag-defuse">⚡ defuse RMSNormGated</span></div>
+             <div style="color:var(--muted);font-size:.82rem">RMSNormGated is a Triton kernel — replace with RMSNormANE (no .float(), x*x)</div></div>
+      </div>
+      <div class="sp-grid">
+        <div class="sp-card math">
+          <h4>Pipeline (SISO: r=1, g=1)</h4>
+          <div class="math-block">
+            <div class="trow"><span class="mv">B_raw</span><span class="mn">: (1, 64)</span></div>
+            <div class="trow" style="padding-left:12px"><span class="mn">→ view(1,1,1,64) → </span><span class="mf">RMSNormANE</span></div>
+            <div class="trow" style="padding-left:12px"><span class="mn">→ repeat(1,1,H,1).squeeze(1) → (1,H,64)</span></div>
+            <div class="trow" style="padding-left:12px"><span class="mn">→ + B_bias → </span><span class="mv">K_pre: (1,8,64)</span></div>
+            <div style="margin-top:8px;color:var(--muted);font-size:.76rem">Same pipeline for C_raw → Q_pre</div>
+            <div style="margin-top:4px;color:var(--muted);font-size:.76rem">Bias added here (not inside RoPE kernel)</div>
+            <div style="font-size:.76rem;color:var(--muted)">RMSNormANE: var=(x*x).mean(-1), rsqrt()</div>
+          </div>
+        </div>
+        <div class="sp-card shape">
+          <h4>Tensor Shapes</h4>
+          <div class="trows">
+            <div class="trow"><span class="tname">B_raw, C_raw</span><span class="tshape">(1, 64)</span></div>
+            <div class="trow"><span class="tname">after view</span><span class="tshape">(1, 1, 1, 64)</span></div>
+            <div class="trow"><span class="tname">after RMSNormANE</span><span class="tshape">(1, 1, 1, 64)</span></div>
+            <div class="trow"><span class="tname">after repeat+squeeze</span><span class="tshape">(1, 8, 64)</span></div>
+            <div class="trow"><span class="tname">B_bias, C_bias (param)</span><span class="tshape">(1, 8, 64)</span></div>
+            <div class="trow"><span class="tname">K_pre, Q_pre</span><span class="tshape">(1, 8, 64)</span></div>
+          </div>
+        </div>
+        <div class="sp-card triton-c">
+          <h4>Original (uses Triton RMSNormGated)</h4>
+          <pre><code><span class="cm"># _preprocess in mamba3.py</span>
+<span class="kw">from</span> mamba_ssm.ops.triton.layernorm_gated \
+    <span class="kw">import</span> RMSNorm <span class="kw">as</span> RMSNormGated
+<span class="cm"># ↑ Triton kernel — NOT portable</span>
+
+B = rearrange(B, <span class="str">"b (r g s) -> b r g s"</span>,
+              g=self.num_bc_heads, r=<span class="num">1</span>)
+C = rearrange(C, <span class="str">"b (r g s) -> b r g s"</span>,
+              g=self.num_bc_heads, r=<span class="num">1</span>)
+B = self.B_norm(B)   <span class="cm"># Triton RMSNorm on s-dim</span>
+C = self.C_norm(C)
+B = B.expand(-<span class="num">1</span>, -<span class="num">1</span>, self.nheads, -<span class="num">1</span>)
+C = C.expand(-<span class="num">1</span>, -<span class="num">1</span>, self.nheads, -<span class="num">1</span>)</code></pre>
+        </div>
+        <div class="sp-card torch-c">
+          <h4>PyTorch ANE — RMSNormANE</h4>
+          <pre><code><span class="cm"># RMSNormANE: no .float() cast, x*x avoids pow(2) CoreML regression</span>
+<span class="kw">class</span> <span class="cls">RMSNormANE</span>(nn.Module):
+    <span class="kw">def</span> <span class="fn">forward</span>(self, x):
+        variance = (x * x).mean(-<span class="num">1</span>, keepdim=<span class="kw">True</span>)
+        <span class="kw">return</span> x * torch.rsqrt(variance + self.eps) * self.weight
+
+<span class="cm"># Stage 3 — bias folded in here, not in RoPE kernel</span>
+K_norm     = self.B_norm(B_raw.view(<span class="num">1</span>, <span class="num">1</span>, <span class="num">1</span>, self.d_state))
+Q_norm     = self.C_norm(C_raw.view(<span class="num">1</span>, <span class="num">1</span>, <span class="num">1</span>, self.d_state))
+K_expanded = K_norm.repeat(<span class="num">1</span>, <span class="num">1</span>, self.num_heads, <span class="num">1</span>).squeeze(<span class="num">1</span>)
+Q_expanded = Q_norm.repeat(<span class="num">1</span>, <span class="num">1</span>, self.num_heads, <span class="num">1</span>).squeeze(<span class="num">1</span>)
+K_pre      = K_expanded + self.B_bias   <span class="cm"># B_bias: (1, H, S)</span>
+Q_pre      = Q_expanded + self.C_bias</code></pre>
+          <div class="note warn">B_bias/C_bias are (1, H, S) — no rearrange needed. rsqrt() maps to a native ANE op. x*x instead of pow(2) avoids a CoreML power op that can force CPU fallback on some ANE firmware.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- STAGE 4 -->
+    <div class="spanel" id="sp4">
+      <div class="sp-header">
+        <div class="sp-num" style="background:rgba(239,68,68,.15);color:var(--red)">4</div>
+        <div><div class="sp-title">Angle Update + RoPE Pairwise<span class="sp-tag tag-kernel">⚡ full Triton kernel</span></div>
+             <div style="color:var(--muted);font-size:.82rem"><code>apply_rotary_qk_inference_fwd</code> — bias+angle+rotation fused; replace with apply_rope()</div></div>
+      </div>
+      <div class="sp-grid">
+        <div class="sp-card math">
+          <h4>Two Fused Operations</h4>
+          <div class="math-block">
+            <div style="color:var(--muted);font-size:.76rem;margin-bottom:6px">① Angle accumulation (bias now in Stage 3)</div>
+            <div class="trow"><span class="ml">Δθ</span><span class="mn">= </span><span class="mf">tanh</span><span class="mn">(angles) · π · Δt.unsqueeze(-1)</span></div>
+            <div class="trow"><span class="ml">θ</span><span class="mn">= angle_state + Δθ &nbsp;</span><span style="color:var(--red);font-size:.8em">(no mod 2π!)</span></div>
+            <div style="margin-top:10px;color:var(--muted);font-size:.76rem">② Pairwise rotation (first 32 of 64 dims)</div>
+            <div class="trow"><span class="ml">[x'<sub>2i</sub>]</span><span class="mn">= cos(θ<sub>i</sub>)·x<sub>2i</sub> − sin(θ<sub>i</sub>)·x<sub>2i+1</sub></span></div>
+            <div class="trow"><span class="ml">[x'<sub>2i+1</sub>]</span><span class="mn">= sin(θ<sub>i</sub>)·x<sub>2i</sub> + cos(θ<sub>i</sub>)·x<sub>2i+1</sub></span></div>
+            <div style="font-size:.76rem;color:var(--muted)">Dims 32–63: pass through unchanged</div>
+          </div>
+        </div>
+        <div class="sp-card shape">
+          <h4>Tensor Shapes</h4>
+          <div class="trows">
+            <div class="trow"><span class="tname">K_pre, Q_pre</span><span class="tshape">(1, 8, 64)</span><span class="tarrow">in</span></div>
+            <div class="trow"><span class="tname">angles_raw</span><span class="tshape">(1, 16)</span><span class="tarrow">→ expand to</span><span class="tshape">(1, 8, 16)</span></div>
+            <div class="trow"><span class="tname">DT.unsqueeze(-1)</span><span class="tshape">(1, 8, 1)</span></div>
+            <div class="trow"><span class="tname">angle_state (buf)</span><span class="tshape">(1, 8, 16)</span><span class="tarrow">→ updated</span></div>
+            <div class="trow"><span class="tname">theta</span><span class="tshape">(1, 8, 16)</span></div>
+            <div class="trow"><span class="tname">K_rot, Q_rot</span><span class="tshape">(1, 8, 64)</span><span class="tarrow">out</span></div>
+            <div style="margin-top:8px;font-size:.78rem;color:var(--muted)">rotary_dim=32: only dims [0:32] rotate</div>
+          </div>
+        </div>
+        <div class="sp-card triton-c">
+          <h4>Original (Triton kernel)</h4>
+          <pre><code><span class="cm"># mamba3.py step() — fused Triton</span>
+bias_q = rearrange(self.C_bias, <span class="str">"h r n -> r h n"</span>)
+bias_k = rearrange(self.B_bias, <span class="str">"h r n -> r h n"</span>)
+<span class="cm"># rotate_pairwise=True for SISO</span>
+C, B, nxt_angle = apply_rotary_qk_inference_fwd(
+    q=C, k=B,
+    angle_state=angle_state,
+    angle_proj=angles,
+    dt=DT,
+    bias_q=bias_q,
+    bias_k=bias_k,
+    rotate_pairwise=<span class="kw">True</span>)
+<span class="cm"># angles: tanh(sigmoid-approx)*pi*dt INSIDE kernel
+# no mod 2π applied in the Triton code</span></code></pre>
+        </div>
+        <div class="sp-card torch-c">
+          <h4>PyTorch ANE — apply_rope()</h4>
+          <pre><code><span class="cm"># Bias was added in Stage 3 — only angle+rot here</span>
+angles      = angles_raw.view(<span class="num">1</span>, <span class="num">1</span>, self.num_rope_angles) \
+                        .repeat(<span class="num">1</span>, self.num_heads, <span class="num">1</span>)   <span class="cm"># (1,H,16)</span>
+delta_theta = torch.tanh(angles) * math.pi * DT.unsqueeze(-<span class="num">1</span>)
+theta       = self.angle_state + delta_theta              <span class="cm"># (1,H,16)</span>
+K_rot = self.apply_rope(K_pre, torch.cos(theta), torch.sin(theta))
+Q_rot = self.apply_rope(Q_pre, torch.cos(theta), torch.sin(theta))
+
+<span class="cm"># apply_rope — stateless, operates on (1, H, S)</span>
+<span class="kw">def</span> <span class="fn">apply_rope</span>(self, x, cos, sin):
+    x_rot  = x[..., :self.rotary_dim]          <span class="cm"># (1,H,32)</span>
+    x_pass = x[..., self.rotary_dim:]
+    x0, x1 = x_rot[..., <span class="num">0</span>::<span class="num">2</span>], x_rot[..., <span class="num">1</span>::<span class="num">2</span>]
+    out_rot = torch.stack(
+        [x0*cos - x1*sin, x0*sin + x1*cos], dim=-<span class="num">1</span>
+    ).flatten(-<span class="num">2</span>)
+    <span class="kw">return</span> torch.cat([out_rot, x_pass], dim=-<span class="num">1</span>)</code></pre>
+          <div class="note info">Input is (1,H,S) not (B,1,H,S) — bias was absorbed in Stage 3 so there is no squeeze needed here. The kernel used tl.sigmoid(2x)*2-1 as tanh approx; torch.tanh is numerically identical.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- STAGE 5 -->
+    <div class="spanel" id="sp5">
+      <div class="sp-header">
+        <div class="sp-num" style="background:rgba(34,197,94,.15);color:var(--green)">5</div>
+        <div><div class="sp-title">SSM Discretization Coefficients<span class="sp-tag tag-safe">✓ safe</span></div>
+             <div style="color:var(--muted);font-size:.82rem">α, β, γ — all computed inside mamba3_step_fn, but trivial to extract</div></div>
+      </div>
+      <div class="sp-grid">
+        <div class="sp-card math">
+          <h4>Trapezoid Discretization</h4>
+          <div class="math-block">
+            <div class="trow"><span class="ml">α<sub>h</sub></span><span class="mn">= exp(A<sub>h</sub> · Δt<sub>h</sub>) &nbsp;←&nbsp; decay</span></div>
+            <div class="trow"><span class="ml">β<sub>h</sub></span><span class="mn">= (1 − λ<sub>h</sub>) · Δt<sub>h</sub> · α<sub>h</sub> &nbsp;←&nbsp; past weight</span></div>
+            <div class="trow"><span class="ml">γ<sub>h</sub></span><span class="mn">= λ<sub>h</sub> · Δt<sub>h</sub> &nbsp;←&nbsp; present weight</span></div>
+            <div style="margin-top:10px;color:var(--muted);font-size:.76rem">λ (trap) interpolates between ZOH (λ=0) and forward Euler (λ=1).</div>
+          </div>
+        </div>
+        <div class="sp-card shape">
+          <h4>Tensor Shapes</h4>
+          <div class="trows">
+            <div class="trow"><span class="tname">A</span><span class="tshape">(1, 8)</span><span class="tarrow">negative</span></div>
+            <div class="trow"><span class="tname">DT</span><span class="tshape">(1, 8)</span><span class="tarrow">positive</span></div>
+            <div class="trow"><span class="tname">λ</span><span class="tshape">(1, 8)</span><span class="tarrow">∈ (0, 1)</span></div>
+            <div class="trow"><span class="tname">alpha, beta, gamma</span><span class="tshape">(1, 8)</span></div>
+            <div class="trow"><span class="tname">g4, b4 (broadcast)</span><span class="tshape">(1, 8, 1, 1)</span></div>
+          </div>
+        </div>
+        <div class="sp-card triton-c">
+          <h4>Original (inside CuteDSL mamba3_step_fn)</h4>
+          <pre><code><span class="cm"># These coefficients are computed inside the
+# mamba3_step_fn CuteDSL kernel.
+# There is NO explicit Python code for them —
+# they are fused with the state update.</span>
+mamba3_step_fn(
+    ssm_state, k_state, v_state,
+    A, B, C, self.D, x, DT, trap,
+    xpj, outproj=outpj,
+    out=y, z=z, zproj=zpj,
+    tile_D=<span class="num">64</span>, num_warps=<span class="num">4</span>)</code></pre>
+        </div>
+        <div class="sp-card torch-c">
+          <h4>PyTorch ANE — explicit</h4>
+          <pre><code><span class="cm"># Compute all coefficients explicitly</span>
+alpha = torch.exp(A * DT)              <span class="cm"># (1, H) — decay</span>
+beta  = (<span class="num">1.0</span> - lam) * DT * alpha     <span class="cm"># (1, H) — past weight</span>
+gamma = lam * DT                       <span class="cm"># (1, H) — present weight</span>
+
+<span class="cm"># Broadcast to (1, H, 1, 1) for outer-product dims</span>
+g4 = gamma[:, :, <span class="kw">None</span>, <span class="kw">None</span>]
+b4 = beta[:, :,  <span class="kw">None</span>, <span class="kw">None</span>]</code></pre>
+          <div class="note ok">torch.exp is ANE-safe. β reuses alpha — no redundant exp. [:,:,None,None] broadcast avoids einsum and maps to a reshape+mul on ANE.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- STAGE 6 -->
+    <div class="spanel" id="sp6">
+      <div class="sp-header">
+        <div class="sp-num" style="background:rgba(239,68,68,.15);color:var(--red)">6</div>
+        <div><div class="sp-title">SSM State Update (Trapezoid Recurrence)<span class="sp-tag tag-kernel">⚡ CuteDSL kernel</span></div>
+             <div style="color:var(--muted);font-size:.82rem">The core <code>mamba3_step_fn</code> CuteDSL kernel — replace with matmul outer products + register_buffer writes</div></div>
+      </div>
+      <div class="sp-grid">
+        <div class="sp-card math">
+          <h4>Second-Order Recurrence</h4>
+          <div class="math-block">
+            <div style="color:var(--muted);font-size:.76rem;margin-bottom:6px">Outer products (headdim × d_state matrices):</div>
+            <div class="trow"><span class="ml">Δh</span><span class="mn">= β · (v_state ⊗ k_state)</span></div>
+            <div class="trow" style="padding-left:28px"><span class="mn">+ γ · (V ⊗ K_rot)</span></div>
+            <div style="margin-top:10px;"><div class="trow"><span class="ml">h</span><span class="mn">= α · ssm_state + Δh</span></div></div>
+            <div style="margin-top:10px;color:var(--muted);font-size:.76rem">⊗ = outer product → (H, P, S) matrix</div>
+            <div style="font-size:.76rem;color:var(--muted)">State writes: ssm_state, k_state, v_state, angle_state</div>
+          </div>
+        </div>
+        <div class="sp-card shape">
+          <h4>Tensor Shapes</h4>
+          <div class="trows">
+            <div class="trow"><span class="tname">ssm_state (buf)</span><span class="tshape">(1, 8, 64, 64)</span></div>
+            <div class="trow"><span class="tname">k_state (buf)</span><span class="tshape">(1, 1, 8, 64)</span></div>
+            <div class="trow"><span class="tname">v_state (buf)</span><span class="tshape">(1, 8, 64)</span></div>
+            <div class="trow"><span class="tname">V (= x_raw reshaped)</span><span class="tshape">(1, 8, 64)</span></div>
+            <div class="trow"><span class="tname">K_rot</span><span class="tshape">(1, 8, 64)</span></div>
+            <div class="trow"><span class="tname">outer_curr, outer_prev</span><span class="tshape">(1, 8, 64, 64)</span></div>
+            <div class="trow"><span class="tname">new_h</span><span class="tshape">(1, 8, 64, 64)</span></div>
+          </div>
+        </div>
+        <div class="sp-card triton-c wide">
+          <h4>Original (CuteDSL — all fused)</h4>
+          <pre><code><span class="cm"># This single call performs stages 5+6+7 fused in CuteDSL
+# (NVIDIA Cute DSL — H100 only, not portable)</span>
+y = torch.empty_like(x)
+mamba3_step_fn(
+    ssm_state,          <span class="cm"># (B, H, P, S) — modified in-place</span>
+    k_state,            <span class="cm"># (B, 1, H, S) — modified in-place</span>
+    v_state,            <span class="cm"># (B, H, P)   — modified in-place</span>
+    A,                  <span class="cm"># (B, H)</span>
+    B,                  <span class="cm"># (B, 1, H, S) — K after RoPE</span>
+    C,                  <span class="cm"># (B, 1, H, S) — Q after RoPE</span>
+    self.D,             <span class="cm"># (H,)          — skip scalar</span>
+    x,                  <span class="cm"># (B, 1, H, P)  — values (V)</span>
+    DT, trap, xpj,
+    outproj=outpj, state_out=<span class="kw">None</span>,
+    out=y, z=z, zproj=zpj,
+    tile_D=<span class="num">64</span>, num_warps=<span class="num">4</span>)</code></pre>
+        </div>
+        <div class="sp-card torch-c wide">
+          <h4>PyTorch ANE — matmul outer products + register_buffer writes</h4>
+          <pre><code><span class="cm"># Reshape x_raw into (1, H, P) value vectors</span>
+V = x_raw.reshape(<span class="num">1</span>, self.num_heads, self.headdim)     <span class="cm"># (1, 8, 64)</span>
+
+<span class="cm"># Outer products via broadcast matmul (avoids einsum — ANE-safe)</span>
+<span class="cm"># (1,H,P,1) @ (1,H,1,S) → (1,H,P,S)</span>
+outer_curr = torch.matmul(V.unsqueeze(-<span class="num">1</span>),
+                           K_rot.unsqueeze(-<span class="num">2</span>))           <span class="cm"># (1, 8, 64, 64)</span>
+outer_prev = torch.matmul(self.v_state.unsqueeze(-<span class="num">1</span>),
+                           self.k_state.squeeze(<span class="num">1</span>).unsqueeze(-<span class="num">2</span>))
+
+<span class="cm"># Trapezoid state update</span>
+new_h = (alpha[:, :, <span class="kw">None</span>, <span class="kw">None</span>] * self.ssm_state
+         + b4 * outer_prev + g4 * outer_curr)
+
+<span class="cm"># In-place register_buffer writes — picked up by ct.StateType export</span>
+self.ssm_state[:]   = new_h
+self.k_state[:]     = K_rot.unsqueeze(<span class="num">1</span>)    <span class="cm"># store as (1, 1, 8, 64)</span>
+self.v_state[:]     = V
+self.angle_state[:] = theta                   <span class="cm"># written here, computed in Stage 4</span></code></pre>
+          <div class="note warn">matmul+unsqueeze replaces torch.einsum("bhp,bhs->bhps") — equivalent, but matmul maps more reliably to ANE. [:] assignment writes through to ct.StateType; angle_state is also written here (it was computed in Stage 4 but deferred to this single write block).</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- STAGE 7 -->
+    <div class="spanel" id="sp7">
+      <div class="sp-header">
+        <div class="sp-num" style="background:rgba(34,197,94,.15);color:var(--green)">7</div>
+        <div><div class="sp-title">Output y + D skip<span class="sp-tag tag-safe">✓ safe</span></div>
+             <div style="color:var(--muted);font-size:.82rem">Matrix-vector product + D skip — all standard ops</div></div>
+      </div>
+      <div class="sp-grid">
+        <div class="sp-card math">
+          <h4>Output Computation</h4>
+          <div class="math-block">
+            <div style="color:var(--muted);font-size:.76rem;margin-bottom:6px">Contract h (P×S matrix) with Q_rot (S vector):</div>
+            <div class="trow"><span class="ml">y<sub>h</sub></span><span class="mn">= h<sub>h</sub> · Q_rot<sub>h</sub> + D<sub>h</sub> · V<sub>h</sub></span></div>
+            <div style="font-size:.76rem;color:var(--muted);">&nbsp;&nbsp;&nbsp;= Σ<sub>s</sub> h[p,s] · Q_rot[s] + D · V[p]</div>
+            <div style="margin-top:10px;color:var(--muted);font-size:.76rem">D is the skip scalar — one per head.</div>
+            <div style="font-size:.76rem;color:var(--muted)">SiLU gate (z) applied in Stage 8 at flat shape.</div>
+          </div>
+        </div>
+        <div class="sp-card shape">
+          <h4>Tensor Shapes</h4>
+          <div class="trows">
+            <div class="trow"><span class="tname">new_h</span><span class="tshape">(1, 8, 64, 64)</span></div>
+            <div class="trow"><span class="tname">Q_rot.unsqueeze(-1)</span><span class="tshape">(1, 8, 64, 1)</span></div>
+            <div class="trow"><span class="tname">matmul result</span><span class="tshape">(1, 8, 64, 1)</span></div>
+            <div class="trow"><span class="tname">y_ssm (squeezed)</span><span class="tshape">(1, 8, 64)</span></div>
+            <div class="trow"><span class="tname">D.view(1,-1,1)</span><span class="tshape">(1, 8, 1)</span></div>
+            <div class="trow"><span class="tname">y_ssm (after skip)</span><span class="tshape">(1, 8, 64)</span></div>
+          </div>
+        </div>
+        <div class="sp-card torch-c wide">
+          <h4>PyTorch ANE</h4>
+          <pre><code><span class="cm"># h·Q_rot: (1,H,P,S) @ (1,H,S,1) → squeeze → (1,H,P)</span>
+<span class="cm"># Q_rot is already (1,H,S) — no squeeze(1) needed (not (1,1,H,S))</span>
+y_ssm = torch.matmul(new_h, Q_rot.unsqueeze(-<span class="num">1</span>)).squeeze(-<span class="num">1</span>)
+
+<span class="cm"># D skip: scalar per head, broadcast to (1, H, P)</span>
+y_ssm = y_ssm + (V * self.D.view(<span class="num">1</span>, -<span class="num">1</span>, <span class="num">1</span>))
+
+<span class="cm"># Gate (z, pre-SiLU'd in Stage 2) applied flat in Stage 8</span></code></pre>
+          <div class="note ok">matmul contracts over S — native ANE batched GEMM. D.view(1,-1,1) lets ANE handle the broadcast implicitly. SiLU gate is applied at flat (1,512) in Stage 8 for potential MIL fusion with out_proj.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- STAGE 8 -->
+    <div class="spanel" id="sp8">
+      <div class="sp-header">
+        <div class="sp-num" style="background:rgba(34,197,94,.15);color:var(--green)">8</div>
+        <div><div class="sp-title">out_proj + z gate<span class="sp-tag tag-safe">✓ safe</span></div>
+             <div style="color:var(--muted);font-size:.82rem">flatten → gate with pre-SiLU'd z → nn.Linear</div></div>
+      </div>
+      <div class="sp-grid">
+        <div class="sp-card math">
+          <h4>Final Projection</h4>
+          <div class="math-block">
+            <div class="trow"><span class="ml">out</span><span class="mn">= W<sub>out</sub> · (y_ssm.reshape(1,512) · z)</span></div>
+            <div style="margin-top:10px;color:var(--muted);font-size:.76rem">z = silu(z_raw) was computed in Stage 2.</div>
+            <div style="font-size:.76rem;color:var(--muted)">Gate applied at flat (1,512) — no per-head reshape.</div>
+            <div style="font-size:.76rem;color:var(--muted)">States are register_buffers — no explicit returns.</div>
+          </div>
+        </div>
+        <div class="sp-card shape">
+          <h4>Tensor Shapes</h4>
+          <div class="trows">
+            <div class="trow"><span class="tname">y_ssm</span><span class="tshape">(1, 8, 64)</span><span class="tarrow">reshape→</span><span class="tshape">(1, 512)</span></div>
+            <div class="trow"><span class="tname">z (gate)</span><span class="tshape">(1, 512)</span><span class="tarrow">from Stage 2</span></div>
+            <div class="trow"><span class="tname">gated</span><span class="tshape">(1, 512)</span></div>
+            <div class="trow"><span class="tname">W_out</span><span class="tshape">(256, 512)</span><span class="tarrow">no bias</span></div>
+            <div class="trow"><span class="tname">out</span><span class="tshape">(1, 256)</span></div>
+          </div>
+        </div>
+        <div class="sp-card torch-c wide">
+          <h4>PyTorch ANE</h4>
+          <pre><code><span class="cm"># z (silu'd in Stage 2) applied flat — no per-head reshape needed</span>
+<span class="cm"># States written via register_buffer[:] — no explicit return of states</span>
+<span class="kw">return</span> self.out_proj(y_ssm.reshape(<span class="num">1</span>, self.d_inner) * z)</code></pre>
+          <div class="note ok">Gate at flat (1,512) gives coremltools a chance to fuse mul+linear into a single MIL op. No dtype cast — stays in model dtype throughout. States live in register_buffers; no tuple return needed.</div>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- end stage-panels -->
+</div>
+</section>
+
+<!-- ═══════════════════════════ VISUALIZERS ═══════════════════════════ -->
+<section id="visualizers">
+<div class="container">
+  <h2>Interactive Visualizers</h2>
+  <p>Explore the two key mathematical primitives being defused from Triton kernels.</p>
+
+  <div class="viz-grid">
+
+    <!-- RoPE Canvas -->
+    <div class="viz-card">
+      <div class="viz-head">
+        <h3>RoPE Pairwise Rotation</h3>
+        <span class="badge triton" style="font-size:.7rem">Stage 4</span>
+      </div>
+      <canvas id="ropeCanvas" width="560" height="340"></canvas>
+      <div class="viz-controls">
+        <div class="cg">
+          <label>θ (rad)</label>
+          <input type="range" id="ropeTheta" min="0" max="628" value="78" step="1">
+          <span class="vval" id="ropeThetaVal">0.78</span>
+        </div>
+        <div class="cg">
+          <label>Step</label>
+          <input type="range" id="ropeStep" min="0" max="20" value="0" step="1">
+          <span class="vval" id="ropeStepVal">0</span>
+        </div>
+        <button onclick="animateRope()">▶ Animate</button>
+      </div>
+    </div>
+
+    <!-- SSM State Canvas -->
+    <div class="viz-card">
+      <div class="viz-head">
+        <h3>SSM State Update (Outer Product)</h3>
+        <span class="badge triton" style="font-size:.7rem">Stage 6</span>
+      </div>
+      <canvas id="ssmCanvas" width="560" height="340"></canvas>
+      <div class="viz-controls">
+        <div class="cg">
+          <label>α (decay)</label>
+          <input type="range" id="alpha" min="0" max="100" value="85" step="1">
+          <span class="vval" id="alphaVal">0.85</span>
+        </div>
+        <div class="cg">
+          <label>β (past)</label>
+          <input type="range" id="beta" min="0" max="100" value="10" step="1">
+          <span class="vval" id="betaVal">0.10</span>
+        </div>
+        <div class="cg">
+          <label>γ (curr)</label>
+          <input type="range" id="gamma" min="0" max="100" value="40" step="1">
+          <span class="vval" id="gammaVal">0.40</span>
+        </div>
+        <button onclick="drawSSM()">↺ Refresh</button>
+      </div>
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- ═══════════════════════════ CODE COMPARE ═══════════════════════════ -->
+<section id="code">
+<div class="container">
+  <h2>Full step() Comparison</h2>
+  <p>Left: original Mamba-3 step() with Triton/CuteDSL kernels. Right: MambaBlock.forward() from mamba_ane/modules/mamba3.py — pure PyTorch, register_buffer states.</p>
+
+  <div class="code-compare">
+    <div class="cpanel">
+      <div class="cp-head triton-h">⚡ Original mamba3.py — step() [Triton + CuteDSL]</div>
+      <pre><code><span class="kw">def</span> <span class="fn">step</span>(self, u, angle_state, ssm_state, k_state, v_state):
+    <span class="cm"># u: (B, d_model=256)</span>
+
+    <span class="cm"># 1. in_proj + split</span>
+    zxBCdt = self.in_proj(u)
+    z, x, B, C, dd_dt, dd_A, trap, angles = \
+        torch.split(zxBCdt, [
+            self.d_inner, self.d_inner,
+            self.d_state * self.num_bc_heads * self.mimo_rank,
+            self.d_state * self.num_bc_heads * self.mimo_rank,
+            self.nheads, self.nheads, self.nheads,
+            self.num_rope_angles], dim=-<span class="num">1</span>)
+
+    <span class="cm"># 2+3. Activations + KQ norm (calls _preprocess)</span>
+    DT, B, C, x, z, trap, A, angles = \
+        self._preprocess(dd_A, dd_dt, B, C, x, z, trap, angles)
+    <span class="cm"># _preprocess uses: Triton RMSNormGated for B_norm/C_norm</span>
+
+    <span class="cm"># 4. Bias + angle accumulation + RoPE</span>
+    bias_q = rearrange(self.C_bias, <span class="str">"h r n -> r h n"</span>)
+    bias_k = rearrange(self.B_bias, <span class="str">"h r n -> r h n"</span>)
+    rotate_pairwise = <span class="kw">not</span> self.is_mimo  <span class="cm"># True for SISO</span>
+<span class="hl-chg">    C, B, nxt_angle_state = apply_rotary_qk_inference_fwd(
+        q=C, k=B, angle_state=angle_state,
+        angle_proj=angles, dt=DT,
+        bias_q=bias_q, bias_k=bias_k,
+        conjugate=<span class="kw">False</span>, inplace=<span class="kw">False</span>,
+        rotate_pairwise=rotate_pairwise)</span>
+    <span class="cm"># ↑ Triton kernel — NOT portable</span>
+
+    nxt_v_state = x
+    nxt_k_state = B
+
+    <span class="cm"># SISO branch: xpj, zpj, outpj = ones</span>
+    xpj = torch.ones(self.mimo_rank, self.nheads,
+                     self.headdim, device=x.device)
+    zpj = torch.ones_like(xpj)
+    outpj = torch.ones_like(xpj)
+
+    <span class="cm"># 5+6+7. SSM coefficients + state update + output</span>
+    y = torch.empty_like(x)
+<span class="hl-rm">    mamba3_step_fn(
+        ssm_state, k_state, v_state,
+        A, B, C, self.D, x, DT, trap, xpj,
+        outproj=outpj, state_out=<span class="kw">None</span>,
+        out=y, z=z, zproj=zpj,
+        tile_D=<span class="num">64</span>, num_warps=<span class="num">4</span>)</span>
+    <span class="cm"># ↑ CuteDSL kernel — H100 only, NOT portable</span>
+
+    <span class="cm"># 8. out_proj</span>
+    out = rearrange(y, <span class="str">"b h p -> b (h p)"</span>)
+    out = self.out_proj(out.to(x.dtype))
+
+    angle_state.copy_(nxt_angle_state)
+    k_state.copy_(nxt_k_state)
+    v_state.copy_(nxt_v_state)
+
+    <span class="kw">return</span> out, nxt_angle_state, ssm_state, nxt_k_state, nxt_v_state</code></pre>
+    </div>
+
+    <div class="cpanel">
+      <div class="cp-head torch-h">✓ MambaBlock.forward() — mamba_ane/modules/mamba3.py</div>
+      <pre><code><span class="kw">def</span> <span class="fn">forward</span>(self, x):
+    <span class="cm"># x: (1, d_model) — states live in register_buffers</span>
+
+    <span class="cm"># 1. in_proj + explicit slice</span>
+<span class="hl-add">    zxBCdt     = self.in_proj(x)
+    z_raw      = zxBCdt[..., :self._s0]
+    x_raw      = zxBCdt[..., self._s0:self._s1]
+    B_raw      = zxBCdt[..., self._s1:self._s2]
+    C_raw      = zxBCdt[..., self._s2:self._s3]
+    dd_dt      = zxBCdt[..., self._s3:self._s4]
+    dd_A       = zxBCdt[..., self._s4:self._s5]
+    trap_raw   = zxBCdt[..., self._s5:self._s6]
+    angles_raw = zxBCdt[..., self._s6:self._s7]</span>
+
+    <span class="cm"># 2. Activations — no .float() casts</span>
+<span class="hl-add">    A   = -(F.softplus(dd_A) + <span class="num">1e-4</span>)
+    DT  = F.softplus(dd_dt + self.dt_bias)
+    lam = torch.sigmoid(trap_raw)
+    z   = F.silu(z_raw)                    <span class="cm"># gate pre-activated</span></span>
+
+    <span class="cm"># 3. K/Q RMSNormANE + expand + bias</span>
+<span class="hl-add">    K_norm     = self.B_norm(B_raw.view(<span class="num">1</span>, <span class="num">1</span>, <span class="num">1</span>, self.d_state))
+    Q_norm     = self.C_norm(C_raw.view(<span class="num">1</span>, <span class="num">1</span>, <span class="num">1</span>, self.d_state))
+    K_pre      = K_norm.repeat(<span class="num">1</span>, <span class="num">1</span>, self.num_heads, <span class="num">1</span>).squeeze(<span class="num">1</span>) + self.B_bias
+    Q_pre      = Q_norm.repeat(<span class="num">1</span>, <span class="num">1</span>, self.num_heads, <span class="num">1</span>).squeeze(<span class="num">1</span>) + self.C_bias</span>
+
+    <span class="cm"># 4. Angle accumulation + RoPE (bias already in K_pre/Q_pre)</span>
+<span class="hl-add">    angles      = angles_raw.view(<span class="num">1</span>, <span class="num">1</span>, self.num_rope_angles).repeat(<span class="num">1</span>, self.num_heads, <span class="num">1</span>)
+    delta_theta = torch.tanh(angles) * math.pi * DT.unsqueeze(-<span class="num">1</span>)
+    theta       = self.angle_state + delta_theta
+    K_rot       = self.apply_rope(K_pre, torch.cos(theta), torch.sin(theta))
+    Q_rot       = self.apply_rope(Q_pre, torch.cos(theta), torch.sin(theta))</span>
+
+    <span class="cm"># 5. Trapezoid coefficients</span>
+<span class="hl-add">    alpha = torch.exp(A * DT)
+    beta  = (<span class="num">1.0</span> - lam) * DT * alpha
+    gamma = lam * DT
+    g4    = gamma[:, :, <span class="kw">None</span>, <span class="kw">None</span>]
+    b4    = beta[:, :,  <span class="kw">None</span>, <span class="kw">None</span>]</span>
+
+    <span class="cm"># 6. SSM recurrence — matmul outer products; state writes</span>
+<span class="hl-add">    V          = x_raw.reshape(<span class="num">1</span>, self.num_heads, self.headdim)
+    outer_curr = torch.matmul(V.unsqueeze(-<span class="num">1</span>), K_rot.unsqueeze(-<span class="num">2</span>))
+    outer_prev = torch.matmul(self.v_state.unsqueeze(-<span class="num">1</span>),
+                               self.k_state.squeeze(<span class="num">1</span>).unsqueeze(-<span class="num">2</span>))
+    new_h      = (alpha[:, :, <span class="kw">None</span>, <span class="kw">None</span>] * self.ssm_state
+                  + b4 * outer_prev + g4 * outer_curr)
+    self.ssm_state[:]   = new_h
+    self.k_state[:]     = K_rot.unsqueeze(<span class="num">1</span>)
+    self.v_state[:]     = V
+    self.angle_state[:] = theta</span>
+
+    <span class="cm"># 7+8. Output + D skip + z gate + out_proj</span>
+<span class="hl-add">    y_ssm = torch.matmul(new_h, Q_rot.unsqueeze(-<span class="num">1</span>)).squeeze(-<span class="num">1</span>)
+    y_ssm = y_ssm + (V * self.D.view(<span class="num">1</span>, -<span class="num">1</span>, <span class="num">1</span>))
+    <span class="kw">return</span> self.out_proj(y_ssm.reshape(<span class="num">1</span>, self.d_inner) * z)</span>
+    <span class="cm"># ↑ z gate applied flat; states in buffers — no tuple return</span></code></pre>
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- ═══════════════════════════ SHAPE TABLE ═══════════════════════════ -->
+<section id="shapes">
+<div class="container">
+  <h2>Stateful Inference — Tensor Shapes Reference</h2>
+  <p>All four states are <code>register_buffer()</code> — written in-place via <code>[:]</code>; picked up by <code>ct.StateType</code> during CoreML export.</p>
+  <table class="shape-table">
+    <thead><tr><th>Tensor</th><th>Shape</th><th>Description</th><th>dtype</th><th>ANE note</th></tr></thead>
+    <tbody>
+      <tr><td>angle_state</td><td>(1, 8, 16)</td><td>Accumulated RoPE phase θ — NOT wrapped mod 2π</td><td>float32</td><td>register_buffer</td></tr>
+      <tr><td>ssm_state</td><td>(1, 8, 64, 64)</td><td>SSM hidden state h — (1, H, P, S) outer product matrix</td><td>float32</td><td>register_buffer · 2MB</td></tr>
+      <tr><td>k_state</td><td>(1, 1, 8, 64)</td><td>K_rot from previous step — trapezoid past term</td><td>model dtype</td><td>register_buffer</td></tr>
+      <tr><td>v_state</td><td>(1, 8, 64)</td><td>V from previous step — trapezoid past term</td><td>model dtype</td><td>register_buffer</td></tr>
+      <tr><td>x (input)</td><td>(1, 256)</td><td>Token embedding at current step — batch fixed at 1</td><td>model dtype</td><td>✓ safe</td></tr>
+      <tr><td>out (output)</td><td>(1, 256)</td><td>Output embedding</td><td>model dtype</td><td>✓ safe</td></tr>
+      <tr><td>D (param)</td><td>(8,)</td><td>Skip scalar — one per head, learned</td><td>float32</td><td>✓ safe</td></tr>
+      <tr><td>dt_bias (param)</td><td>(8,)</td><td>Δt bias — shifts initialization of time-step scale</td><td>float32</td><td>✓ safe</td></tr>
+      <tr><td>B_bias, C_bias</td><td>(1, 8, 64)</td><td>Per-head bias on K/Q — added after RMSNormANE expand</td><td>float32</td><td>✓ safe</td></tr>
+    </tbody>
+  </table>
+
+  <div style="margin-top:24px;">
+    <h4>ANE Compatibility Checklist</h4>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px;margin-top:12px;">
+      <div style="background:var(--bg-card);border:1px solid rgba(34,197,94,.3);border-radius:8px;padding:14px;">
+        <div style="color:var(--green);font-weight:600;margin-bottom:8px;">✓ ANE-safe (use as-is)</div>
+        <div style="font-size:.8rem;color:var(--muted);line-height:2;">
+          nn.Linear (in_proj, out_proj)<br>
+          Explicit slice indexing [..., a:b]<br>
+          F.softplus, F.silu, torch.sigmoid<br>
+          torch.exp, torch.tanh<br>
+          torch.cos, torch.sin, torch.rsqrt<br>
+          torch.matmul (batched GEMM)<br>
+          Broadcast multiply, unsqueeze, reshape<br>
+          register_buffer [:] state write
+        </div>
+      </div>
+      <div style="background:var(--bg-card);border:1px solid rgba(249,115,22,.3);border-radius:8px;padding:14px;">
+        <div style="color:var(--orange);font-weight:600;margin-bottom:8px;">⚠ Verify in CoreML Performance Report</div>
+        <div style="font-size:.8rem;color:var(--muted);line-height:2;">
+          RMSNormANE (custom — verify weight load)<br>
+          .repeat() for head expand → may or may not fuse<br>
+          torch.stack in apply_rope → cat fallback risk<br>
+          ssm_state (1,8,64,64) — 2MB ANE SRAM pressure<br>
+          fp16 outer product accumulation
+        </div>
+      </div>
+      <div style="background:var(--bg-card);border:1px solid rgba(239,68,68,.3);border-radius:8px;padding:14px;">
+        <div style="color:var(--red);font-weight:600;margin-bottom:8px;">✗ Removed / replaced</div>
+        <div style="font-size:.8rem;color:var(--muted);line-height:2;">
+          RMSNormGated (Triton import)<br>
+          apply_rotary_qk_inference_fwd<br>
+          mamba3_step_fn (CuteDSL)<br>
+          mamba3_siso_combined (prefill only)<br>
+          torch.einsum (→ matmul+unsqueeze)<br>
+          .float() casts on activations<br>
+          inference_params dict
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</section>
+
+<footer style="padding:32px 0;border-top:1px solid var(--border);color:var(--dim);font-size:.78rem;">
+<div class="container">
+  Mamba-3 SISO ANE Porting Guide · Config: d_model=256, d_state=64, nheads=8, headdim=64, rope_fraction=0.5 ·
+  Original: <code>mamba_ssm/modules/mamba3.py</code> · ANE: <code>mamba_ane/modules/mamba3.py</code>
+</div>
+</footer>
+
+<script>
+/* ═══════════════════════════════════════
+   PIPELINE: stage click handler
+═══════════════════════════════════════ */
+let activeStage = null;
+
+function showStage(n) {
+  document.querySelectorAll('.spanel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.pnode').forEach(p => p.classList.remove('active'));
+
+  if (activeStage === n) {
+    activeStage = null;
+    return;
+  }
+  activeStage = n;
+
+  const panel = document.getElementById('sp' + n);
+  const node  = document.querySelector('[data-stage="' + n + '"]');
+  if (panel) panel.classList.add('active');
+  if (node)  node.classList.add('active');
+  if (panel) setTimeout(() => panel.scrollIntoView({behavior:'smooth', block:'nearest'}), 50);
+}
+
+showStage(1);
+
+/* ═══════════════════════════════════════
+   ROPE CANVAS
+═══════════════════════════════════════ */
+const ropeCanvas = document.getElementById('ropeCanvas');
+const ropeCtx    = ropeCanvas.getContext('2d');
+const W = 560, H = 340;
+
+function drawRope() {
+  const theta   = parseInt(document.getElementById('ropeTheta').value) / 100;
+  const step    = parseInt(document.getElementById('ropeStep').value);
+  const cumulTheta = theta + step * 0.4;
+
+  document.getElementById('ropeThetaVal').textContent = theta.toFixed(2);
+  document.getElementById('ropeStepVal').textContent  = step;
+
+  ropeCtx.clearRect(0, 0, W, H);
+  ropeCtx.fillStyle = '#070b10';
+  ropeCtx.fillRect(0, 0, W, H);
+
+  const cx = 160, cy = H/2, r = 110;
+  const cos = Math.cos(cumulTheta), sin = Math.sin(cumulTheta);
+
+  ropeCtx.strokeStyle = '#1a2030';
+  ropeCtx.lineWidth = 1;
+  for (let i = -4; i <= 4; i++) {
+    ropeCtx.beginPath(); ropeCtx.moveTo(cx + i*30, cy-120); ropeCtx.lineTo(cx + i*30, cy+120); ropeCtx.stroke();
+    ropeCtx.beginPath(); ropeCtx.moveTo(cx-130, cy + i*30); ropeCtx.lineTo(cx+130, cy + i*30); ropeCtx.stroke();
+  }
+
+  ropeCtx.strokeStyle = '#30363d';
+  ropeCtx.lineWidth = 1.5;
+  ropeCtx.beginPath();
+  ropeCtx.arc(cx, cy, r, 0, Math.PI*2);
+  ropeCtx.stroke();
+
+  ropeCtx.strokeStyle = '#3d444d';
+  ropeCtx.lineWidth = 1.5;
+  ropeCtx.beginPath(); ropeCtx.moveTo(cx-130, cy); ropeCtx.lineTo(cx+130, cy); ropeCtx.stroke();
+  ropeCtx.beginPath(); ropeCtx.moveTo(cx, cy-130); ropeCtx.lineTo(cx, cy+130); ropeCtx.stroke();
+
+  const x0 = r, x1 = 0;
+  ropeCtx.strokeStyle = '#3d6699';
+  ropeCtx.lineWidth = 2;
+  ropeCtx.setLineDash([5, 3]);
+  ropeCtx.beginPath();
+  ropeCtx.moveTo(cx, cy);
+  ropeCtx.lineTo(cx + x0, cy - x1);
+  ropeCtx.stroke();
+  ropeCtx.setLineDash([]);
+  ropeCtx.fillStyle = '#60a5fa80';
+  ropeCtx.beginPath(); ropeCtx.arc(cx + x0, cy - x1, 5, 0, Math.PI*2); ropeCtx.fill();
+
+  const x0r = x0 * cos - x1 * sin;
+  const x1r = x0 * sin + x1 * cos;
+  ropeCtx.strokeStyle = '#22c55e';
+  ropeCtx.lineWidth = 2.5;
+  ropeCtx.beginPath();
+  ropeCtx.moveTo(cx, cy);
+  ropeCtx.lineTo(cx + x0r, cy - x1r);
+  ropeCtx.stroke();
+  const ang2 = Math.atan2(-x1r, x0r);
+  ropeCtx.fillStyle = '#22c55e';
+  ropeCtx.beginPath();
+  ropeCtx.moveTo(cx + x0r, cy - x1r);
+  ropeCtx.lineTo(cx + x0r - 12*Math.cos(ang2-0.4), cy - x1r + 12*Math.sin(ang2-0.4));
+  ropeCtx.lineTo(cx + x0r - 12*Math.cos(ang2+0.4), cy - x1r + 12*Math.sin(ang2+0.4));
+  ropeCtx.closePath(); ropeCtx.fill();
+
+  ropeCtx.strokeStyle = '#f97316';
+  ropeCtx.lineWidth = 1.5;
+  ropeCtx.beginPath();
+  ropeCtx.arc(cx, cy, 35, -cumulTheta, 0);
+  ropeCtx.stroke();
+
+  ropeCtx.fillStyle = '#f97316';
+  ropeCtx.font = '13px monospace';
+  const labelAng = -cumulTheta / 2;
+  ropeCtx.fillText('θ=' + cumulTheta.toFixed(2), cx + 42*Math.cos(labelAng)-16, cy + 42*Math.sin(labelAng)+4);
+
+  const rx = 340;
+  ropeCtx.fillStyle = '#3d444d';
+  ropeCtx.fillRect(rx - 10, 10, 220, 320);
+  ropeCtx.strokeStyle = '#30363d';
+  ropeCtx.strokeRect(rx - 10, 10, 220, 320);
+
+  ropeCtx.fillStyle = '#e6edf3';
+  ropeCtx.font = 'bold 12px monospace';
+  ropeCtx.fillText('Pairwise RoPE (SISO)', rx, 34);
+
+  ropeCtx.fillStyle = '#7d8590';
+  ropeCtx.font = '11px monospace';
+  ropeCtx.fillText('Per pair (x₂ᵢ, x₂ᵢ₊₁):', rx, 58);
+
+  ropeCtx.fillStyle = '#60a5fa';
+  ropeCtx.font = '11px monospace';
+  ropeCtx.fillText('x\'₂ᵢ   = x₂ᵢ·cos(θᵢ)', rx, 78);
+  ropeCtx.fillText('          − x₂ᵢ₊₁·sin(θᵢ)', rx, 94);
+  ropeCtx.fillStyle = '#22c55e';
+  ropeCtx.fillText('x\'₂ᵢ₊₁ = x₂ᵢ·sin(θᵢ)', rx, 114);
+  ropeCtx.fillText('          + x₂ᵢ₊₁·cos(θᵢ)', rx, 130);
+
+  ropeCtx.fillStyle = '#7d8590';
+  ropeCtx.fillText('Angle accumulation:', rx, 158);
+  ropeCtx.fillStyle = '#f97316';
+  ropeCtx.fillText('Δθ = tanh(ang)·π·Δt', rx, 176);
+  ropeCtx.fillText('θ  = angle_state + Δθ', rx, 192);
+
+  ropeCtx.fillStyle = '#7d8590';
+  ropeCtx.fillText('Scope: dims [0:32] of S=64', rx, 218);
+  ropeCtx.fillText('Dims [32:64]: pass-through', rx, 234);
+  ropeCtx.fillText('16 angles → 16 pairs', rx, 250);
+
+  ropeCtx.fillStyle = '#484f58';
+  ropeCtx.fillText('─────────────────', rx, 270);
+  ropeCtx.fillStyle = '#7d8590';
+  ropeCtx.fillText('Current θ: ' + cumulTheta.toFixed(3) + ' rad', rx, 288);
+  ropeCtx.fillText('Step: ' + step, rx, 304);
+
+  ropeCtx.fillStyle = '#3d6699'; ropeCtx.beginPath(); ropeCtx.arc(rx-2, 321, 4, 0, Math.PI*2); ropeCtx.fill();
+  ropeCtx.fillStyle = '#7d8590'; ropeCtx.font = '10px monospace'; ropeCtx.fillText(' original (x₀, x₁)', rx+4, 325);
+}
+
+let ropeAnim = null;
+function animateRope() {
+  if (ropeAnim) { cancelAnimationFrame(ropeAnim); ropeAnim = null; return; }
+  let step = 0;
+  function frame() {
+    document.getElementById('ropeTheta').value = (step * 31) % 628;
+    document.getElementById('ropeStep').value  = step % 21;
+    drawRope();
+    step++;
+    ropeAnim = requestAnimationFrame(frame);
+  }
+  frame();
+}
+
+document.getElementById('ropeTheta').addEventListener('input', drawRope);
+document.getElementById('ropeStep').addEventListener('input', drawRope);
+drawRope();
+
+/* ═══════════════════════════════════════
+   SSM CANVAS
+═══════════════════════════════════════ */
+const ssmCanvas = document.getElementById('ssmCanvas');
+const ssmCtx    = ssmCanvas.getContext('2d');
+
+function makeVec(n, seed) {
+  const v = [];
+  for (let i = 0; i < n; i++) v.push(Math.sin(seed * 2.3 + i * 0.7) * 0.5 + 0.5);
+  return v;
+}
+
+function drawSSM() {
+  const alpha = parseInt(document.getElementById('alpha').value) / 100;
+  const beta  = parseInt(document.getElementById('beta').value) / 100;
+  const gamma = parseInt(document.getElementById('gamma').value) / 100;
+
+  document.getElementById('alphaVal').textContent = alpha.toFixed(2);
+  document.getElementById('betaVal').textContent  = beta.toFixed(2);
+  document.getElementById('gammaVal').textContent = gamma.toFixed(2);
+
+  ssmCtx.clearRect(0, 0, W, H);
+  ssmCtx.fillStyle = '#070b10';
+  ssmCtx.fillRect(0, 0, W, H);
+
+  const N = 12;
+  const V_prev = makeVec(N, 1.1);
+  const K_prev = makeVec(N, 2.3);
+  const V_curr = makeVec(N, 3.7);
+  const K_curr = makeVec(N, 5.1);
+
+  const H_prev = [];
+  for (let i = 0; i < N; i++) {
+    H_prev.push([]);
+    for (let j = 0; j < N; j++)
+      H_prev[i].push(Math.abs(Math.sin(i * 1.3 + j * 0.9)) * 0.8);
+  }
+
+  const op_prev = [], op_curr = [];
+  for (let i = 0; i < N; i++) {
+    op_prev.push([]); op_curr.push([]);
+    for (let j = 0; j < N; j++) {
+      op_prev[i].push(V_prev[i] * K_prev[j]);
+      op_curr[i].push(V_curr[i] * K_curr[j]);
+    }
+  }
+
+  const H_new = [];
+  for (let i = 0; i < N; i++) {
+    H_new.push([]);
+    for (let j = 0; j < N; j++)
+      H_new[i].push(alpha * H_prev[i][j] + beta * op_prev[i][j] + gamma * op_curr[i][j]);
+  }
+
+  function drawMatrix(mx, x0, y0, sz, title, colorFn) {
+    ssmCtx.fillStyle = '#7d8590';
+    ssmCtx.font = '10px monospace';
+    ssmCtx.fillText(title, x0, y0 - 6);
+    for (let i = 0; i < N; i++) {
+      for (let j = 0; j < N; j++) {
+        const v = Math.min(1, Math.max(0, mx[i][j]));
+        ssmCtx.fillStyle = colorFn(v);
+        ssmCtx.fillRect(x0 + j*sz, y0 + i*sz, sz-1, sz-1);
+      }
+    }
+  }
+
+  const blue   = v => `rgba(${Math.round(30+v*70)},${Math.round(80+v*120)},${Math.round(200+v*55)},${0.3+v*0.7})`;
+  const orange = v => `rgba(${Math.round(150+v*100)},${Math.round(60+v*80)},${Math.round(20)},${0.3+v*0.7})`;
+  const green  = v => `rgba(${Math.round(20+v*50)},${Math.round(120+v*80)},${Math.round(60+v*20)},${0.3+v*0.7})`;
+
+  const sz = 14;
+  drawMatrix(H_prev,   12, 28, sz, 'α·h_prev', blue);
+  drawMatrix(op_prev, 190, 28, sz, 'β·(V⊗K)_prev', orange);
+  drawMatrix(op_curr, 370, 28, sz, 'γ·(V⊗K)_curr', green);
+
+  ssmCtx.fillStyle = '#7d8590';
+  ssmCtx.font = 'bold 20px sans-serif';
+  ssmCtx.fillText('+', 175, 28 + N*sz/2 + 8);
+  ssmCtx.fillText('+', 355, 28 + N*sz/2 + 8);
+
+  drawMatrix(H_new, 185, 210, sz, 'h_new = α·h_prev + β·(V⊗K)_prev + γ·(V⊗K)_curr', green);
+
+  ssmCtx.fillStyle = '#e6edf3';
+  ssmCtx.font = 'bold 11px monospace';
+  ssmCtx.fillText('=', 170, 210 + N*sz/2 + 8);
+
+  const ex = 370, ey = 215;
+  ssmCtx.fillStyle = '#30363d';
+  ssmCtx.fillRect(ex, ey, 175, 110);
+  ssmCtx.strokeStyle = '#3d444d';
+  ssmCtx.strokeRect(ex, ey, 175, 110);
+
+  ssmCtx.fillStyle = '#60a5fa';
+  ssmCtx.font = '11px monospace';
+  ssmCtx.fillText('α = ' + alpha.toFixed(2) + '  (decay)', ex+10, ey+22);
+  ssmCtx.fillStyle = '#f97316';
+  ssmCtx.fillText('β = ' + beta.toFixed(2)  + '  (past weight)', ex+10, ey+42);
+  ssmCtx.fillStyle = '#22c55e';
+  ssmCtx.fillText('γ = ' + gamma.toFixed(2) + '  (curr weight)', ex+10, ey+62);
+
+  ssmCtx.fillStyle = '#484f58';
+  ssmCtx.fillText('Shapes (B=1,H=1 shown):', ex+10, ey+82);
+  ssmCtx.fillStyle = '#7d8590';
+  ssmCtx.fillText('h: (H,P,S) V⊗K: (H,P,S)', ex+10, ey+98);
+}
+
+document.getElementById('alpha').addEventListener('input', drawSSM);
+document.getElementById('beta').addEventListener('input', drawSSM);
+document.getElementById('gamma').addEventListener('input', drawSSM);
+drawSSM();
+</script>
+</body>
+</html>
