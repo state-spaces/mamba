@@ -165,24 +165,25 @@ def compute_dzdo(
     def grid(META):
         return (triton.cdiv(seqlen, META["CHUNK_SIZE"]), nheads, batch)
 
-    mamba3_siso_bwd_kernel_dzdo[grid](
-        do, z, o,
-        dz, do_scaled,
-        # DO strides
-        do.stride(0), do.stride(1), do.stride(2), do.stride(3),
-        # Z strides
-        z.stride(0), z.stride(1), z.stride(2), z.stride(3),
-        # O strides
-        o.stride(0), o.stride(1), o.stride(2), o.stride(3),
-        # Dz strides
-        dz.stride(0), dz.stride(1), dz.stride(2), dz.stride(3),
-        # DO_scaled strides
-        do_scaled.stride(0), do_scaled.stride(1), do_scaled.stride(2), do_scaled.stride(3),
-        # Dimensions
-        seqlen, headdim_v,
-        # Compile-time constants
-        HEADDIM_V=HEADDIM_V,
-    )
+    with torch.cuda.device(do.device.index):
+        mamba3_siso_bwd_kernel_dzdo[grid](
+            do, z, o,
+            dz, do_scaled,
+            # DO strides
+            do.stride(0), do.stride(1), do.stride(2), do.stride(3),
+            # Z strides
+            z.stride(0), z.stride(1), z.stride(2), z.stride(3),
+            # O strides
+            o.stride(0), o.stride(1), o.stride(2), o.stride(3),
+            # Dz strides
+            dz.stride(0), dz.stride(1), dz.stride(2), dz.stride(3),
+            # DO_scaled strides
+            do_scaled.stride(0), do_scaled.stride(1), do_scaled.stride(2), do_scaled.stride(3),
+            # Dimensions
+            seqlen, headdim_v,
+            # Compile-time constants
+            HEADDIM_V=HEADDIM_V,
+        )
 
     return dz, do_scaled
 
@@ -733,64 +734,65 @@ def compute_dqkv(
         grid = (nheads, batch)
 
     # Launch kernel
-    mamba3_siso_bwd_kernel_dqkv[grid](
-        q, k, v, da_cs, da_cs_sum, qk_dot, D, SSM_States, do, d_ossm_state, Cu_Seqlens,
-        dq, dk, dv, dAdt, dQK, dD, d_issm_state,
-        # Q strides
-        q.stride(0), q.stride(1), q.stride(2), q.stride(3),
-        # K strides
-        k.stride(0), k.stride(1), k.stride(2), k.stride(3),
-        # V strides
-        v.stride(0), v.stride(1), v.stride(2), v.stride(3),
-        # DA_CS strides
-        da_cs.stride(0), da_cs.stride(1), da_cs.stride(2),
-        # DA_CS_SUM strides
-        da_cs_sum.stride(0), da_cs_sum.stride(1), da_cs_sum.stride(2),
-        # QK_Dot strides
-        qk_dot.stride(0), qk_dot.stride(1), qk_dot.stride(2),
-        # D stride
-        D.stride(0) if D is not None else 0,
-        # SSM_States strides: (batch, nheads, headdim_v, nchunks*headdim_qk)
-        SSM_States.stride(0), SSM_States.stride(1), SSM_States.stride(2),
-        SSM_States.stride(3),
-        # dO strides
-        do.stride(0), do.stride(1), do.stride(2), do.stride(3),
-        # d_ossm_state strides
-        d_ossm_state.stride(0) if d_ossm_state is not None else 0,
-        d_ossm_state.stride(1) if d_ossm_state is not None else 0,
-        d_ossm_state.stride(2) if d_ossm_state is not None else 0,
-        d_ossm_state.stride(3) if d_ossm_state is not None else 0,
-        # Cu_Seqlens strides
-        Cu_Seqlens.stride(0) if Cu_Seqlens is not None else 0,
-        # dQ strides
-        dq.stride(0), dq.stride(1), dq.stride(2), dq.stride(3),
-        # dK strides
-        dk.stride(0), dk.stride(1), dk.stride(2), dk.stride(3),
-        # dV strides
-        dv.stride(0), dv.stride(1), dv.stride(2), dv.stride(3),
-        # dAdt strides
-        dAdt.stride(0), dAdt.stride(1), dAdt.stride(2),
-        # dQK strides
-        dQK.stride(0), dQK.stride(1), dQK.stride(2),
-        # dD strides
-        dD.stride(0) if D is not None else 0,
-        dD.stride(1) if D is not None else 0,
-        # d_issm_state strides
-        d_issm_state.stride(0) if d_issm_state is not None else 0,
-        d_issm_state.stride(1) if d_issm_state is not None else 0,
-        d_issm_state.stride(2) if d_issm_state is not None else 0,
-        d_issm_state.stride(3) if d_issm_state is not None else 0,
-        # Dimensions
-        seqlen, nheads_qk, headdim_qk, headdim_v,
-        # Compile-time constants
-        CHUNK_SIZE=chunk_size,
-        HEADDIM_QK=HEADDIM_QK,
-        HEADDIM_V=HEADDIM_V,
-        RECOMPUTE_MASK=False,
-        HAS_D_OSSM_STATE=d_ossm_state is not None,
-        RETURN_D_ISSM_STATE=has_input_state,
-        IS_VARLEN=is_varlen,
-    )
+    with torch.cuda.device(q.device.index):
+        mamba3_siso_bwd_kernel_dqkv[grid](
+            q, k, v, da_cs, da_cs_sum, qk_dot, D, SSM_States, do, d_ossm_state, Cu_Seqlens,
+            dq, dk, dv, dAdt, dQK, dD, d_issm_state,
+            # Q strides
+            q.stride(0), q.stride(1), q.stride(2), q.stride(3),
+            # K strides
+            k.stride(0), k.stride(1), k.stride(2), k.stride(3),
+            # V strides
+            v.stride(0), v.stride(1), v.stride(2), v.stride(3),
+            # DA_CS strides
+            da_cs.stride(0), da_cs.stride(1), da_cs.stride(2),
+            # DA_CS_SUM strides
+            da_cs_sum.stride(0), da_cs_sum.stride(1), da_cs_sum.stride(2),
+            # QK_Dot strides
+            qk_dot.stride(0), qk_dot.stride(1), qk_dot.stride(2),
+            # D stride
+            D.stride(0) if D is not None else 0,
+            # SSM_States strides: (batch, nheads, headdim_v, nchunks*headdim_qk)
+            SSM_States.stride(0), SSM_States.stride(1), SSM_States.stride(2),
+            SSM_States.stride(3),
+            # dO strides
+            do.stride(0), do.stride(1), do.stride(2), do.stride(3),
+            # d_ossm_state strides
+            d_ossm_state.stride(0) if d_ossm_state is not None else 0,
+            d_ossm_state.stride(1) if d_ossm_state is not None else 0,
+            d_ossm_state.stride(2) if d_ossm_state is not None else 0,
+            d_ossm_state.stride(3) if d_ossm_state is not None else 0,
+            # Cu_Seqlens strides
+            Cu_Seqlens.stride(0) if Cu_Seqlens is not None else 0,
+            # dQ strides
+            dq.stride(0), dq.stride(1), dq.stride(2), dq.stride(3),
+            # dK strides
+            dk.stride(0), dk.stride(1), dk.stride(2), dk.stride(3),
+            # dV strides
+            dv.stride(0), dv.stride(1), dv.stride(2), dv.stride(3),
+            # dAdt strides
+            dAdt.stride(0), dAdt.stride(1), dAdt.stride(2),
+            # dQK strides
+            dQK.stride(0), dQK.stride(1), dQK.stride(2),
+            # dD strides
+            dD.stride(0) if D is not None else 0,
+            dD.stride(1) if D is not None else 0,
+            # d_issm_state strides
+            d_issm_state.stride(0) if d_issm_state is not None else 0,
+            d_issm_state.stride(1) if d_issm_state is not None else 0,
+            d_issm_state.stride(2) if d_issm_state is not None else 0,
+            d_issm_state.stride(3) if d_issm_state is not None else 0,
+            # Dimensions
+            seqlen, nheads_qk, headdim_qk, headdim_v,
+            # Compile-time constants
+            CHUNK_SIZE=chunk_size,
+            HEADDIM_QK=HEADDIM_QK,
+            HEADDIM_V=HEADDIM_V,
+            RECOMPUTE_MASK=False,
+            HAS_D_OSSM_STATE=d_ossm_state is not None,
+            RETURN_D_ISSM_STATE=has_input_state,
+            IS_VARLEN=is_varlen,
+        )
 
     # Add output V state gradients to the last token
     if d_ov_state is not None:
@@ -1279,55 +1281,56 @@ def compute_dqktheta(
     # Grid: (nchunks, batch)
     grid = (nchunks, batch)
 
-    mamba3_siso_bwd_kernel_rotary_bias_angles[grid](
-        # Input tensors
-        q, k, scale, gamma, q_bias, k_bias, angles, dq_in, dk_in, dqk,
-        # Output tensors
-        dq, dk, dangles, dscale, dgamma, dq_bias_partial, dk_bias_partial,
-        # Q strides: (batch, seqlen, nheads_qk, headdim_qk)
-        q.stride(0), q.stride(1), q.stride(2), q.stride(3),
-        # K strides
-        k.stride(0), k.stride(1), k.stride(2), k.stride(3),
-        # Scale strides: (batch, nheads, seqlen)
-        scale.stride(0), scale.stride(1), scale.stride(2),
-        # SGamma strides
-        gamma.stride(0), gamma.stride(1), gamma.stride(2),
-        # Q_bias strides: (nheads, headdim_qk)
-        q_bias.stride(0), q_bias.stride(1),
-        # K_bias strides
-        k_bias.stride(0), k_bias.stride(1),
-        # Angles strides: (batch, seqlen, nheads, headdim_qk//2)
-        angles.stride(0), angles.stride(1), angles.stride(2), angles.stride(3),
-        # dQ_in strides: (batch, seqlen, nheads, headdim_qk)
-        dq_in.stride(0), dq_in.stride(1), dq_in.stride(2), dq_in.stride(3),
-        # dK_in strides
-        dk_in.stride(0), dk_in.stride(1), dk_in.stride(2), dk_in.stride(3),
-        # dQK strides: (batch, nheads, seqlen)
-        dqk.stride(0), dqk.stride(1), dqk.stride(2),
-        # Output tensors
-        # dQ strides: (batch, seqlen, nheads_qk, headdim_qk)
-        dq.stride(0), dq.stride(1), dq.stride(2), dq.stride(3),
-        # dK strides
-        dk.stride(0), dk.stride(1), dk.stride(2), dk.stride(3),
-        # dAngles strides: (batch, seqlen, nheads, headdim_qk//2)
-        dangles.stride(0), dangles.stride(1), dangles.stride(2), dangles.stride(3),
-        # dScale strides: (batch, nheads, seqlen)
-        dscale.stride(0), dscale.stride(1), dscale.stride(2), dscale.stride(3),
-        # dSGamma strides
-        dgamma.stride(0), dgamma.stride(1), dgamma.stride(2), dgamma.stride(3),
-        # dQ_bias_partial strides: (batch, nchunks, nheads, headdim_qk)
-        dq_bias_partial.stride(0), dq_bias_partial.stride(1),
-        dq_bias_partial.stride(2), dq_bias_partial.stride(3),
-        # dK_bias_partial strides
-        dk_bias_partial.stride(0), dk_bias_partial.stride(1),
-        dk_bias_partial.stride(2), dk_bias_partial.stride(3),
-        # Sizes
-        seqlen, nheads_qk, nheads, headdim_qk, headdim_angles,
-        CHUNK_SIZE=chunk_size,
-        HEADDIM_QK=HEADDIM_QK,
-        BLOCK_HEADDIM_QK=BLOCK_HEADDIM_QK,
-        GQA_RATIO=GQA_RATIO,
-    )
+    with torch.cuda.device(q.device.index):
+        mamba3_siso_bwd_kernel_rotary_bias_angles[grid](
+            # Input tensors
+            q, k, scale, gamma, q_bias, k_bias, angles, dq_in, dk_in, dqk,
+            # Output tensors
+            dq, dk, dangles, dscale, dgamma, dq_bias_partial, dk_bias_partial,
+            # Q strides: (batch, seqlen, nheads_qk, headdim_qk)
+            q.stride(0), q.stride(1), q.stride(2), q.stride(3),
+            # K strides
+            k.stride(0), k.stride(1), k.stride(2), k.stride(3),
+            # Scale strides: (batch, nheads, seqlen)
+            scale.stride(0), scale.stride(1), scale.stride(2),
+            # SGamma strides
+            gamma.stride(0), gamma.stride(1), gamma.stride(2),
+            # Q_bias strides: (nheads, headdim_qk)
+            q_bias.stride(0), q_bias.stride(1),
+            # K_bias strides
+            k_bias.stride(0), k_bias.stride(1),
+            # Angles strides: (batch, seqlen, nheads, headdim_qk//2)
+            angles.stride(0), angles.stride(1), angles.stride(2), angles.stride(3),
+            # dQ_in strides: (batch, seqlen, nheads, headdim_qk)
+            dq_in.stride(0), dq_in.stride(1), dq_in.stride(2), dq_in.stride(3),
+            # dK_in strides
+            dk_in.stride(0), dk_in.stride(1), dk_in.stride(2), dk_in.stride(3),
+            # dQK strides: (batch, nheads, seqlen)
+            dqk.stride(0), dqk.stride(1), dqk.stride(2),
+            # Output tensors
+            # dQ strides: (batch, seqlen, nheads_qk, headdim_qk)
+            dq.stride(0), dq.stride(1), dq.stride(2), dq.stride(3),
+            # dK strides
+            dk.stride(0), dk.stride(1), dk.stride(2), dk.stride(3),
+            # dAngles strides: (batch, seqlen, nheads, headdim_qk//2)
+            dangles.stride(0), dangles.stride(1), dangles.stride(2), dangles.stride(3),
+            # dScale strides: (batch, nheads, seqlen)
+            dscale.stride(0), dscale.stride(1), dscale.stride(2), dscale.stride(3),
+            # dSGamma strides
+            dgamma.stride(0), dgamma.stride(1), dgamma.stride(2), dgamma.stride(3),
+            # dQ_bias_partial strides: (batch, nchunks, nheads, headdim_qk)
+            dq_bias_partial.stride(0), dq_bias_partial.stride(1),
+            dq_bias_partial.stride(2), dq_bias_partial.stride(3),
+            # dK_bias_partial strides
+            dk_bias_partial.stride(0), dk_bias_partial.stride(1),
+            dk_bias_partial.stride(2), dk_bias_partial.stride(3),
+            # Sizes
+            seqlen, nheads_qk, nheads, headdim_qk, headdim_angles,
+            CHUNK_SIZE=chunk_size,
+            HEADDIM_QK=HEADDIM_QK,
+            BLOCK_HEADDIM_QK=BLOCK_HEADDIM_QK,
+            GQA_RATIO=GQA_RATIO,
+        )
 
     # Reshape outputs back to original layout
     dscale = torch.sum(dscale, dim=2)  # Sum over headdim blocks
@@ -1382,35 +1385,36 @@ def apply_dk_state_post(
 
     grid = (nheads, num_sequences)
 
-    mamba3_siso_bwd_kernel_dk_state_post[grid](
-        # Input tensors
-        d_ok_state, angles, k, k_bias, Cu_Seqlens,
-        # Output tensors
-        dk, dk_bias, dangles,
-        # dK_State strides: (batch, nheads, headdim_qk)
-        d_ok_state.stride(0), d_ok_state.stride(1), d_ok_state.stride(2),
-        # Angles strides: (batch, seqlen, nheads, headdim_angles)
-        angles.stride(0), angles.stride(1), angles.stride(2), angles.stride(3),
-        # K strides: (batch, seqlen, nheads_qk, headdim_qk)
-        k.stride(0), k.stride(1), k.stride(2), k.stride(3),
-        # K_bias strides: (nheads, headdim_qk)
-        k_bias.stride(0), k_bias.stride(1),
-        # Cu_Seqlens strides: (num_sequences + 1,)
-        Cu_Seqlens.stride(0) if is_varlen else 0,
-        # dK strides: (batch, seqlen, nheads_qk, headdim_qk)
-        dk.stride(0), dk.stride(1), dk.stride(2), dk.stride(3),
-        # dK_bias strides: (nheads, headdim_qk)
-        dk_bias.stride(0), dk_bias.stride(1),
-        # dAngles strides: (batch, seqlen, nheads, headdim_angles)
-        dangles.stride(0), dangles.stride(1), dangles.stride(2), dangles.stride(3),
-        # Dimensions
-        seqlen, headdim_qk, headdim_angles,
-        HEADDIM_QK=HEADDIM_QK,
-        GQA_RATIO=GQA_RATIO,
-        IS_VARLEN=is_varlen,
-        num_warps=2,
-        num_stages=3,
-    )
+    with torch.cuda.device(d_ok_state.device.index):
+        mamba3_siso_bwd_kernel_dk_state_post[grid](
+            # Input tensors
+            d_ok_state, angles, k, k_bias, Cu_Seqlens,
+            # Output tensors
+            dk, dk_bias, dangles,
+            # dK_State strides: (batch, nheads, headdim_qk)
+            d_ok_state.stride(0), d_ok_state.stride(1), d_ok_state.stride(2),
+            # Angles strides: (batch, seqlen, nheads, headdim_angles)
+            angles.stride(0), angles.stride(1), angles.stride(2), angles.stride(3),
+            # K strides: (batch, seqlen, nheads_qk, headdim_qk)
+            k.stride(0), k.stride(1), k.stride(2), k.stride(3),
+            # K_bias strides: (nheads, headdim_qk)
+            k_bias.stride(0), k_bias.stride(1),
+            # Cu_Seqlens strides: (num_sequences + 1,)
+            Cu_Seqlens.stride(0) if is_varlen else 0,
+            # dK strides: (batch, seqlen, nheads_qk, headdim_qk)
+            dk.stride(0), dk.stride(1), dk.stride(2), dk.stride(3),
+            # dK_bias strides: (nheads, headdim_qk)
+            dk_bias.stride(0), dk_bias.stride(1),
+            # dAngles strides: (batch, seqlen, nheads, headdim_angles)
+            dangles.stride(0), dangles.stride(1), dangles.stride(2), dangles.stride(3),
+            # Dimensions
+            seqlen, headdim_qk, headdim_angles,
+            HEADDIM_QK=HEADDIM_QK,
+            GQA_RATIO=GQA_RATIO,
+            IS_VARLEN=is_varlen,
+            num_warps=2,
+            num_stages=3,
+        )
 
 
 # =============================================================================
@@ -1712,66 +1716,67 @@ def compute_ddt_dtrap_dinput_states(
     else:
         grid = (nheads, batch)
 
-    mamba3_siso_bwd_kernel_ddt_dtrap_dinput_states[grid](
-        # Inputs
-        dscale, dgamma, dt, trap,
-        d_issm_state if has_input_state else dscale,  # Dummy pointer if not used
-        input_k_state if has_input_state else dscale,
-        input_v_state if has_input_state else dscale,
-        Cu_Seqlens,
-        # Outputs
-        dDT, dTrap,
-        d_Input_SSM_State if has_input_state else dDT,  # Dummy pointer if not used
-        d_Input_K_State if has_input_state else dDT,
-        d_Input_V_State if has_input_state else dDT,
-        # Strides for dScale
-        dscale.stride(0), dscale.stride(1), dscale.stride(2),
-        # Strides for dSGamma
-        dgamma.stride(0), dgamma.stride(1), dgamma.stride(2),
-        # Strides for DT
-        dt.stride(0), dt.stride(1), dt.stride(2),
-        # Strides for Trap
-        trap.stride(0), trap.stride(1), trap.stride(2),
-        # Strides for d_ISSM_State
-        d_issm_state.stride(0) if has_input_state else 0,
-        d_issm_state.stride(1) if has_input_state else 0,
-        d_issm_state.stride(2) if has_input_state else 0,
-        d_issm_state.stride(3) if has_input_state else 0,
-        # Strides for Input_K_State
-        input_k_state.stride(0) if has_input_state else 0,
-        input_k_state.stride(1) if has_input_state else 0,
-        input_k_state.stride(2) if has_input_state else 0,
-        # Strides for Input_V_State
-        input_v_state.stride(0) if has_input_state else 0,
-        input_v_state.stride(1) if has_input_state else 0,
-        input_v_state.stride(2) if has_input_state else 0,
-        # Stride for Cu_Seqlens
-        Cu_Seqlens.stride(0) if Cu_Seqlens is not None else 0,
-        # Strides for dDT
-        dDT.stride(0), dDT.stride(1), dDT.stride(2),
-        # Strides for dTrap
-        dTrap.stride(0), dTrap.stride(1), dTrap.stride(2),
-        # Strides for d_Input_SSM_State
-        d_Input_SSM_State.stride(0) if has_input_state else 0,
-        d_Input_SSM_State.stride(1) if has_input_state else 0,
-        d_Input_SSM_State.stride(2) if has_input_state else 0,
-        d_Input_SSM_State.stride(3) if has_input_state else 0,
-        # Strides for d_Input_K_State
-        d_Input_K_State.stride(0) if has_input_state else 0,
-        d_Input_K_State.stride(1) if has_input_state else 0,
-        d_Input_K_State.stride(2) if has_input_state else 0,
-        # Strides for d_Input_V_State
-        d_Input_V_State.stride(0) if has_input_state else 0,
-        d_Input_V_State.stride(1) if has_input_state else 0,
-        d_Input_V_State.stride(2) if has_input_state else 0,
-        # Dimensions
-        seqlen, headdim_v, headdim_qk,
-        # Constants
-        HEADDIM_V=HEADDIM_V,
-        HEADDIM_QK=HEADDIM_QK,
-        HAS_INPUT_STATE=has_input_state,
-        IS_VARLEN=is_varlen,
-    )
+    with torch.cuda.device(dscale.device.index):
+        mamba3_siso_bwd_kernel_ddt_dtrap_dinput_states[grid](
+            # Inputs
+            dscale, dgamma, dt, trap,
+            d_issm_state if has_input_state else dscale,  # Dummy pointer if not used
+            input_k_state if has_input_state else dscale,
+            input_v_state if has_input_state else dscale,
+            Cu_Seqlens,
+            # Outputs
+            dDT, dTrap,
+            d_Input_SSM_State if has_input_state else dDT,  # Dummy pointer if not used
+            d_Input_K_State if has_input_state else dDT,
+            d_Input_V_State if has_input_state else dDT,
+            # Strides for dScale
+            dscale.stride(0), dscale.stride(1), dscale.stride(2),
+            # Strides for dSGamma
+            dgamma.stride(0), dgamma.stride(1), dgamma.stride(2),
+            # Strides for DT
+            dt.stride(0), dt.stride(1), dt.stride(2),
+            # Strides for Trap
+            trap.stride(0), trap.stride(1), trap.stride(2),
+            # Strides for d_ISSM_State
+            d_issm_state.stride(0) if has_input_state else 0,
+            d_issm_state.stride(1) if has_input_state else 0,
+            d_issm_state.stride(2) if has_input_state else 0,
+            d_issm_state.stride(3) if has_input_state else 0,
+            # Strides for Input_K_State
+            input_k_state.stride(0) if has_input_state else 0,
+            input_k_state.stride(1) if has_input_state else 0,
+            input_k_state.stride(2) if has_input_state else 0,
+            # Strides for Input_V_State
+            input_v_state.stride(0) if has_input_state else 0,
+            input_v_state.stride(1) if has_input_state else 0,
+            input_v_state.stride(2) if has_input_state else 0,
+            # Stride for Cu_Seqlens
+            Cu_Seqlens.stride(0) if Cu_Seqlens is not None else 0,
+            # Strides for dDT
+            dDT.stride(0), dDT.stride(1), dDT.stride(2),
+            # Strides for dTrap
+            dTrap.stride(0), dTrap.stride(1), dTrap.stride(2),
+            # Strides for d_Input_SSM_State
+            d_Input_SSM_State.stride(0) if has_input_state else 0,
+            d_Input_SSM_State.stride(1) if has_input_state else 0,
+            d_Input_SSM_State.stride(2) if has_input_state else 0,
+            d_Input_SSM_State.stride(3) if has_input_state else 0,
+            # Strides for d_Input_K_State
+            d_Input_K_State.stride(0) if has_input_state else 0,
+            d_Input_K_State.stride(1) if has_input_state else 0,
+            d_Input_K_State.stride(2) if has_input_state else 0,
+            # Strides for d_Input_V_State
+            d_Input_V_State.stride(0) if has_input_state else 0,
+            d_Input_V_State.stride(1) if has_input_state else 0,
+            d_Input_V_State.stride(2) if has_input_state else 0,
+            # Dimensions
+            seqlen, headdim_v, headdim_qk,
+            # Constants
+            HEADDIM_V=HEADDIM_V,
+            HEADDIM_QK=HEADDIM_QK,
+            HAS_INPUT_STATE=has_input_state,
+            IS_VARLEN=is_varlen,
+        )
 
     return dDT, dTrap, d_Input_SSM_State, d_Input_K_State, d_Input_V_State
 

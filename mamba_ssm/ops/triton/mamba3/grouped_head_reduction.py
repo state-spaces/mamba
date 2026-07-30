@@ -189,25 +189,26 @@ def reduce_grouped_qk_grads_and_bias_triton(
 
     n_blocks = triton.cdiv(N, block_n)
     grid = (num_row_blocks, R, num_qk_groups * n_blocks)
-    _reduce_grouped_qk_grads_and_bias_partial_kernel[grid](
-        dq_raw,
-        dk_raw,
-        dq_out,
-        dk_out,
-        dq_bias_partial,
-        dk_bias_partial,
-        total_rows,
-        R,
-        H,
-        num_qk_groups,
-        N,
-        group_size,
-        n_blocks,
-        block_m,
-        block_n,
-        store_grouped,
-        num_warps=8,
-    )
+    with torch.cuda.device(dq_raw.device.index):
+        _reduce_grouped_qk_grads_and_bias_partial_kernel[grid](
+            dq_raw,
+            dk_raw,
+            dq_out,
+            dk_out,
+            dq_bias_partial,
+            dk_bias_partial,
+            total_rows,
+            R,
+            H,
+            num_qk_groups,
+            N,
+            group_size,
+            n_blocks,
+            block_m,
+            block_n,
+            store_grouped,
+            num_warps=8,
+        )
 
     dq_bias = torch.empty((H, R, N), dtype=torch.float32, device=dq_raw.device)
     dk_bias = torch.empty_like(dq_bias)
