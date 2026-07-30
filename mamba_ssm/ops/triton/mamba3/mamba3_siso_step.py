@@ -333,44 +333,45 @@ def mamba3_siso_step(
     Output_K_State = torch.empty((batch, nheads, headdim_qk), device=device, dtype=torch.float32)
     
     grid = (nheads, batch)
-    mamba3_siso_step_kernel[grid](
-        # Inputs
-        Q, K, V, ADT, DT, Trap, Q_bias, K_bias, Angles, D, Z, Input_Angle_State, Input_SSM_State, 
-        Input_K_State, Input_V_State,
-        # Outputs
-        Out, Output_Angle_State, Output_SSM_State, Output_K_State, 
-        # Input strides
-        Q.stride(0), Q.stride(1), Q.stride(2),
-        K.stride(0), K.stride(1), K.stride(2),
-        V.stride(0), V.stride(1), V.stride(2),
-        ADT.stride(0), ADT.stride(1),
-        DT.stride(0), DT.stride(1),
-        Trap.stride(0), Trap.stride(1),
-        Q_bias.stride(0), Q_bias.stride(1),
-        K_bias.stride(0), K_bias.stride(1),
-        Angles.stride(0), Angles.stride(1), Angles.stride(2),
-        D.stride(0) if D is not None else 0,
-        Z.stride(0) if Z is not None else 0,
-        Z.stride(1) if Z is not None else 0,
-        Z.stride(2) if Z is not None else 0,
-        Input_Angle_State.stride(0), Input_Angle_State.stride(1), Input_Angle_State.stride(2),
-        Input_SSM_State.stride(0), Input_SSM_State.stride(1), Input_SSM_State.stride(2), Input_SSM_State.stride(3),
-        Input_K_State.stride(0), Input_K_State.stride(1), Input_K_State.stride(2),
-        Input_V_State.stride(0), Input_V_State.stride(1), Input_V_State.stride(2),
-        # Output strides
-        Out.stride(0), Out.stride(1), Out.stride(2),
-        Output_Angle_State.stride(0), Output_Angle_State.stride(1), Output_Angle_State.stride(2),
-        Output_SSM_State.stride(0), Output_SSM_State.stride(1), Output_SSM_State.stride(2), Output_SSM_State.stride(3),
-        Output_K_State.stride(0), Output_K_State.stride(1), Output_K_State.stride(2),
-        # Dimensions
-        nheads_qk,
-        # Compile-time constants
-        headdim_qk,
-        headdim_v,
-        headdim_angles,
-        HAS_D=D is not None,
-        HAS_Z=Z is not None,
-    )
+    with torch.cuda.device(Q.device.index):
+        mamba3_siso_step_kernel[grid](
+            # Inputs
+            Q, K, V, ADT, DT, Trap, Q_bias, K_bias, Angles, D, Z, Input_Angle_State, Input_SSM_State, 
+            Input_K_State, Input_V_State,
+            # Outputs
+            Out, Output_Angle_State, Output_SSM_State, Output_K_State, 
+            # Input strides
+            Q.stride(0), Q.stride(1), Q.stride(2),
+            K.stride(0), K.stride(1), K.stride(2),
+            V.stride(0), V.stride(1), V.stride(2),
+            ADT.stride(0), ADT.stride(1),
+            DT.stride(0), DT.stride(1),
+            Trap.stride(0), Trap.stride(1),
+            Q_bias.stride(0), Q_bias.stride(1),
+            K_bias.stride(0), K_bias.stride(1),
+            Angles.stride(0), Angles.stride(1), Angles.stride(2),
+            D.stride(0) if D is not None else 0,
+            Z.stride(0) if Z is not None else 0,
+            Z.stride(1) if Z is not None else 0,
+            Z.stride(2) if Z is not None else 0,
+            Input_Angle_State.stride(0), Input_Angle_State.stride(1), Input_Angle_State.stride(2),
+            Input_SSM_State.stride(0), Input_SSM_State.stride(1), Input_SSM_State.stride(2), Input_SSM_State.stride(3),
+            Input_K_State.stride(0), Input_K_State.stride(1), Input_K_State.stride(2),
+            Input_V_State.stride(0), Input_V_State.stride(1), Input_V_State.stride(2),
+            # Output strides
+            Out.stride(0), Out.stride(1), Out.stride(2),
+            Output_Angle_State.stride(0), Output_Angle_State.stride(1), Output_Angle_State.stride(2),
+            Output_SSM_State.stride(0), Output_SSM_State.stride(1), Output_SSM_State.stride(2), Output_SSM_State.stride(3),
+            Output_K_State.stride(0), Output_K_State.stride(1), Output_K_State.stride(2),
+            # Dimensions
+            nheads_qk,
+            # Compile-time constants
+            headdim_qk,
+            headdim_v,
+            headdim_angles,
+            HAS_D=D is not None,
+            HAS_Z=Z is not None,
+        )
 
     Output_States = [Output_Angle_State, Output_SSM_State, Output_K_State, V]
 

@@ -593,18 +593,19 @@ def bwd_dtrap_ddt_triton(
     dtrap = torch.zeros_like(trap)
 
     grid = (B, H, nchunks)
-    bwd_dtrap_ddt_kernel[grid](
-        trap, dt, dfactor, dgamma_diag,
-        ddt, dtrap,
-        trap.stride(0), trap.stride(1), trap.stride(2),
-        dt.stride(0), dt.stride(1), dt.stride(2),
-        dfactor.stride(0), dfactor.stride(1), dfactor.stride(2),
-        dgamma_diag.stride(0), dgamma_diag.stride(1), dgamma_diag.stride(2),
-        ddt.stride(0), ddt.stride(1), ddt.stride(2),
-        dtrap.stride(0), dtrap.stride(1), dtrap.stride(2),
-        S,
-        chunk_size,
-    )
+    with torch.cuda.device(trap.device.index):
+        bwd_dtrap_ddt_kernel[grid](
+            trap, dt, dfactor, dgamma_diag,
+            ddt, dtrap,
+            trap.stride(0), trap.stride(1), trap.stride(2),
+            dt.stride(0), dt.stride(1), dt.stride(2),
+            dfactor.stride(0), dfactor.stride(1), dfactor.stride(2),
+            dgamma_diag.stride(0), dgamma_diag.stride(1), dgamma_diag.stride(2),
+            ddt.stride(0), ddt.stride(1), ddt.stride(2),
+            dtrap.stride(0), dtrap.stride(1), dtrap.stride(2),
+            S,
+            chunk_size,
+        )
     return ddt, dtrap
 
 def compute_dacs_segsum_triton_varlen(
@@ -672,18 +673,19 @@ def compute_dacs_segsum_triton_varlen(
         state_chunk_in_seq[chunk_start:chunk_end] = torch.arange(n, dtype=torch.int32, device=da.device)
 
     grid = (B, H, nchunks)
-    dacs_segsum_kernel_varlen[grid](
-        da, da_cs, da_cs_rev, segsum, cu_seqlens, state_seq_mapping, state_chunk_in_seq,
-        da.stride(0), da.stride(1), da.stride(2),
-        da_cs.stride(0), da_cs.stride(1), da_cs.stride(2),
-        da_cs_rev.stride(0), da_cs_rev.stride(1), da_cs_rev.stride(2),
-        segsum.stride(0), segsum.stride(1), segsum.stride(2),
-        segsum.stride(3), segsum.stride(4),
-        cu_seqlens.stride(0), state_seq_mapping.stride(0), state_chunk_in_seq.stride(0),
-        S,
-        num_sequences,
-        chunk_size,
-    )
+    with torch.cuda.device(da.device.index):
+        dacs_segsum_kernel_varlen[grid](
+            da, da_cs, da_cs_rev, segsum, cu_seqlens, state_seq_mapping, state_chunk_in_seq,
+            da.stride(0), da.stride(1), da.stride(2),
+            da_cs.stride(0), da_cs.stride(1), da_cs.stride(2),
+            da_cs_rev.stride(0), da_cs_rev.stride(1), da_cs_rev.stride(2),
+            segsum.stride(0), segsum.stride(1), segsum.stride(2),
+            segsum.stride(3), segsum.stride(4),
+            cu_seqlens.stride(0), state_seq_mapping.stride(0), state_chunk_in_seq.stride(0),
+            S,
+            num_sequences,
+            chunk_size,
+        )
 
     return da_cs, da_cs_rev, segsum
 
@@ -708,16 +710,17 @@ def compute_dacs_segsum_triton(
     segsum = torch.empty(B, H, nchunks, chunk_size, chunk_size, device=da.device, dtype=da.dtype)
 
     grid = (B, H, nchunks)
-    dacs_segsum_kernel[grid](
-        da, da_cs, da_cs_rev, segsum,
-        da.stride(0), da.stride(1), da.stride(2),
-        da_cs.stride(0), da_cs.stride(1), da_cs.stride(2),
-        da_cs_rev.stride(0), da_cs_rev.stride(1), da_cs_rev.stride(2),
-        segsum.stride(0), segsum.stride(1), segsum.stride(2),
-        segsum.stride(3), segsum.stride(4),
-        S,
-        chunk_size,
-    )
+    with torch.cuda.device(da.device.index):
+        dacs_segsum_kernel[grid](
+            da, da_cs, da_cs_rev, segsum,
+            da.stride(0), da.stride(1), da.stride(2),
+            da_cs.stride(0), da_cs.stride(1), da_cs.stride(2),
+            da_cs_rev.stride(0), da_cs_rev.stride(1), da_cs_rev.stride(2),
+            segsum.stride(0), segsum.stride(1), segsum.stride(2),
+            segsum.stride(3), segsum.stride(4),
+            S,
+            chunk_size,
+        )
 
     return da_cs, da_cs_rev, segsum
 
@@ -1336,31 +1339,32 @@ def bwd_dadt_fused_triton_varlen(
     dadt_out = torch.zeros(B, H, S, device=ddA_cs.device, dtype=torch.float32)
     grid = (B, H, nchunks_global)
 
-    bwd_dadt_cumsum_fused_kernel_varlen[grid](
-        ddA_cs, ddA_cs_rev, dA_cs, dA_cs_rev, dadt_out,
-        cu_seqlens, state_seq_mapping, state_chunk_in_seq,
-        ddA_cs.stride(0), ddA_cs.stride(1), ddA_cs.stride(2),
-        cu_seqlens.stride(0),
-        state_seq_mapping.stride(0),
-        state_chunk_in_seq.stride(0),
-        S=S,
-        CHUNK_SIZE=chunk_size,
-    )
+    with torch.cuda.device(dSSdA.device.index):
+        bwd_dadt_cumsum_fused_kernel_varlen[grid](
+            ddA_cs, ddA_cs_rev, dA_cs, dA_cs_rev, dadt_out,
+            cu_seqlens, state_seq_mapping, state_chunk_in_seq,
+            ddA_cs.stride(0), ddA_cs.stride(1), ddA_cs.stride(2),
+            cu_seqlens.stride(0),
+            state_seq_mapping.stride(0),
+            state_chunk_in_seq.stride(0),
+            S=S,
+            CHUNK_SIZE=chunk_size,
+        )
 
-    bwd_segsum_dadt_kernel_varlen[grid](
-        dSSdA, SSdA, dadt_out,
-        cu_seqlens, state_seq_mapping, state_chunk_in_seq,
-        dSSdA.stride(0), dSSdA.stride(1), dSSdA.stride(2),
-        dSSdA.stride(3), dSSdA.stride(4),
-        SSdA.stride(0),  SSdA.stride(1),  SSdA.stride(2),
-        SSdA.stride(3),  SSdA.stride(4),
-        dadt_out.stride(0), dadt_out.stride(1), dadt_out.stride(2),
-        cu_seqlens.stride(0),
-        state_seq_mapping.stride(0),
-        state_chunk_in_seq.stride(0),
-        S=S,
-        CHUNK_SIZE=chunk_size,
-    )
+        bwd_segsum_dadt_kernel_varlen[grid](
+            dSSdA, SSdA, dadt_out,
+            cu_seqlens, state_seq_mapping, state_chunk_in_seq,
+            dSSdA.stride(0), dSSdA.stride(1), dSSdA.stride(2),
+            dSSdA.stride(3), dSSdA.stride(4),
+            SSdA.stride(0),  SSdA.stride(1),  SSdA.stride(2),
+            SSdA.stride(3),  SSdA.stride(4),
+            dadt_out.stride(0), dadt_out.stride(1), dadt_out.stride(2),
+            cu_seqlens.stride(0),
+            state_seq_mapping.stride(0),
+            state_chunk_in_seq.stride(0),
+            S=S,
+            CHUNK_SIZE=chunk_size,
+        )
     return dadt_out
 
 
@@ -1388,21 +1392,22 @@ def bwd_dtrap_ddt_triton_varlen(
     dtrap = torch.zeros_like(trap)
     grid  = (B, H, nchunks_global)
 
-    bwd_dtrap_ddt_kernel_varlen[grid](
-        trap, dt, dfactor, dgamma_diag, ddt, dtrap,
-        cu_seqlens, state_seq_mapping, state_chunk_in_seq,
-        trap.stride(0),    trap.stride(1),    trap.stride(2),
-        dt.stride(0),      dt.stride(1),      dt.stride(2),
-        dfactor.stride(0), dfactor.stride(1), dfactor.stride(2),
-        dgamma_diag.stride(0), dgamma_diag.stride(1), dgamma_diag.stride(2),
-        ddt.stride(0),   ddt.stride(1),   ddt.stride(2),
-        dtrap.stride(0), dtrap.stride(1), dtrap.stride(2),
-        cu_seqlens.stride(0),
-        state_seq_mapping.stride(0),
-        state_chunk_in_seq.stride(0),
-        S=S,
-        CHUNK_SIZE=chunk_size,
-    )
+    with torch.cuda.device(trap.device.index):
+        bwd_dtrap_ddt_kernel_varlen[grid](
+            trap, dt, dfactor, dgamma_diag, ddt, dtrap,
+            cu_seqlens, state_seq_mapping, state_chunk_in_seq,
+            trap.stride(0),    trap.stride(1),    trap.stride(2),
+            dt.stride(0),      dt.stride(1),      dt.stride(2),
+            dfactor.stride(0), dfactor.stride(1), dfactor.stride(2),
+            dgamma_diag.stride(0), dgamma_diag.stride(1), dgamma_diag.stride(2),
+            ddt.stride(0),   ddt.stride(1),   ddt.stride(2),
+            dtrap.stride(0), dtrap.stride(1), dtrap.stride(2),
+            cu_seqlens.stride(0),
+            state_seq_mapping.stride(0),
+            state_chunk_in_seq.stride(0),
+            S=S,
+            CHUNK_SIZE=chunk_size,
+        )
     return ddt, dtrap
 
 

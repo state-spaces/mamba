@@ -194,22 +194,23 @@ def angle_dt_fwd(
     else:
         grid = (nheads, batch)
 
-    angle_dt_fwd_kernel[grid](
-        out, output_state,
-        angle, dt, init_state, cu_seqlens,
-        out.stride(0), out.stride(1), out.stride(2), out.stride(3),
-        stride_output_state[0], stride_output_state[1], stride_output_state[2],
-        angle.stride(0), angle.stride(1), angle.stride(2), angle.stride(3),
-        dt.stride(0), dt.stride(1), dt.stride(2),
-        stride_init[0], stride_init[1], stride_init[2],
-        stride_cu_seqlen,
-        seqlen, dim,
-        CHUNK_SIZE=chunk_size,
-        BLOCK_D=BLOCK_D,
-        HAS_INIT_STATE=HAS_INIT_STATE,
-        RETURN_OUTPUT_STATE=return_output_state,
-        IS_VARLEN=is_varlen,
-    )
+    with torch.cuda.device(out.device.index):
+        angle_dt_fwd_kernel[grid](
+            out, output_state,
+            angle, dt, init_state, cu_seqlens,
+            out.stride(0), out.stride(1), out.stride(2), out.stride(3),
+            stride_output_state[0], stride_output_state[1], stride_output_state[2],
+            angle.stride(0), angle.stride(1), angle.stride(2), angle.stride(3),
+            dt.stride(0), dt.stride(1), dt.stride(2),
+            stride_init[0], stride_init[1], stride_init[2],
+            stride_cu_seqlen,
+            seqlen, dim,
+            CHUNK_SIZE=chunk_size,
+            BLOCK_D=BLOCK_D,
+            HAS_INIT_STATE=HAS_INIT_STATE,
+            RETURN_OUTPUT_STATE=return_output_state,
+            IS_VARLEN=is_varlen,
+        )
 
     if return_output_state:
         return out, output_state
@@ -411,22 +412,23 @@ def angle_dt_bwd(
     else:
         grid = (nheads, batch)
 
-    angle_dt_bwd_kernel[grid](
-        grad_angle, grad_dt, grad_init_state if has_init_state else grad_init_dummy,
-        grad_out, grad_output_state, angle, dt, cu_seqlens,
-        grad_angle.stride(0), grad_angle.stride(1), grad_angle.stride(2), grad_angle.stride(3),
-        grad_dt.stride(0), grad_dt.stride(1), grad_dt.stride(2),
-        stride_grad_init[0], stride_grad_init[1], stride_grad_init[2],
-        grad_out.stride(0), grad_out.stride(1), grad_out.stride(2), grad_out.stride(3),
-        stride_grad_output_state[0], stride_grad_output_state[1], stride_grad_output_state[2],
-        angle.stride(0), angle.stride(1), angle.stride(2), angle.stride(3),
-        dt.stride(0), dt.stride(1), dt.stride(2),
-        stride_cu_seqlen,
-        seqlen, dim,
-        CHUNK_SIZE=chunk_size,
-        BLOCK_D=BLOCK_D,
-        HAS_INIT_STATE=has_init_state,
-        HAS_GRAD_OUTPUT_STATE=HAS_GRAD_OUTPUT_STATE,
-        IS_VARLEN=is_varlen,
-    )
+    with torch.cuda.device(grad_angle.device.index):
+        angle_dt_bwd_kernel[grid](
+            grad_angle, grad_dt, grad_init_state if has_init_state else grad_init_dummy,
+            grad_out, grad_output_state, angle, dt, cu_seqlens,
+            grad_angle.stride(0), grad_angle.stride(1), grad_angle.stride(2), grad_angle.stride(3),
+            grad_dt.stride(0), grad_dt.stride(1), grad_dt.stride(2),
+            stride_grad_init[0], stride_grad_init[1], stride_grad_init[2],
+            grad_out.stride(0), grad_out.stride(1), grad_out.stride(2), grad_out.stride(3),
+            stride_grad_output_state[0], stride_grad_output_state[1], stride_grad_output_state[2],
+            angle.stride(0), angle.stride(1), angle.stride(2), angle.stride(3),
+            dt.stride(0), dt.stride(1), dt.stride(2),
+            stride_cu_seqlen,
+            seqlen, dim,
+            CHUNK_SIZE=chunk_size,
+            BLOCK_D=BLOCK_D,
+            HAS_INIT_STATE=has_init_state,
+            HAS_GRAD_OUTPUT_STATE=HAS_GRAD_OUTPUT_STATE,
+            IS_VARLEN=is_varlen,
+        )
     return grad_angle, grad_dt, grad_init_state
