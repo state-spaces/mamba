@@ -15,7 +15,7 @@ def load_state_dict_hf(model_name, device=None, dtype=None):
     # If not fp32, then we don't want to load directly to the GPU
     mapped_device = "cpu" if dtype not in [torch.float32, None] else device
     resolved_archive_file = cached_file(model_name, WEIGHTS_NAME, _raise_exceptions_for_missing_entries=False)
-    return torch.load(resolved_archive_file, map_location=mapped_device)
+    state_dict = torch.load(resolved_archive_file, map_location=mapped_device)
     # Convert dtype before moving to GPU to save memory
     if dtype is not None:
         state_dict = {k: v.to(dtype=dtype) for k, v in state_dict.items()}
