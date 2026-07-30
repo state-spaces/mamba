@@ -92,6 +92,10 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
         self.use_mem_eff_path = use_mem_eff_path
         self.layer_idx = layer_idx
 
+        # Validate head dimension
+        if self.headdim > 256:
+            raise ValueError("headdim should not exceed 256 due to hardware limits.")
+
         # Order: [z, x, B, C, dt]
         d_in_proj = 2 * self.d_inner + 2 * self.ngroups * self.d_state + self.nheads
         if self.process_group is None:
@@ -325,6 +329,7 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
             dt = repeat(dt, "b h -> b h p", p=self.headdim)
             dt_bias = repeat(self.dt_bias, "h -> h p", p=self.headdim)
             D = repeat(self.D, "h -> h p", p=self.headdim)
+            
             B = rearrange(B, "b (g n) -> b g n", g=self.ngroups)
             C = rearrange(C, "b (g n) -> b g n", g=self.ngroups)
             x_reshaped = rearrange(x, "b (h p) -> b h p", p=self.headdim)
@@ -352,6 +357,8 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
         ssm_state = torch.zeros(
             batch_size, self.nheads, self.headdim, self.d_state, device=device, dtype=ssm_dtype
         )
+        if self.headdim > 256:
+            raise ValueError("headdim should not exceed 256 due to hardware limits.")
         return conv_state, ssm_state
 
     def _get_states_from_cache(self, inference_params, batch_size, initialize_states=False):
