@@ -91,7 +91,7 @@ x = torch.randn(batch, length, dim).to("cuda")
 model = Mamba(
     # This module uses roughly 3 * expand * d_model^2 parameters
     d_model=dim, # Model dimension d_model
-    d_state=16,  # SSM state expansion factor
+    d_state=16,  # SSM state dimension N
     d_conv=4,    # Local convolution width
     expand=2,    # Block expansion factor
 ).to("cuda")
@@ -111,7 +111,7 @@ from mamba_ssm import Mamba2
 model = Mamba2(
     # This module uses roughly 3 * expand * d_model^2 parameters
     d_model=dim, # Model dimension d_model
-    d_state=64,  # SSM state expansion factor, typically 64 or 128
+    d_state=64,  # SSM state dimension N, typically 64 or 128
     d_conv=4,    # Local convolution width
     expand=2,    # Block expansion factor
 ).to("cuda")
@@ -193,23 +193,24 @@ we use the
 library.
 
 1. Install `lm-evaluation-harness` by `pip install lm-eval==0.4.2`.
-2. Run evaluation with (more documentation at the [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness/tree/big-refactor) repo):
+2. Run evaluation with (more documentation at the [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness/tree/big-refactor) repo).
+   The wrapper in `evals/lm_harness_eval.py` registers as `--model mamba` (not `mamba_ssm`):
 ``` sh
-lm_eval --model mamba_ssm --model_args pretrained=state-spaces/mamba-130m --tasks lambada_openai,hellaswag,piqa,arc_easy,arc_challenge,winogrande,openbookqa --device cuda --batch_size 256
+python evals/lm_harness_eval.py --model mamba --model_args pretrained=state-spaces/mamba-130m --tasks lambada_openai,hellaswag,piqa,arc_easy,arc_challenge,winogrande,openbookqa --device cuda --batch_size 256
 python evals/lm_harness_eval.py --model hf --model_args pretrained=EleutherAI/pythia-160m --tasks lambada_openai,hellaswag,piqa,arc_easy,arc_challenge,winogrande --device cuda --batch_size 64
 ```
 
 To reproduce the results on the `mamba-2.8b-slimpj` model reported in the blogposts:
 ``` sh
-lm_eval --model mamba_ssm --model_args pretrained=state-spaces/mamba-2.8b-slimpj --tasks boolq,piqa,hellaswag,winogrande,arc_easy,arc_challenge,openbookqa,race,truthfulqa_mc2 --device cuda --batch_size 256
-lm_eval --model mamba_ssm --model_args pretrained=state-spaces/mamba-2.8b-slimpj --tasks mmlu --num_fewshot 5 --device cuda --batch_size 256
+python evals/lm_harness_eval.py --model mamba --model_args pretrained=state-spaces/mamba-2.8b-slimpj --tasks boolq,piqa,hellaswag,winogrande,arc_easy,arc_challenge,openbookqa,race,truthfulqa_mc2 --device cuda --batch_size 256
+python evals/lm_harness_eval.py --model mamba --model_args pretrained=state-spaces/mamba-2.8b-slimpj --tasks mmlu --num_fewshot 5 --device cuda --batch_size 256
 ```
 
 To run evaluations on Mamba-2 models, simply replace the model names:
 ``` sh
-lm_eval --model mamba_ssm --model_args pretrained=state-spaces/mamba2-2.7b --tasks lambada_openai,hellaswag,piqa,arc_easy,arc_challenge,winogrande,openbookqa --device cuda --batch_size 256
-lm_eval --model mamba_ssm --model_args pretrained=state-spaces/transformerpp-2.7b --tasks lambada_openai,hellaswag,piqa,arc_easy,arc_challenge,winogrande,openbookqa --device cuda --batch_size 256
-lm_eval --model mamba_ssm --model_args pretrained=state-spaces/mamba2attn-2.7b --tasks lambada_openai,hellaswag,piqa,arc_easy,arc_challenge,winogrande,openbookqa --device cuda --batch_size 256
+python evals/lm_harness_eval.py --model mamba --model_args pretrained=state-spaces/mamba2-2.7b --tasks lambada_openai,hellaswag,piqa,arc_easy,arc_challenge,winogrande,openbookqa --device cuda --batch_size 256
+python evals/lm_harness_eval.py --model mamba --model_args pretrained=state-spaces/transformerpp-2.7b --tasks lambada_openai,hellaswag,piqa,arc_easy,arc_challenge,winogrande,openbookqa --device cuda --batch_size 256
+python evals/lm_harness_eval.py --model mamba --model_args pretrained=state-spaces/mamba2attn-2.7b --tasks lambada_openai,hellaswag,piqa,arc_easy,arc_challenge,winogrande,openbookqa --device cuda --batch_size 256
 ```
 
 Note that the result of each task might differ from reported values by 0.1-0.3 due to noise in the evaluation process.
