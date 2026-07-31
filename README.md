@@ -65,6 +65,40 @@ Additional requirements for CUDA `selective_scan_cuda` builds and GPU execution:
 
 For AMD cards, see additional prerequisites below.
 
+### Google Colab and other cloud notebooks
+
+Default Colab/Kaggle runtimes ship recent Python (3.12+) and torch (2.11+) with
+CUDA 12.x. For **Mamba-2/3** workloads you usually do **not** need the legacy
+Mamba-1 `selective_scan_cuda` extension:
+
+```bash
+pip install -U ninja cmake wheel setuptools
+pip install mamba-ssm --no-build-isolation
+```
+
+That installs in minutes because it skips CUDA kernel compilation.
+
+Only opt into `selective_scan_cuda` when you need Mamba-1 or the selective scan
+ops directly:
+
+```bash
+MAMBA_KEEP_CUDA_BUILD=TRUE pip install mamba-ssm --no-build-isolation
+```
+
+On Colab this often falls back to compiling from source because prebuilt wheels
+may not exist yet for your exact torch/CUDA/Python tuple. Compilation can look
+like a hang for **15–30+ minutes** while nvcc runs with little pip output — this
+is expected, not a deadlock.
+
+To force a local CUDA build (e.g. when debugging kernels):
+
+```bash
+MAMBA_FORCE_BUILD=TRUE MAMBA_KEEP_CUDA_BUILD=TRUE pip install mamba-ssm --no-build-isolation
+```
+
+Setting `TORCH_CUDA_ARCH_LIST` to your GPU (e.g. `7.5` for T4) can reduce compile
+time but does not remove the need to build when no matching wheel exists.
+
 ## Usage
 
 We expose several levels of interface with the Mamba model.
@@ -246,6 +280,14 @@ python benchmarks/benchmark_generation_mamba_simple.py --model-name "state-space
 
 
 ## Troubleshooting
+
+### Install appears to hang (Colab / cloud)
+
+If `pip install mamba-ssm` stops printing output after `building 'selective_scan_cuda' extension`,
+pip is compiling CUDA kernels locally. This happens when no prebuilt wheel matches your
+torch/CUDA/Python stack — common on Colab with torch 2.11+. Unless you need Mamba-1,
+cancel and reinstall **without** `MAMBA_KEEP_CUDA_BUILD`. See
+[Google Colab and other cloud notebooks](#google-colab-and-other-cloud-notebooks) above.
 
 ### Precision
 Our models were trained using PyTorch [AMP](https://pytorch.org/docs/stable/amp.html) for mixed precision. AMP keeps model parameters in float32 and casts to half precision when necessary.
