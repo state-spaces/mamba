@@ -65,6 +65,8 @@ Additional requirements for CUDA `selective_scan_cuda` builds and GPU execution:
 
 For AMD cards, see additional prerequisites below.
 
+Cloud notebook users (Colab, Kaggle): start with the [fast install path](#google-colab-and-other-cloud-notebooks) below — the default `pip install mamba-ssm --no-build-isolation` does not compile CUDA kernels.
+
 ### Google Colab and other cloud notebooks
 
 Default Colab/Kaggle runtimes ship recent Python (3.12+) and torch (2.11+) with
@@ -98,6 +100,11 @@ MAMBA_FORCE_BUILD=TRUE MAMBA_KEEP_CUDA_BUILD=TRUE pip install mamba-ssm --no-bui
 
 Setting `TORCH_CUDA_ARCH_LIST` to your GPU (e.g. `7.5` for T4) can reduce compile
 time but does not remove the need to build when no matching wheel exists.
+
+**Kaggle** notebooks follow the same guidance: use the core install unless you
+explicitly need Mamba-1 `selective_scan_cuda`. Kaggle's torch/CUDA stack also
+often lacks a matching prebuilt wheel, so `MAMBA_KEEP_CUDA_BUILD=TRUE` triggers
+the same long nvcc build as Colab.
 
 ## Usage
 
