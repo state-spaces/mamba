@@ -76,3 +76,11 @@ def get_helion_ssd_kernels():
         state_passing_bwd=_state_passing_bwd,
         state_passing_fwd=_state_passing_fwd_v2,
     )
+
+
+@cache
+def get_helion_layer_norm_bwd():
+    """Lazily import the Helion gated LayerNorm backward implementation."""
+    from ._layer_norm_bwd import _layer_norm_bwd
+
+    return _layer_norm_bwd
