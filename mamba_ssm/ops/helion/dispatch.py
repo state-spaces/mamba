@@ -55,6 +55,8 @@ def _warn_if_deterministic() -> None:
 @cache
 def get_helion_ssd_kernels():
     """Lazily import Helion SSD implementations only after explicit opt-in."""
+    from ._chunk_scan_bwd_dC import _chunk_scan_bwd_dC
+    from ._chunk_scan_bwd_ddAcs_stable import _chunk_scan_bwd_ddAcs_stable
     from ._chunk_scan_bwd_dstates import _chunk_scan_bwd_dstates
     from ._chunk_scan_chunk_state_bwd_dx import _chunk_scan_chunk_state_bwd_dx
     from ._chunk_scan_fwd import _chunk_scan_fwd
@@ -64,6 +66,8 @@ def get_helion_ssd_kernels():
     from ._state_passing_fwd import _state_passing_fwd_v2
 
     return SimpleNamespace(
+        chunk_scan_bwd_dC=_chunk_scan_bwd_dC,
+        chunk_scan_bwd_ddAcs_stable=_chunk_scan_bwd_ddAcs_stable,
         chunk_scan_bwd_dstates=_chunk_scan_bwd_dstates,
         chunk_scan_chunk_state_bwd_dx=_chunk_scan_chunk_state_bwd_dx,
         chunk_scan_fwd=_chunk_scan_fwd,
