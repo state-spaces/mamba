@@ -1,0 +1,55 @@
+{
+  "block_sizes": [
+    32,
+    16
+  ],
+  "loop_orders": [
+    [
+      0,
+      1,
+      2,
+      3
+    ]
+  ],
+  "l2_groupings": [
+    1
+  ],
+  "range_unroll_factors": [
+    0,
+    0
+  ],
+  "range_warp_specializes": [
+    null,
+    null
+  ],
+  "range_num_stages": [],
+  "range_multi_buffers": [
+    null,
+    false
+  ],
+  "range_flattens": [
+    null,
+    null
+  ],
+  "load_eviction_policies": [
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+  ],
+  "num_warps": 1,
+  "num_stages": 1,
+  "indexing": [
+    "pointer",
+    "pointer",
+    "pointer",
+    "pointer",
+    "pointer",
+    "pointer",
+    "pointer"
+  ],
+  "atomic_indexing": [],
+  "pid_type": "flat"
+}
