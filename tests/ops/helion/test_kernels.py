@@ -155,6 +155,15 @@ def _assert_close(name: str, actual: Any, expected: Any) -> None:
         raise AssertionError(
             f"{name}: Helion output differs from Triton\n{error}"
         ) from error
+    else:
+        diff = (actual - expected).abs().float()
+        print(
+            f"{name}: diff abs mean={diff.mean().item():.3e} max={diff.max().item():.3e} | "
+            f"actual abs mean={actual.float().abs().mean().item():.3e} "
+            f"max={actual.float().abs().max().item():.3e} | "
+            f"expected abs mean={expected.float().abs().mean().item():.3e} "
+            f"max={expected.float().abs().max().item():.3e}"
+        )
 
 
 # --- shadowing the dispatched kernels ----------------------------------------
@@ -257,16 +266,6 @@ def _run_shadowed(packed: bool, monkeypatch) -> dict[str, _ShadowKernel]:
         device="cuda",
         dtype=_DTYPE,
     )
-    # Megatron -- and so MambaMixerMin -- initializes D and the gated-norm weight
-    # to all ones. Randomize them: with every element equal to 1, a kernel that
-    # indexes D by the wrong head, or normalizes with the wrong group, still
-    # produces the right answer, so those bugs would be invisible here. A trained
-    # checkpoint has non-trivial values anyway; the norm weight is kept around the
-    # ones-init magnitude so the norm still behaves like a trained one.
-    with torch.no_grad():
-        mixer.D.normal_()
-        mixer.norm.weight.uniform_(0.5, 1.5)
-
     mixer.train()
     hidden_states = torch.randn(
         _SEQLEN, _BATCH, _D_MODEL, device="cuda", dtype=_DTYPE, requires_grad=True

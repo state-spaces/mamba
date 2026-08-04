@@ -125,6 +125,18 @@ class MambaMixerMin(nn.Module):
 
         self.out_proj = nn.Linear(self.d_inner, self.d_model, bias=bias, **factory_kwargs)
 
+        # Megatron -- and so this constructor above -- initializes D and the gated-norm
+        # weight to all ones. Randomize them: with every element equal to 1, a kernel
+        # that indexes D by the wrong head, or normalizes with the wrong group, still
+        # produces the right answer, so those bugs would be invisible to the tests or to
+        # autotune_baseline_fn's accuracy check against Triton. A trained checkpoint has
+        # non-trivial values anyway; the norm weight is kept around the ones-init
+        # magnitude so the norm still behaves like a trained one.
+        with torch.no_grad():
+            self.D.normal_()
+            if self.rmsnorm:
+                self.norm.weight.uniform_(0.5, 1.5)
+
         # Production wraps the whole model in Float16Module, whose .bfloat16()/.half()
         # casts EVERY float param to params_dtype -- including A_log and D, which the
         # constructor above deliberately created in fp32. The Megatron profiler
