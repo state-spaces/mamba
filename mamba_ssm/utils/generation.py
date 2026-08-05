@@ -17,7 +17,7 @@ from transformers.generation import GenerateDecoderOnlyOutput, TextStreamer
 @dataclass
 class InferenceParams:
     """Inference parameters that are passed to the main model in order
-    to efficienly calculate and store the context during inference."""
+    to efficiently calculate and store the context during inference."""
 
     max_seqlen: int
     max_batch_size: int
@@ -35,15 +35,23 @@ class InferenceParams:
 
 
 def modify_logits_for_min_p_filtering(logits, min_p):
-    """Set the logits for none min_p values to -inf. Done in-place."""
+    """Set logits below min_p * max_prob to -inf. Done in-place.
+
+    Matches Hugging Face MinPLogitsWarper: filter on softmax probabilities,
+    with the threshold scaled by the probability of the most likely token.
+    """
     if min_p <= 0.0 or min_p >= 1.0:
         return
-    indices_to_remove = logits < min_p
+    probs = torch.softmax(logits, dim=-1)
+    top_probs, _ = probs.max(dim=-1, keepdim=True)
+    indices_to_remove = probs < (min_p * top_probs)
     logits.masked_fill_(indices_to_remove, float("-Inf"))
+
+
 # https://github.com/NVIDIA/Megatron-LM/blob/0bb597b42c53355a567aba2a1357cc34b9d99ddd/megatron/text_generation/sampling.py
 # https://github.com/huggingface/transformers/blob/a44985b41cfa2de48a5e1de7f1f93b7483da25d1/src/transformers/generation/logits_process.py#L231
 def modify_logits_for_top_k_filtering(logits, top_k):
-    """Set the logits for none top-k values to -inf. Done in-place."""
+    """Set the logits for non-top-k values to -inf. Done in-place."""
     indices_to_remove = logits < torch.topk(logits, top_k)[0][..., -1, None]
     logits.masked_fill_(indices_to_remove, float("-Inf"))
 
@@ -51,7 +59,7 @@ def modify_logits_for_top_k_filtering(logits, top_k):
 # https://github.com/NVIDIA/Megatron-LM/blob/0bb597b42c53355a567aba2a1357cc34b9d99ddd/megatron/text_generation/sampling.py
 # https://github.com/huggingface/transformers/blob/a44985b41cfa2de48a5e1de7f1f93b7483da25d1/src/transformers/generation/logits_process.py#L170
 def modify_logits_for_top_p_filtering(logits, top_p):
-    """Set the logits for none top-p values to -inf. Done in-place."""
+    """Set the logits for non-top-p values to -inf. Done in-place."""
     if top_p <= 0.0 or top_p >= 1.0:
         return
     # First sort and calculate cumulative sum of probabilities.
@@ -102,12 +110,9 @@ def sample(logits, top_k=1, top_p=0.0, min_p=0.0, temperature=1.0):
             ]
         else:
             if min_p > 0.0:
-                logits_top = logits.clone()
-                max_prob = logits_top[..., 0].item()
-                min_prob = max_prob * min_p
-                modify_logits_for_min_p_filtering(logits_top, min_prob)
-                if temperature != 1.0:
-                    logits_top /= temperature
+                # Apply temperature first, then min-p on probabilities (HF MinPLogitsWarper).
+                logits_top = logits / temperature if temperature != 1.0 else logits.clone()
+                modify_logits_for_min_p_filtering(logits_top, min_p)
                 return torch.multinomial(torch.softmax(logits_top, dim=-1), num_samples=1).squeeze(dim=-1)
             # Clone so that when we modify for top_p we don't change the original logits
             logits_top = logits / temperature if temperature != 1.0 else logits.clone()
