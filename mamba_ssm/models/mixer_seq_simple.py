@@ -54,11 +54,15 @@ def create_block(
         ssm_layer = ssm_cfg.pop("layer", "Mamba1")
         ssm_layer_map = {
             "Mamba1": Mamba,
+            "Mamba": Mamba,
             "Mamba2": Mamba2,
             "Mamba3": Mamba3,
         }
         if ssm_layer not in ssm_layer_map:
-            raise ValueError(f"Invalid ssm_layer: {ssm_layer}, only support Mamba1, Mamba2, and Mamba3")
+            supported = ", ".join(sorted(ssm_layer_map))
+            raise ValueError(
+                f"Invalid ssm_layer: {ssm_layer!r}. Supported values: {supported}."
+            )
         mixer_cls = partial(
             ssm_layer_map[ssm_layer],
             layer_idx=layer_idx,
@@ -290,11 +294,12 @@ class MambaLMHeadModel(nn.Module, GenerationMixin):
         return CausalLMOutput(logits=lm_logits)
 
     @classmethod
-    def from_pretrained(cls, pretrained_model_name, device=None, dtype=None, **kwargs):
+    def from_pretrained(cls, pretrained_model_name, device=None, dtype=None, strict=True, **kwargs):
         config_data = load_config_hf(pretrained_model_name)
         config = MambaConfig(**config_data)
         model = cls(config, device=device, dtype=dtype, **kwargs)
-        model.load_state_dict(load_state_dict_hf(pretrained_model_name, device=device, dtype=dtype))
+        state_dict = load_state_dict_hf(pretrained_model_name, device=device, dtype=dtype)
+        model.load_state_dict(state_dict, strict=strict)
         return model
 
     def save_pretrained(self, save_directory):
@@ -307,9 +312,13 @@ class MambaLMHeadModel(nn.Module, GenerationMixin):
 
         # Save the model's state_dict
         model_path = os.path.join(save_directory, 'pytorch_model.bin')
-        torch.save(self.state_dict(), model_path)
+        tmp_model_path = model_path + ".tmp"
+        torch.save(self.state_dict(), tmp_model_path)
+        os.replace(tmp_model_path, model_path)
 
         # Save the configuration of the model
         config_path = os.path.join(save_directory, 'config.json')
-        with open(config_path, 'w') as f:
+        tmp_config_path = config_path + ".tmp"
+        with open(tmp_config_path, 'w', encoding='utf-8') as f:
             json.dump(self.config.__dict__, f, indent=4)
+        os.replace(tmp_config_path, config_path)
