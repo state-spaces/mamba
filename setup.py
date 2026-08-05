@@ -116,9 +116,11 @@ def check_if_cuda_home_none(global_option: str) -> None:
     # warn instead of error because user could be downloading prebuilt wheels, so nvcc won't be necessary
     # in that case.
     warnings.warn(
-        f"{global_option} was requested, but nvcc was not found.  Are you sure your environment has nvcc available?  "
+        f"{global_option} was requested, but nvcc was not found. Are you sure your environment has nvcc available? "
         "If you're installing within a container from https://hub.docker.com/r/pytorch/pytorch, "
-        "only images whose names contain 'devel' will provide nvcc."
+        "only images whose names contain 'devel' will provide nvcc. "
+        "Cloud notebooks (Colab/Kaggle) often lack nvcc unless you opt into MAMBA_KEEP_CUDA_BUILD "
+        "and compile selective_scan_cuda locally."
     )
 
 
@@ -164,6 +166,7 @@ if KEEP_CUDA_BUILD:
         check_if_cuda_home_none(PACKAGE_NAME)
         # Check, if CUDA11 is installed for compute capability 8.0
 
+        bare_metal_version = None
         if CUDA_HOME is not None:
             _, bare_metal_version = get_cuda_bare_metal_version(CUDA_HOME)
             if bare_metal_version < Version("11.6"):
@@ -172,10 +175,17 @@ if KEEP_CUDA_BUILD:
                     "Note: make sure nvcc has a supported version by running nvcc -V."
                 )
 
+        if torch.version.cuda is None:
+            raise RuntimeError(
+                f"{PACKAGE_NAME} CUDA build requires a CUDA-enabled PyTorch build, "
+                f"but torch.version.cuda is None (torch {torch.__version__})."
+            )
+        torch_cuda_version = parse(torch.version.cuda)
+        cuda_version_for_arch = bare_metal_version if bare_metal_version is not None else torch_cuda_version
+
         # If system CUDA and PyTorch CUDA have different major versions,
         # clear TORCH_CUDA_ARCH_LIST to prevent cpp_extension from erroring
-        torch_cuda_version = parse(torch.version.cuda)
-        if bare_metal_version.major != torch_cuda_version.major:
+        if bare_metal_version is not None and bare_metal_version.major != torch_cuda_version.major:
             os.environ["TORCH_CUDA_ARCH_LIST"] = ""
 
         cc_flag.append("-gencode")
@@ -184,15 +194,15 @@ if KEEP_CUDA_BUILD:
         cc_flag.append("arch=compute_80,code=sm_80")
         cc_flag.append("-gencode")
         cc_flag.append("arch=compute_87,code=sm_87")
-        if bare_metal_version >= Version("11.8"):
+        if cuda_version_for_arch >= Version("11.8"):
             cc_flag.append("-gencode")
             cc_flag.append("arch=compute_90,code=sm_90")
-        if bare_metal_version >= Version("12.8"):
+        if cuda_version_for_arch >= Version("12.8"):
             cc_flag.append("-gencode")
             cc_flag.append("arch=compute_100,code=sm_100")
             cc_flag.append("-gencode")
             cc_flag.append("arch=compute_120,code=sm_120")
-        if bare_metal_version >= Version("13.0"):
+        if cuda_version_for_arch >= Version("13.0"):
             cc_flag.append("-gencode")
             cc_flag.append("arch=compute_103,code=sm_103")
             cc_flag.append("-gencode")
@@ -287,6 +297,11 @@ def get_wheel_url():
     else:
         # We're using the CUDA version used to build torch, not the one currently installed
         # _, cuda_version_raw = get_cuda_bare_metal_version(CUDA_HOME)
+        if torch.version.cuda is None:
+            raise ValueError(
+                "Cannot guess a CUDA wheel URL without torch.version.cuda set; "
+                "install a CUDA-enabled PyTorch build or set MAMBA_FORCE_BUILD=TRUE."
+            )
         torch_cuda_version = parse(torch.version.cuda)
         # For CUDA 11, we only compile for CUDA 11.8, and for CUDA 12 we only compile for CUDA 12.3
         # to save CI time. Minor versions should be compatible.
@@ -355,8 +370,17 @@ class CachedWheelsCommand(_bdist_wheel):
             print("Raw wheel path", wheel_path)
             shutil.move(wheel_filename, wheel_path)
         except urllib.error.HTTPError:
-            print("Precompiled wheel not found. Building from source...")
-            # If the wheel could not be downloaded, build from source
+            print(
+                "Precompiled wheel not found for "
+                f"torch {torch.__version__}, Python {sys.version_info.major}.{sys.version_info.minor}, "
+                f"platform {get_platform()}. Building selective_scan_cuda from source..."
+            )
+            print(
+                "Source compilation can take 15–30+ minutes with little or no pip output. "
+                "Prebuilt wheels are published on GitHub releases for select torch/CUDA/Python "
+                "combinations; see README Installation. If you only need Mamba-2/3, omit "
+                "MAMBA_KEEP_CUDA_BUILD to skip this CUDA extension."
+            )
             super().run()
 
 setup(
