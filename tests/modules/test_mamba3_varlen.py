@@ -116,3 +116,15 @@ def test_mamba3_varlen_backward(is_mimo):
         if param.requires_grad:
             assert param.grad is not None, f"No gradient for param {name}"
             assert torch.isfinite(param.grad).all(), f"Non-finite gradient for param {name}"
+
+
+@pytest.mark.parametrize("is_mimo", [True])
+def test_mamba3_mimo_forward_seqlen_one(is_mimo):
+    """MIMO forward must accept (B, 1, D) — regression for #985 / stride(-1)!=1."""
+    _require_cuda()
+    torch.manual_seed(0)
+    model = _make_model(is_mimo=is_mimo)
+    x = torch.randn(2, 1, model.d_model, device="cuda", dtype=torch.bfloat16)
+    with torch.no_grad():
+        y = model(x)
+    assert y.shape == x.shape

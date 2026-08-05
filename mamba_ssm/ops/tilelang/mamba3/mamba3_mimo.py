@@ -21,11 +21,13 @@ from mamba_ssm.ops.tilelang.mamba3.mamba3_mimo_fwd_varlen import mamba_mimo_forw
 
 from mamba_ssm.ops.tilelang.mamba3.mamba3_mimo_bwd import mamba_mimo_bwd_combined
 from mamba_ssm.ops.tilelang.mamba3.mamba3_mimo_bwd_varlen import mamba_mimo_bwd_combined_varlen
+from mamba_ssm.ops.tilelang.mamba3.tilelang_layout import ensure_tilelang_contiguous
 
 
 # =============================================================================
 # Autograd Function
 # =============================================================================
+
 
 class _Mamba3Function(torch.autograd.Function):
     """Custom autograd function for Mamba-3 with Triton/Tilelang kernels."""
@@ -62,8 +64,9 @@ class _Mamba3Function(torch.autograd.Function):
         ctx.dtype = dtype
         ctx.fuse_pregate_headwise_rms_norm = fuse_pregate_headwise_rms_norm
         ctx.outproj_norm_eps = outproj_norm_eps
+
         (Q, K, V, ADT, DT, Trap, Q_bias, K_bias, MIMO_V, MIMO_Z, MIMO_Out, Out_Norm_Weight, Angles, D, Z) = tuple(
-            t.contiguous() if t is not None else None
+            ensure_tilelang_contiguous(t)
             for t in (
                 Q, K, V, ADT, DT, Trap, Q_bias, K_bias, MIMO_V, MIMO_Z, MIMO_Out, Out_Norm_Weight, Angles, D, Z,
             )
