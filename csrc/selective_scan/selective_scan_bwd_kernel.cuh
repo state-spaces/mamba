@@ -139,7 +139,7 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
     float delta_bias = params.delta_bias_ptr == nullptr ? 0 : reinterpret_cast<float *>(params.delta_bias_ptr)[dim_id];
     scan_t *x = params.x_ptr == nullptr
         ? nullptr
-        : reinterpret_cast<scan_t *>(params.x_ptr) + (batch_id * params.dim + dim_id) * (params.n_chunks) * params.dstate;
+        : reinterpret_cast<scan_t *>(params.x_ptr) + (int64_t)(batch_id * params.dim + dim_id) * params.n_chunks * params.dstate;
     float dD_val = 0;
     float ddelta_bias_val = 0;
 
