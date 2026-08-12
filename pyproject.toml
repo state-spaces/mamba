@@ -18,8 +18,15 @@ classifiers = [
 dependencies = [
     "torch",
     "tilelang==0.1.8",
-    "apache-tvm-ffi<=0.1.12",
+    # 0.1.12 breaks tilelang 0.1.8: registering TVM FFI objects raises
+    # AttributeError("attribute '__dict__' of 'type' objects is not writable"),
+    # which makes "import mamba_ssm" fail outright.
+    "apache-tvm-ffi<0.1.12",
     "quack-kernels>=0.3.4",
+    # nvidia-cutlass-dsl 4.6.0 is incompatible with mamba-ssm 2.3.2 but does 
+    # not declare itself as such. Constrain the transitive libs-base package 
+    # so the resolver keeps 4.5.2.
+    "nvidia-cutlass-dsl-libs-base==4.5.2",
     "triton>=3.5.0",
     "ninja",
     "einops",
