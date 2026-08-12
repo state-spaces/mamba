@@ -47,7 +47,7 @@ jobs:
         with:
           ref: ${{ inputs.release-version }}
           submodules: recursive
-      
+
       - name: Checkout build scripts
         uses: actions/checkout@v4
         with:
@@ -108,6 +108,9 @@ jobs:
               '2.8': [126, 128, 129], \
               '2.9': [126, 128, 130], \
               '2.10': [126, 128, 130], \
+              '2.11': [126, 128, 130], \
+              '2.12': [126, 130, 132], \
+              '2.13': [126, 130, 132], \
             }[env['MATRIX_TORCH_VERSION']]; \
             sys_cuda = int(env['MATRIX_CUDA_VERSION']); \
             print(max(v for v in available if v <= sys_cuda))" \
@@ -131,7 +134,7 @@ jobs:
 
       - name: Build wheel
         id: build_wheel
-        env: 
+        env:
           CXX11_ABI: ${{ inputs.cxx11_abi }}
           MATRIX_TORCH_VERSION: ${{ env.MATRIX_TORCH_VERSION}}
           WHEEL_CUDA_VERSION: ${{ env.WHEEL_CUDA_VERSION }}
