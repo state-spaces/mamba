@@ -44,9 +44,10 @@ def _state_passing_fwd_kernel(
     HAS_SEQ_IDX: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-    pid_b = tl.program_id(axis=1)
-    pid_h = tl.program_id(axis=2)
-    pid_m = tl.program_id(axis=0)
+    # int64 to avoid int32 overflow, see https://github.com/state-spaces/mamba/issues/1015
+    pid_b = tl.program_id(axis=1).to(tl.int64)
+    pid_h = tl.program_id(axis=2).to(tl.int64)
+    pid_m = tl.program_id(axis=0).to(tl.int64)
     states_ptr += pid_b * stride_states_batch + pid_h * stride_states_head
     dA_cs_ptr += pid_b * stride_dA_cs_batch + pid_h * stride_dA_cs_head
     out_ptr += pid_b * stride_out_batch + pid_h * stride_out_head
@@ -121,9 +122,10 @@ def _state_passing_bwd_kernel(
     HAS_SEQ_IDX: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-    pid_b = tl.program_id(axis=1)
-    pid_h = tl.program_id(axis=2)
-    pid_m = tl.program_id(axis=0)
+    # int64 to avoid int32 overflow, see https://github.com/state-spaces/mamba/issues/1015
+    pid_b = tl.program_id(axis=1).to(tl.int64)
+    pid_h = tl.program_id(axis=2).to(tl.int64)
+    pid_m = tl.program_id(axis=0).to(tl.int64)
     dstates_ptr += pid_b * stride_dstates_batch + pid_h * stride_dstates_head + (nchunks - 1) * stride_dstates_chunk
     dA_cs_ptr += pid_b * stride_dA_cs_batch + pid_h * stride_dA_cs_head + (nchunks - 1) * stride_dA_cs_chunk
     ddA_cs_ptr += pid_b * stride_ddA_cs_batch + pid_h * stride_ddA_cs_head + (nchunks - 1) * stride_ddA_cs_chunk + pid_m

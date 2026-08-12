@@ -6,6 +6,7 @@
 from typing import Optional
 
 import math
+import warnings
 from packaging import version
 
 import torch
@@ -50,6 +51,7 @@ from mamba_ssm.utils.determinism import (
 )
 
 TRITON_22 = version.parse(triton.__version__) >= version.parse('2.2.0')
+_UINT32_MAX = 2**32 - 1
 
 
 def init_to_zero(names):
@@ -58,7 +60,7 @@ def init_to_zero(names):
 
 def ensure_stride(inp):
     """
-    Return inp, while ensuring that stride(1) of the returned tensor is a multiple of 8.
+    Return inp with a causal-conv-compatible, uint32-addressable layout.
 
     The inp tensor is of shape [batch, length, channels], where channels is assumed, and tested, to be
     a multiple of 8. If it is contiguous, inp will have strides [length*channels, channels, 1]. The
@@ -69,10 +71,19 @@ def ensure_stride(inp):
     operate on a channels_last tensor for which stride[2] is not a multiple of 8, and in that case will
     raise an exception. This function prevents the aforementioned exception by returning a tensor with
     stride(1) equal to channels, by making the returned tensor contiguous, if inp.stride(1) is not
-    already a multiple of 8.
+    already a multiple of 8. Also avoids uint32 overflow (causal_conv1d addresses
+    with uint32_t strides, so the limit is _UINT32_MAX, not a signed int32 one),
+    see https://github.com/state-spaces/mamba/issues/1015.
     """
     assert inp.shape[2] % 8 == 0, "Number of convolution channels is required to be a multiple of 8."
-    return inp if inp.stride(1) % 8 == 0 else inp.contiguous()
+    if inp.numel() - 1 > _UINT32_MAX:
+        warnings.warn(
+            f"causal_conv1d may not safely address a tensor with {inp.numel()} elements unless its CUDA kernels use widened strides.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    max_offset = sum((size - 1) * stride for size, stride in zip(inp.shape, inp.stride()))
+    return inp if inp.stride(1) % 8 == 0 and max_offset <= _UINT32_MAX else inp.contiguous()
 
 
 @triton.autotune(
@@ -120,7 +131,8 @@ def _chunk_scan_chunk_state_bwd_dx_kernel(
     IS_TRITON_22: tl.constexpr,
     DETERMINISTIC_REDUCTION: tl.constexpr,
 ):
-    pid_bc = tl.program_id(axis=1)
+    # int64 to avoid int32 overflow, see https://github.com/state-spaces/mamba/issues/1015
+    pid_bc = tl.program_id(axis=1).to(tl.int64)
     pid_c = pid_bc // batch
     pid_b = pid_bc - pid_c * batch
     pid_h = tl.program_id(axis=2)
@@ -399,8 +411,6 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
                                    dt_limit=(0.0, float("inf")),
                                    dx=None, ddt=None, dB=None, dC=None, dz=None, recompute_output=False,
                                    state_dtype=None):
-    if dout.stride(-1) != 1:
-        dout = dout.contiguous()
     batch, seqlen, nheads, headdim = x.shape
     nchunks = math.ceil(seqlen / chunk_size)
     _, _, ngroups, dstate = B.shape

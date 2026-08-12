@@ -31,7 +31,8 @@ def _swiglu_fwd_kernel(
     BLOCK_N: tl.constexpr,
 ):
     # Map the program id to the row of X and Y it should compute.
-    row = tl.program_id(0)
+    # int64 to avoid int32 overflow, see https://github.com/state-spaces/mamba/issues/1015
+    row = tl.program_id(0).to(tl.int64)
     start_col = tl.program_id(1) * BLOCK_N
     X += row * stride_x_row
     Y += row * stride_y_row
@@ -93,7 +94,8 @@ def _swiglu_bwd_kernel(
     RECOMPUTE_OUTPUT: tl.constexpr,
 ):
     # Map the program id to the row of X and Y it should compute.
-    row = tl.program_id(0)
+    # int64 to avoid int32 overflow, see https://github.com/state-spaces/mamba/issues/1015
+    row = tl.program_id(0).to(tl.int64)
     start_col = tl.program_id(1) * BLOCK_N
     X += row * stride_x_row
     Y += row * stride_y_row

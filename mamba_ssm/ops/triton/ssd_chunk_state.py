@@ -54,8 +54,9 @@ def _chunk_cumsum_fwd_kernel(
     HAS_DT_BIAS: tl.constexpr,
     BLOCK_SIZE_H: tl.constexpr, BLOCK_SIZE_CHUNK: tl.constexpr,
 ):
-    pid_b = tl.program_id(axis=0)
-    pid_c = tl.program_id(axis=1)
+    # int64 to avoid int32 overflow, see https://github.com/state-spaces/mamba/issues/1015
+    pid_b = tl.program_id(axis=0).to(tl.int64)
+    pid_c = tl.program_id(axis=1).to(tl.int64)
     pid_h = tl.program_id(axis=2)
     dt_ptr += pid_b * stride_dt_batch + pid_c * chunk_size * stride_dt_seqlen
     dt_out_ptr += pid_b * stride_dt_out_batch + pid_c * stride_dt_out_chunk
@@ -121,8 +122,9 @@ def _chunk_cumsum_bwd_kernel(
     BLOCK_SIZE_H: tl.constexpr, BLOCK_SIZE_CHUNK: tl.constexpr,
     DETERMINISTIC_REDUCTION: tl.constexpr,
 ):
-    pid_b = tl.program_id(axis=0)
-    pid_c = tl.program_id(axis=1)
+    # int64 to avoid int32 overflow, see https://github.com/state-spaces/mamba/issues/1015
+    pid_b = tl.program_id(axis=0).to(tl.int64)
+    pid_c = tl.program_id(axis=1).to(tl.int64)
     pid_h = tl.program_id(axis=2)
     ddt_out_ptr += pid_b * stride_ddt_out_batch + pid_c * stride_ddt_out_chunk
     ddA_ptr += pid_b * stride_ddA_batch + pid_c * stride_ddA_chunk
@@ -206,7 +208,8 @@ def _chunk_state_fwd_kernel(
     HAS_SEQ_IDX: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
 ):
-    pid_bc = tl.program_id(axis=1)
+    # int64 to avoid int32 overflow, see https://github.com/state-spaces/mamba/issues/1015
+    pid_bc = tl.program_id(axis=1).to(tl.int64)
     pid_c = pid_bc // batch
     pid_b = pid_bc - pid_c * batch
     pid_h = tl.program_id(axis=2)
@@ -304,7 +307,8 @@ def _chunk_state_bwd_dx_kernel(
     BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
     BLOCK_SIZE_DSTATE: tl.constexpr,
 ):
-    pid_bc = tl.program_id(axis=1)
+    # int64 to avoid int32 overflow, see https://github.com/state-spaces/mamba/issues/1015
+    pid_bc = tl.program_id(axis=1).to(tl.int64)
     pid_c = pid_bc // batch
     pid_b = pid_bc - pid_c * batch
     pid_h = tl.program_id(axis=2)
@@ -417,7 +421,8 @@ def _chunk_state_bwd_db_kernel(
     DETERMINISTIC_REDUCTION: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
 ):
-    pid_bc = tl.program_id(axis=1)
+    # int64 to avoid int32 overflow, see https://github.com/state-spaces/mamba/issues/1015
+    pid_bc = tl.program_id(axis=1).to(tl.int64)
     pid_c = pid_bc // batch
     pid_b = pid_bc - pid_c * batch
     pid_sg = tl.program_id(axis=2)
@@ -546,7 +551,8 @@ def _chunk_state_bwd_ddAcs_stable_kernel(
     BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
     BLOCK_SIZE_DSTATE: tl.constexpr,
 ):
-    pid_bc = tl.program_id(axis=1)
+    # int64 to avoid int32 overflow, see https://github.com/state-spaces/mamba/issues/1015
+    pid_bc = tl.program_id(axis=1).to(tl.int64)
     pid_c = pid_bc // batch
     pid_b = pid_bc - pid_c * batch
     pid_h = tl.program_id(axis=2)
@@ -653,13 +659,14 @@ def _chunk_state_varlen_kernel(
     # Meta-parameters
     BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
 ):
-    pid_b = tl.program_id(axis=1)
+    # int64 to avoid int32 overflow, see https://github.com/state-spaces/mamba/issues/1015
+    pid_b = tl.program_id(axis=1).to(tl.int64)
     pid_h = tl.program_id(axis=2)
     num_pid_n = tl.cdiv(dstate, BLOCK_SIZE_N)
     pid_m = tl.program_id(axis=0) // num_pid_n
     pid_n = tl.program_id(axis=0) % num_pid_n
     end_idx = tl.load(cu_seqlens_ptr + pid_b + 1)
-    pid_c = (end_idx - 1) // chunk_size
+    pid_c = ((end_idx - 1) // chunk_size).to(tl.int64)
     b_ptr += pid_c * chunk_size * stride_b_seqlen + (pid_h // nheads_ngroups_ratio) * stride_b_head
     x_ptr += pid_c * chunk_size * stride_x_seqlen + pid_h * stride_x_head
     dt_ptr += pid_c * stride_dt_chunk + pid_h * stride_dt_head

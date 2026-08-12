@@ -73,7 +73,8 @@ def _chunk_scan_fwd_kernel(
     BLOCK_SIZE_DSTATE: tl.constexpr,
     IS_TRITON_22: tl.constexpr,
 ):
-    pid_bc = tl.program_id(axis=1)
+    # int64 to avoid int32 overflow, see https://github.com/state-spaces/mamba/issues/1015
+    pid_bc = tl.program_id(axis=1).to(tl.int64)
     pid_c = pid_bc // batch
     pid_b = pid_bc - pid_c * batch
     pid_h = tl.program_id(axis=2)
@@ -218,7 +219,8 @@ def _chunk_scan_fwd_kernel_wip(
     BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_DSTATE: tl.constexpr,
 ):
-    pid_bc = tl.program_id(axis=1)
+    # int64 to avoid int32 overflow, see https://github.com/state-spaces/mamba/issues/1015
+    pid_bc = tl.program_id(axis=1).to(tl.int64)
     pid_c = pid_bc // batch
     pid_b = pid_bc - pid_c * batch
     pid_h = tl.program_id(axis=2)
@@ -370,7 +372,8 @@ def _chunk_scan_bwd_dz_kernel(
     RECOMPUTE_OUTPUT: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr,
 ):
-    pid_bc = tl.program_id(axis=1)
+    # int64 to avoid int32 overflow, see https://github.com/state-spaces/mamba/issues/1015
+    pid_bc = tl.program_id(axis=1).to(tl.int64)
     pid_c = pid_bc // batch
     pid_b = pid_bc - pid_c * batch
     pid_h = tl.program_id(axis=2)
@@ -462,7 +465,8 @@ def _chunk_scan_bwd_dstates_kernel(
     HAS_SEQ_IDX: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
 ):
-    pid_bc = tl.program_id(axis=1)
+    # int64 to avoid int32 overflow, see https://github.com/state-spaces/mamba/issues/1015
+    pid_bc = tl.program_id(axis=1).to(tl.int64)
     pid_c = pid_bc // batch
     pid_b = pid_bc - pid_c * batch
     pid_h = tl.program_id(axis=2)
@@ -548,7 +552,8 @@ def _chunk_scan_bwd_dc_kernel(
     DETERMINISTIC_REDUCTION: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
 ):
-    pid_bc = tl.program_id(axis=1)
+    # int64 to avoid int32 overflow, see https://github.com/state-spaces/mamba/issues/1015
+    pid_bc = tl.program_id(axis=1).to(tl.int64)
     pid_c = pid_bc // batch
     pid_b = pid_bc - pid_c * batch
     pid_sg = tl.program_id(axis=2)
@@ -661,7 +666,8 @@ def _chunk_scan_bwd_dx_kernel(
     DETERMINISTIC_REDUCTION: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
 ):
-    pid_bc = tl.program_id(axis=1)
+    # int64 to avoid int32 overflow, see https://github.com/state-spaces/mamba/issues/1015
+    pid_bc = tl.program_id(axis=1).to(tl.int64)
     pid_c = pid_bc // batch
     pid_b = pid_bc - pid_c * batch
     pid_h = tl.program_id(axis=2)
@@ -792,7 +798,8 @@ def _chunk_scan_bwd_dcb_kernel(
     HAS_SEQ_IDX: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
 ):
-    pid_bc = tl.program_id(axis=1)
+    # int64 to avoid int32 overflow, see https://github.com/state-spaces/mamba/issues/1015
+    pid_bc = tl.program_id(axis=1).to(tl.int64)
     pid_c = pid_bc // batch
     pid_b = pid_bc - pid_c * batch
     pid_sg = tl.program_id(axis=2)
@@ -908,7 +915,8 @@ def _chunk_scan_bwd_ddAcs_unstable_kernel(
     SUBTRACT_DDTDT: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr,
 ):
-    pid_bc = tl.program_id(axis=1)
+    # int64 to avoid int32 overflow, see https://github.com/state-spaces/mamba/issues/1015
+    pid_bc = tl.program_id(axis=1).to(tl.int64)
     pid_c = pid_bc // batch
     pid_b = pid_bc - pid_c * batch
     pid_h = tl.program_id(axis=2)
@@ -993,7 +1001,8 @@ def _chunk_scan_bwd_ddAcs_stable_kernel_old(
     # Meta-parameters
     BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
 ):
-    pid_bc = tl.program_id(axis=1)
+    # int64 to avoid int32 overflow, see https://github.com/state-spaces/mamba/issues/1015
+    pid_bc = tl.program_id(axis=1).to(tl.int64)
     pid_c = pid_bc // batch
     pid_b = pid_bc - pid_c * batch
     pid_h = tl.program_id(axis=2)
@@ -1112,7 +1121,8 @@ def _chunk_scan_bwd_ddAcs_stable_kernel(
     # Meta-parameters
     BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
 ):
-    pid_bc = tl.program_id(axis=1)
+    # int64 to avoid int32 overflow, see https://github.com/state-spaces/mamba/issues/1015
+    pid_bc = tl.program_id(axis=1).to(tl.int64)
     pid_c = pid_bc // batch
     pid_b = pid_bc - pid_c * batch
     pid_h = tl.program_id(axis=2)
@@ -1213,7 +1223,8 @@ def _chunk_scan_bwd_ddAcs_prev_kernel(
     HAS_SEQ_IDX: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
 ):
-    pid_bc = tl.program_id(axis=1)
+    # int64 to avoid int32 overflow, see https://github.com/state-spaces/mamba/issues/1015
+    pid_bc = tl.program_id(axis=1).to(tl.int64)
     pid_c = pid_bc // batch
     pid_b = pid_bc - pid_c * batch
     pid_h = tl.program_id(axis=2)
