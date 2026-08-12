@@ -2,12 +2,15 @@ import math
 
 import torch
 import torch.nn.functional as F
+import triton
 
 import pytest
 
 from einops import rearrange, repeat
 
 from mamba_ssm.ops.triton.layernorm_gated import layernorm_fn, rms_norm_ref
+
+from overflow_test_utils import assert_isfinite, bwd_row_start_max, gpu_memory_skipif
 
 
 @pytest.mark.parametrize("norm_before_gate", [True, False])
@@ -101,3 +104,37 @@ def test_layer_norm_gated(d, dtype, wtype, has_bias, has_z, is_rms_norm, has_gro
     assert (weight.grad - weight_ref.grad).abs().max().item() <= 2 * (weight_pt.grad - weight_ref.grad).abs().max().item() + atol
     if has_bias:
         assert (bias.grad - bias_ref.grad).abs().max().item() <= 2 * (bias_pt.grad - bias_ref.grad).abs().max().item() + atol
+
+
+@gpu_memory_skipif(21)
+def test_layer_norm_gated_large_row_count_no_overflow() -> None:
+    # int64 to avoid int32 overflow, see https://github.com/state-spaces/mamba/issues/1015.
+    device = 'cuda'
+    torch.manual_seed(0)
+    N = 32_768  # hard cap: layernorm_gated.py raises if group_size/N exceeds 64KB / dtype_size
+    M = 80_000  # (nrow_groups - 1) * ceil(M / nrow_groups) * N still clears 2**31 - 1 with margin (asserted below)
+
+    element_size = 2  # bfloat16
+    max_fused_size = 65536 // element_size
+    block_n = min(max_fused_size, triton.next_power_of_2(N))
+    num_warps = min(max(block_n // 256, 1), 8)
+    sm_count = torch.cuda.get_device_properties(device).multi_processor_count
+    nrow_groups = math.ceil(sm_count * math.ceil(4 / num_warps))
+    assert bwd_row_start_max(M, nrow_groups) * N > 2**31 - 1, (
+        f"test parameters too small to overflow the backward kernel on this GPU "
+        f"(sm_count={sm_count}, nrow_groups={nrow_groups}): increase N"
+    )
+
+    x = torch.randn(M, N, dtype=torch.bfloat16, device=device, requires_grad=True)
+    weight = torch.randn(N, dtype=torch.float32, device=device, requires_grad=True)
+
+    out = layernorm_fn(x, weight, bias=None, is_rms_norm=True)
+    torch.cuda.synchronize(device)
+    assert out.shape == (M, N)
+    assert_isfinite(out)
+
+    out.sum().backward()
+    torch.cuda.synchronize(device)
+    assert x.grad is not None
+    assert_isfinite(x.grad)
+    assert weight.grad is not None and torch.isfinite(weight.grad).all()
