@@ -56,6 +56,10 @@ def _filter_configs_by_block_sizes(configs):
     return matching[:1] if matching else None
 
 
+def init_to_zero(names):
+    return lambda nargs: [nargs[name].zero_() for name in names if nargs[name] is not None]
+
+
 def autotune_configs(configs):
     """Select autotune configs for deterministic mode.
     

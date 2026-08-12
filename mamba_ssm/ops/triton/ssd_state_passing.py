@@ -12,7 +12,7 @@ import triton.language as tl
 
 from einops import rearrange, repeat
 
-from mamba_ssm.utils.determinism import autotune_configs
+from mamba_ssm.utils.determinism import autotune_configs, init_to_zero
 
 
 @triton.autotune(
@@ -90,12 +90,12 @@ def _state_passing_fwd_kernel(
 
 @triton.autotune(
     configs=autotune_configs([
-        triton.Config({'BLOCK_SIZE': 64}),
-        triton.Config({'BLOCK_SIZE': 128}),
-        triton.Config({'BLOCK_SIZE': 256}),
-        triton.Config({'BLOCK_SIZE': 512}),
-        triton.Config({'BLOCK_SIZE': 1024}),
-        triton.Config({'BLOCK_SIZE': 2048}),
+        triton.Config({'BLOCK_SIZE': 64}, pre_hook=init_to_zero(["ddA_cs_ptr"])),
+        triton.Config({'BLOCK_SIZE': 128}, pre_hook=init_to_zero(["ddA_cs_ptr"])),
+        triton.Config({'BLOCK_SIZE': 256}, pre_hook=init_to_zero(["ddA_cs_ptr"])),
+        triton.Config({'BLOCK_SIZE': 512}, pre_hook=init_to_zero(["ddA_cs_ptr"])),
+        triton.Config({'BLOCK_SIZE': 1024}, pre_hook=init_to_zero(["ddA_cs_ptr"])),
+        triton.Config({'BLOCK_SIZE': 2048}, pre_hook=init_to_zero(["ddA_cs_ptr"])),
     ]),
     key=['dim'],
 )

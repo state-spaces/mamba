@@ -47,15 +47,12 @@ from mamba_ssm.utils.determinism import (
     alloc_tile_workspace,
     autotune_configs,
     finalize_tile_workspace,
+    init_to_zero,
     use_deterministic_mode,
 )
 
 TRITON_22 = version.parse(triton.__version__) >= version.parse('2.2.0')
 _UINT32_MAX = 2**32 - 1
-
-
-def init_to_zero(names):
-    return lambda nargs: [nargs[name].zero_() for name in names if nargs[name] is not None]
 
 
 def ensure_stride(inp):
