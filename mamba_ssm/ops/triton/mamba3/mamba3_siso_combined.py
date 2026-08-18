@@ -165,7 +165,12 @@ class _Mamba3Function(torch.autograd.Function):
         except Exception:
             pass
         
-        if len(ctx.saved_tensors) == 0:
+        # Access ctx.saved_tensors exactly once: each access re-runs the
+        # saved-tensor unpack hooks, and non-reentrant gradient checkpointing
+        # only permits a single unpack per tensor — a second access raises
+        # CheckpointError.
+        saved = ctx.saved_tensors
+        if len(saved) == 0:
             raise RuntimeError(
                 "Backward called but forward ran without gradient tracking. "
                 "Ensure inputs require grad or run under torch.enable_grad()."
@@ -176,7 +181,7 @@ class _Mamba3Function(torch.autograd.Function):
         (Q, K, V, ADT, DT, Trap, Q_bias, K_bias, Angles, Angles_Cumsum,
         D_save, Z_save, Input_SSM_State_save, Input_K_State_save, Input_V_State_save,
         Out, Out_v, SSM_States, DA_CS, DA_CS_SUM, Q_rot, K_scaled, QK_dot, Scale, Gamma,
-        Final_SSM_State_save, cu_seqlens_save) = ctx.saved_tensors
+        Final_SSM_State_save, cu_seqlens_save) = saved
         
         D = D_save if ctx.has_D else None
         Z = Z_save if ctx.has_Z else None

@@ -132,7 +132,12 @@ class _Mamba3Function(torch.autograd.Function):
     def backward(ctx, dout, *args) -> tuple:
         """Backward pass: compute gradients using Tilelang backward kernels."""
         
-        if len(ctx.saved_tensors) == 0:
+        # Access ctx.saved_tensors exactly once: each access re-runs the
+        # saved-tensor unpack hooks, and non-reentrant gradient checkpointing
+        # (torch.utils.checkpoint use_reentrant=False) only permits a single
+        # unpack per tensor — a second access raises CheckpointError.
+        saved = ctx.saved_tensors
+        if len(saved) == 0:
             raise RuntimeError(
                 "Backward called but forward ran without gradient tracking. "
                 "Ensure inputs require grad or run under torch.enable_grad()."
@@ -143,7 +148,7 @@ class _Mamba3Function(torch.autograd.Function):
             D, Z,
             MIMO_V, MIMO_Out, MIMO_Z, Out_Norm_Weight,
             cu_seqlens
-            ) = ctx.saved_tensors
+            ) = saved
 
         if cu_seqlens is not None:
             DA_CS, DA_CS_REV, Segsum = compute_dacs_segsum_triton_varlen(ADT, ctx.chunk_size, cu_seqlens=cu_seqlens)
