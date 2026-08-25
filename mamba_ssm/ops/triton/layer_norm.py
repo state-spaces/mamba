@@ -44,10 +44,15 @@ def layer_norm_ref(
         x1 = x1.float() if x1 is not None else None
         weight1 = weight1.float() if weight1 is not None else None
         bias1 = bias1.float() if bias1 is not None else None
-    if x1 is not None:
-        assert rowscale is None, "rowscale is not supported with parallel LayerNorm"
     if rowscale is not None:
-        x = x * rowscale[..., None]
+        if x1 is not None:
+            # With parallel LayerNorm, rowscale has 2 * M rows: the first M for
+            # x and the last M for x1 (matches the kernel layout).
+            rows = x.shape[:-1].numel()
+            x = x * rowscale[:rows].reshape(x.shape[:-1] + (1,))
+            x1 = x1 * rowscale[rows:].reshape(x.shape[:-1] + (1,))
+        else:
+            x = x * rowscale.reshape(x.shape[:-1] + (1,))
     if dropout_p > 0.0:
         if dropout_mask is not None:
             x = x.masked_fill(~dropout_mask, 0.0) / (1.0 - dropout_p)
@@ -99,10 +104,15 @@ def rms_norm_ref(
         x1 = x1.float() if x1 is not None else None
         weight1 = weight1.float() if weight1 is not None else None
         bias1 = bias1.float() if bias1 is not None else None
-    if x1 is not None:
-        assert rowscale is None, "rowscale is not supported with parallel LayerNorm"
     if rowscale is not None:
-        x = x * rowscale[..., None]
+        if x1 is not None:
+            # With parallel LayerNorm, rowscale has 2 * M rows: the first M for
+            # x and the last M for x1 (matches the kernel layout).
+            rows = x.shape[:-1].numel()
+            x = x * rowscale[:rows].reshape(x.shape[:-1] + (1,))
+            x1 = x1 * rowscale[rows:].reshape(x.shape[:-1] + (1,))
+        else:
+            x = x * rowscale.reshape(x.shape[:-1] + (1,))
     if dropout_p > 0.0:
         if dropout_mask is not None:
             x = x.masked_fill(~dropout_mask, 0.0) / (1.0 - dropout_p)
@@ -302,7 +312,6 @@ def _layer_norm_fwd(
     out_dtype=None,
     residual_dtype=None,
     is_rms_norm=False,
-    return_dropout_mask=False,
 ):
     if residual is not None:
         residual_dtype = residual.dtype
@@ -318,7 +327,6 @@ def _layer_norm_fwd(
         assert bias.shape == (N,)
     if x1 is not None:
         assert x1.shape == x.shape
-        assert rowscale is None
         assert x1.stride(-1) == 1
     if weight1 is not None:
         assert weight1.shape == (N,)
@@ -328,7 +336,9 @@ def _layer_norm_fwd(
         assert bias1.stride(-1) == 1
     if rowscale is not None:
         assert rowscale.is_contiguous()
-        assert rowscale.shape == (M,)
+        # With parallel LayerNorm (x1 is not None), the kernel applies a
+        # separate rowscale to x1, so rowscale has 2 * M rows in that case.
+        assert rowscale.shape == (M if x1 is None else 2 * M,)
     # allocate output
     y = torch.empty_like(x, dtype=x.dtype if out_dtype is None else out_dtype)
     assert y.stride(-1) == 1
@@ -356,11 +366,13 @@ def _layer_norm_fwd(
         seeds = torch.randint(
             2**32, (M if x1 is None else 2 * M,), device=x.device, dtype=torch.int64
         )
-    else:
-        seeds = None
-    if return_dropout_mask and dropout_p > 0.0:
+        # Always store the dropout mask so that the backward pass can reuse the
+        # exact mask from the forward pass, instead of regenerating it from the
+        # seeds (the Triton PRNG output is not guaranteed to be stable across
+        # kernel launches or Triton versions).
         dropout_mask = torch.empty(M if x1 is None else 2 * M, N, device=x.device, dtype=torch.bool)
     else:
+        seeds = None
         dropout_mask = None
     # Less than 64KB per feature: enqueue fused kernel
     MAX_FUSED_SIZE = 65536 // x.element_size()
@@ -404,10 +416,9 @@ def _layer_norm_fwd(
             rowscale is not None,
         )
     # residual_out is None if residual is None and residual_dtype == input_dtype and dropout_p == 0.0
-    if dropout_mask is not None and x1 is not None:
-        dropout_mask, dropout_mask1 = dropout_mask.tensor_split(2, dim=0)
-    else:
-        dropout_mask1 = None
+    # dropout_mask has M rows (or 2 * M rows if x1 is not None, with the first
+    # M rows for x and the last M rows for x1). The full mask is returned so
+    # that the backward pass can reuse the exact mask from the forward pass.
     return (
         y,
         y1,
@@ -416,7 +427,6 @@ def _layer_norm_fwd(
         residual_out if residual_out is not None else x,
         seeds,
         dropout_mask,
-        dropout_mask1,
     )
 
 
@@ -450,7 +460,7 @@ def _layer_norm_bwd_kernel(
     DB1,
     DRESIDUAL_IN,
     ROWSCALE,
-    SEEDS,
+    DROPOUT_MASK,  # dropout mask computed and stored in the forward pass
     Mean,  # pointer to the mean
     Rstd,  # pointer to the 1/std
     stride_x_row,  # how much to increase the pointer when moving by 1 row
@@ -549,15 +559,21 @@ def _layer_norm_bwd_kernel(
             tl.store(DRESIDUAL_IN + cols, dx, mask=mask)
         if HAS_DX1:
             if HAS_DROPOUT:
-                keep_mask = (
-                    tl.rand(tl.load(SEEDS + M + row).to(tl.uint32), cols, n_rounds=7) > dropout_p
-                )
+                # Reuse the exact dropout mask from the forward pass instead of
+                # regenerating it from the seeds: the Triton PRNG output is not
+                # guaranteed to be stable across kernel launches or versions.
+                keep_mask = tl.load(
+                    DROPOUT_MASK + (M + row) * N + cols, mask=mask, other=0
+                ).to(tl.int1)
                 dx1 = tl.where(keep_mask, dx / (1.0 - dropout_p), 0.0)
             else:
                 dx1 = dx
+            if HAS_ROWSCALE:
+                rowscale = tl.load(ROWSCALE + M + row).to(tl.float32)
+                dx1 *= rowscale
             tl.store(DX1 + cols, dx1, mask=mask)
         if HAS_DROPOUT:
-            keep_mask = tl.rand(tl.load(SEEDS + row).to(tl.uint32), cols, n_rounds=7) > dropout_p
+            keep_mask = tl.load(DROPOUT_MASK + row * N + cols, mask=mask, other=0).to(tl.int1)
             dx = tl.where(keep_mask, dx / (1.0 - dropout_p), 0.0)
         if HAS_ROWSCALE:
             rowscale = tl.load(ROWSCALE + row).to(tl.float32)
@@ -598,7 +614,7 @@ def _layer_norm_bwd(
     dy1=None,
     weight1=None,
     bias1=None,
-    seeds=None,
+    dropout_mask=None,
     dropout_p=0.0,
     rowscale=None,
     has_residual=False,
@@ -629,12 +645,15 @@ def _layer_norm_bwd(
     if bias1 is not None:
         assert bias1.shape == (N,)
         assert bias1.stride(-1) == 1
-    if seeds is not None:
-        assert seeds.is_contiguous()
-        assert seeds.shape == (M if not has_x1 else M * 2,)
+    if dropout_p > 0.0:
+        assert dropout_mask is not None, "dropout_mask must be provided when dropout_p > 0"
+        assert dropout_mask.shape == (M if not has_x1 else 2 * M, N)
+        assert dropout_mask.dtype == torch.bool
     if rowscale is not None:
         assert rowscale.is_contiguous()
-        assert rowscale.shape == (M,)
+        # With parallel LayerNorm (has_x1), the kernel applies a separate
+        # rowscale to x1, so rowscale has 2 * M rows in that case.
+        assert rowscale.shape == (M if not has_x1 else 2 * M,)
     # allocate output
     dx = (
         torch.empty_like(x)
@@ -647,7 +666,13 @@ def _layer_norm_bwd(
         and (dx.dtype != x.dtype or dropout_p > 0.0 or rowscale is not None or has_x1)
         else None
     )
-    dx1 = torch.empty_like(dx) if (has_x1 and dropout_p > 0.0) else None
+    # dx1 needs its own buffer if the kernel has to scale it (dropout or
+    # rowscale); otherwise it is just an alias of dx.
+    dx1 = (
+        torch.empty_like(dx)
+        if (has_x1 and (dropout_p > 0.0 or rowscale is not None))
+        else None
+    )
     y = torch.empty(M, N, dtype=dy.dtype, device=dy.device) if recompute_output else None
     if recompute_output:
         assert weight1 is None, "recompute_output is not supported with parallel LayerNorm"
@@ -686,7 +711,7 @@ def _layer_norm_bwd(
             _db1,
             dresidual_in,
             rowscale,
-            seeds,
+            dropout_mask,
             mean,
             rstd,
             x.stride(0),
@@ -716,7 +741,7 @@ def _layer_norm_bwd(
     # Don't need to compute dresidual_in separately in this case
     if has_residual and dx.dtype == x.dtype and dropout_p == 0.0 and rowscale is None:
         dresidual_in = dx
-    if has_x1 and dropout_p == 0.0:
+    if has_x1 and dropout_p == 0.0 and rowscale is None:
         dx1 = dx
     return (
         (dx, dw, db, dresidual_in, dx1, dw1, db1)
@@ -756,7 +781,6 @@ class LayerNormFn(torch.autograd.Function):
                 residual = residual.contiguous()
         if x1 is not None:
             assert x1.shape == x_shape_og
-            assert rowscale is None, "rowscale is not supported with parallel LayerNorm"
             x1 = x1.reshape(-1, x1.shape[-1])
             if x1.stride(-1) != 1:
                 x1 = x1.contiguous()
@@ -774,7 +798,7 @@ class LayerNormFn(torch.autograd.Function):
             if residual is not None
             else (torch.float32 if residual_in_fp32 else None)
         )
-        y, y1, mean, rstd, residual_out, seeds, dropout_mask, dropout_mask1 = _layer_norm_fwd(
+        y, y1, mean, rstd, residual_out, _, dropout_mask = _layer_norm_fwd(
             x,
             weight,
             bias,
@@ -787,10 +811,12 @@ class LayerNormFn(torch.autograd.Function):
             rowscale=rowscale,
             residual_dtype=residual_dtype,
             is_rms_norm=is_rms_norm,
-            return_dropout_mask=return_dropout_mask,
         )
+        # Save the full dropout mask (M rows, or 2 * M rows with parallel
+        # LayerNorm) so that the backward pass reuses the exact mask that was
+        # applied in the forward pass.
         ctx.save_for_backward(
-            residual_out, weight, bias, weight1, bias1, rowscale, seeds, mean, rstd
+            residual_out, weight, bias, weight1, bias1, rowscale, dropout_mask, mean, rstd
         )
         ctx.x_shape_og = x_shape_og
         ctx.eps = eps
@@ -803,6 +829,10 @@ class LayerNormFn(torch.autograd.Function):
         y = y.reshape(x_shape_og)
         y1 = y1.reshape(x_shape_og) if y1 is not None else None
         residual_out = residual_out.reshape(x_shape_og) if residual_out is not None else None
+        if dropout_mask is not None and x1 is not None:
+            dropout_mask, dropout_mask1 = dropout_mask.tensor_split(2, dim=0)
+        else:
+            dropout_mask1 = None
         dropout_mask = dropout_mask.reshape(x_shape_og) if dropout_mask is not None else None
         dropout_mask1 = dropout_mask1.reshape(x_shape_og) if dropout_mask1 is not None else None
         if not return_dropout_mask:
@@ -826,7 +856,7 @@ class LayerNormFn(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dy, *args):
-        x, weight, bias, weight1, bias1, rowscale, seeds, mean, rstd = ctx.saved_tensors
+        x, weight, bias, weight1, bias1, rowscale, dropout_mask, mean, rstd = ctx.saved_tensors
         dy = dy.reshape(-1, dy.shape[-1])
         if dy.stride(-1) != 1:
             dy = dy.contiguous()
@@ -859,7 +889,7 @@ class LayerNormFn(torch.autograd.Function):
             dy1,
             weight1,
             bias1,
-            seeds,
+            dropout_mask,
             ctx.dropout_p,
             rowscale,
             ctx.has_residual,
