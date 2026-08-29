@@ -5,6 +5,7 @@ Copyright (c) 2025, Dao AI Lab, Goombalab
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
@@ -46,6 +47,146 @@ class Mamba3Output:
     final_ssm_state: Optional[Tensor] = None
     final_k_state: Optional[Tensor] = None
     final_v_state: Optional[Tensor] = None
+
+
+def _initial_state_start_terms_fp32(
+    q: Tensor,
+    k: Tensor,
+    v: Tensor,
+    adt: Tensor,
+    dt: Tensor,
+    angles: Tensor,
+    q_bias: Tensor,
+    k_bias: Tensor,
+    grad_out: Tensor,
+    input_angle_state: Tensor,
+    input_k_state: Tensor,
+    input_v_state: Tensor,
+    z: Optional[Tensor],
+    grad_final_ssm_state: Optional[Tensor],
+    cu_seqlens: Optional[Tensor],
+) -> Tuple[Tensor, Tensor]:
+    """Recompute the small sequence-start adjoints in accurate fp32.
+
+    The tiled 256x256 path cannot retain the full state-gradient matrix in one
+    Hopper program. Contracting that already approximate matrix with the two
+    input-state vectors is especially cancellation-sensitive for variable-length
+    sequence starts. Equivalent factored contractions for the initial-state
+    scalar and first scaled key avoid materialising the matrix and follow the
+    public fp32 SISO reference operations exactly. They are used only by the
+    exact tiled path with explicit input states.
+    """
+    is_varlen = cu_seqlens is not None
+    batch, seqlen, nheads_qk, headdim_qk = q.shape
+    num_sequences = int(cu_seqlens.numel() - 1) if is_varlen else batch
+    nheads = input_k_state.shape[1]
+    repeats = nheads // nheads_qk
+    if nheads_qk * repeats != nheads:
+        raise ValueError("input-state heads must be an integer multiple of Q heads")
+
+    state_scalars = []
+    scale_gradients = []
+    for seq_idx in range(num_sequences):
+        if is_varlen:
+            start = int(cu_seqlens[seq_idx].item())
+            stop = int(cu_seqlens[seq_idx + 1].item())
+            batch_idx = 0
+        else:
+            start, stop, batch_idx = 0, seqlen, seq_idx
+
+        q_seq = q[batch_idx, start:stop].float().repeat_interleave(repeats, dim=1)
+        k_zero = k[batch_idx, start].float().repeat_interleave(repeats, dim=0)
+        q_seq = q_seq + q_bias.float().unsqueeze(0)
+        k_zero = k_zero + k_bias.float()
+        increments = (
+            torch.tanh(angles[batch_idx, start:stop].float())
+            * math.pi
+            * dt[batch_idx, :, start:stop].transpose(0, 1).unsqueeze(-1).float()
+        )
+        angle_cumsum = torch.cumsum(increments, dim=0)
+        angle_cumsum = angle_cumsum + input_angle_state[seq_idx].float().unsqueeze(0)
+        angle_cumsum = torch.remainder(angle_cumsum, 2 * math.pi)
+        pair_count = headdim_qk // 2
+        if angle_cumsum.shape[-1] < pair_count:
+            padding = pair_count - angle_cumsum.shape[-1]
+            cosine = torch.cat(
+                (
+                    torch.cos(angle_cumsum),
+                    angle_cumsum.new_ones(*angle_cumsum.shape[:-1], padding),
+                ),
+                dim=-1,
+            )
+            sine = torch.cat(
+                (
+                    torch.sin(angle_cumsum),
+                    angle_cumsum.new_zeros(*angle_cumsum.shape[:-1], padding),
+                ),
+                dim=-1,
+            )
+        else:
+            cosine, sine = torch.cos(angle_cumsum), torch.sin(angle_cumsum)
+        q_pairs = q_seq.reshape(*q_seq.shape[:-1], pair_count, 2)
+        q_first, q_second = q_pairs[..., 0], q_pairs[..., 1]
+        q_rot = torch.stack(
+            (q_first * cosine - q_second * sine, q_first * sine + q_second * cosine),
+            dim=-1,
+        ).reshape_as(q_seq)
+        k_pairs = k_zero.reshape(*k_zero.shape[:-1], pair_count, 2)
+        k_first, k_second = k_pairs[..., 0], k_pairs[..., 1]
+        k_rot = torch.stack(
+            (
+                k_first * cosine[0] - k_second * sine[0],
+                k_first * sine[0] + k_second * cosine[0],
+            ),
+            dim=-1,
+        ).reshape_as(k_zero)
+
+        do_seq = grad_out[batch_idx, start:stop].float()
+        if z is not None:
+            z_seq = z[batch_idx, start:stop].float()
+            do_seq = do_seq * z_seq * torch.sigmoid(z_seq)
+        input_k = input_k_state[seq_idx].float()
+        input_v = input_v_state[seq_idx].float()
+        decay = torch.exp(
+            torch.cumsum(adt[batch_idx, :, start:stop].float(), dim=-1)
+        ).transpose(0, 1)
+        do_dot_v = torch.sum(do_seq * input_v.unsqueeze(0), dim=-1)
+        q_dot_k = torch.sum(q_rot * input_k.unsqueeze(0), dim=-1)
+        state_scalar = torch.sum(do_dot_v * q_dot_k * decay, dim=0)
+        v_zero = v[batch_idx, start].float()
+        scale_decay = torch.exp(
+            torch.cumsum(adt[batch_idx, :, start:stop].float(), dim=-1)
+            - adt[batch_idx, :, start : start + 1].float()
+        ).transpose(0, 1)
+        scale_gradient = torch.sum(
+            torch.sum(do_seq * v_zero.unsqueeze(0), dim=-1)
+            * torch.sum(q_rot * k_rot.unsqueeze(0), dim=-1)
+            * scale_decay,
+            dim=0,
+        )
+        if grad_final_ssm_state is not None:
+            state_final_scalar = torch.sum(
+                grad_final_ssm_state[seq_idx].float()
+                * input_v.unsqueeze(-1)
+                * input_k.unsqueeze(-2),
+                dim=(-2, -1),
+            )
+            state_scalar = state_scalar + state_final_scalar * torch.exp(
+                torch.sum(adt[batch_idx, :, start:stop].float(), dim=-1)
+            )
+            scale_final_scalar = torch.sum(
+                grad_final_ssm_state[seq_idx].float()
+                * v_zero.unsqueeze(-1)
+                * k_rot.unsqueeze(-2),
+                dim=(-2, -1),
+            )
+            scale_gradient = scale_gradient + scale_final_scalar * torch.exp(
+                torch.sum(adt[batch_idx, :, start + 1 : stop].float(), dim=-1)
+            )
+        state_scalars.append(state_scalar)
+        scale_gradients.append(scale_gradient)
+    return torch.stack(state_scalars), torch.stack(scale_gradients)
+
 
 class _Mamba3Function(torch.autograd.Function):
     """Custom autograd function for Mamba-3 with Triton kernels."""
@@ -127,12 +268,13 @@ class _Mamba3Function(torch.autograd.Function):
             Input_SSM_State_save = Input_SSM_State if Input_SSM_State is not None else torch.empty((), device=Q.device)
             Input_K_State_save = Input_K_State if Input_K_State is not None else torch.empty((), device=Q.device)
             Input_V_State_save = Input_V_State if Input_V_State is not None else torch.empty((), device=Q.device)
+            Input_Angle_State_save = Input_Angle_State if Input_Angle_State is not None else torch.empty((), device=Q.device)
             Final_SSM_State_save = Final_SSM_State if Final_SSM_State is not None else torch.empty((), device=Q.device)
             cu_seqlens_save = cu_seqlens if cu_seqlens is not None else torch.empty((), device=Q.device, dtype=torch.int32)
             
             ctx.save_for_backward(
                 Q, K, V, ADT, DT, Trap, Q_bias, K_bias, Angles, Angles_Cumsum,
-                D_save, Z_save, Input_SSM_State_save, Input_K_State_save, Input_V_State_save,
+                D_save, Z_save, Input_Angle_State_save, Input_SSM_State_save, Input_K_State_save, Input_V_State_save,
                 Out, Out_v, SSM_States, DA_CS, DA_CS_SUM, Q_rot, K_scaled, QK_dot, Scale, Gamma,
                 Final_SSM_State_save, cu_seqlens_save
             )
@@ -165,7 +307,12 @@ class _Mamba3Function(torch.autograd.Function):
         except Exception:
             pass
         
-        if len(ctx.saved_tensors) == 0:
+        # Access ctx.saved_tensors exactly once: each access re-runs the
+        # saved-tensor unpack hooks, and non-reentrant gradient checkpointing
+        # only permits a single unpack per tensor -- a second access raises
+        # CheckpointError.
+        saved = ctx.saved_tensors
+        if len(saved) == 0:
             raise RuntimeError(
                 "Backward called but forward ran without gradient tracking. "
                 "Ensure inputs require grad or run under torch.enable_grad()."
@@ -174,15 +321,16 @@ class _Mamba3Function(torch.autograd.Function):
             raise RuntimeError("No gradients provided for backward pass.")
 
         (Q, K, V, ADT, DT, Trap, Q_bias, K_bias, Angles, Angles_Cumsum,
-        D_save, Z_save, Input_SSM_State_save, Input_K_State_save, Input_V_State_save,
+        D_save, Z_save, Input_Angle_State_save, Input_SSM_State_save, Input_K_State_save, Input_V_State_save,
         Out, Out_v, SSM_States, DA_CS, DA_CS_SUM, Q_rot, K_scaled, QK_dot, Scale, Gamma,
-        Final_SSM_State_save, cu_seqlens_save) = ctx.saved_tensors
+        Final_SSM_State_save, cu_seqlens_save) = saved
         
         D = D_save if ctx.has_D else None
         Z = Z_save if ctx.has_Z else None
         Input_SSM_State = Input_SSM_State_save if ctx.has_input_state else None
         Input_K_State = Input_K_State_save if ctx.has_input_state else None
         Input_V_State = Input_V_State_save if ctx.has_input_state else None
+        Input_Angle_State = Input_Angle_State_save if ctx.has_input_state else None
         cu_seqlens = cu_seqlens_save if ctx.has_varlen else None
         
         if grad_out is None:
@@ -233,6 +381,14 @@ class _Mamba3Function(torch.autograd.Function):
         )
         
         # Step 4: Compute dDT, dTrap, and input state gradients
+        initial_state_scalar = None
+        initial_scale_gradient = None
+        if ctx.has_input_state and V.shape[-1] > 128:
+            initial_state_scalar, initial_scale_gradient = _initial_state_start_terms_fp32(
+                Q, K, V, ADT, DT, Angles, Q_bias, K_bias, grad_out,
+                Input_Angle_State, Input_K_State, Input_V_State, Z,
+                grad_final_ssm_state, cu_seqlens,
+            )
         dDT, dTrap, dInput_SSM_State_final, dInput_K_State, dInput_V_State = compute_ddt_dtrap_dinput_states(
             dscale=dScale,
             dgamma=dGamma,
@@ -242,6 +398,8 @@ class _Mamba3Function(torch.autograd.Function):
             input_k_state=Input_K_State,
             input_v_state=Input_V_State,
             Cu_Seqlens=cu_seqlens,
+            initial_state_scalar=initial_state_scalar,
+            initial_scale_gradient=initial_scale_gradient,
         )
         
         # Step 5: Compute gradients through angle_dt cumsum
