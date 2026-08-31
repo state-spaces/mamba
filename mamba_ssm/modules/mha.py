@@ -229,6 +229,9 @@ class MHA(nn.Module):
         if self.d_conv > 0:
             # The inference code for conv1d is pretty messy, should clean it up
             if (inference_params is None or inference_params.seqlen_offset == 0):
+                # Decode's conv_state update writes raw (pre-conv) qkv; store the
+                # same here so prefill→decode stays consistent.
+                qkv_for_state = qkv
                 if causal_conv1d_fn is None:
                     qkv = rearrange(
                         self.conv1d(rearrange(qkv, "b s d -> b d s"))[..., :-(self.d_conv - 1)], "b d s -> b s d"
@@ -243,7 +246,7 @@ class MHA(nn.Module):
                     _, conv_state = inference_params.key_value_memory_dict[self.layer_idx]
                     # If we just take qkv[:, :, -self.d_conv :], it will error if seqlen < self.d_conv
                     # Instead F.pad will pad with zeros if seqlen < self.d_conv, and truncate otherwise.
-                    qkv_t = rearrange(qkv, "b l d -> b d l")
+                    qkv_t = rearrange(qkv_for_state, "b l d -> b d l")
                     conv_state.copy_(F.pad(qkv_t, (self.d_conv - qkv_t.shape[-1], 0)))  # Update state (B D W)
             else:
                 _, conv_state = inference_params.key_value_memory_dict[self.layer_idx]
