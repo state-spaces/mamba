@@ -211,10 +211,10 @@ def decode(
             return True
         return False
 
-    start = torch.cuda.Event(enable_timing=enable_timing)
-    end = torch.cuda.Event(enable_timing=enable_timing)
-
+    start = end = None
     if enable_timing:
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
         start.record()
     scores, sequences = [], [input_ids]
     sequences_cat = input_ids
