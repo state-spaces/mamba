@@ -38,8 +38,10 @@ def ssd_minimal_discrete(X, A, B, C, block_len, initial_states=None):
         A: (batch, length, n_heads)
         B: (batch, length, n_heads, d_state)
         C: (batch, length, n_heads, d_state)
-    Return:
+        initial_states: (batch, n_heads, d_head, d_state)
+    Returns:
         Y: (batch, length, n_heads, d_head)
+        final_state: (batch, n_heads, d_head, d_state)
     """
     assert X.dtype == A.dtype == B.dtype == C.dtype
     assert X.shape[1] % block_len == 0
@@ -62,8 +64,8 @@ def ssd_minimal_discrete(X, A, B, C, block_len, initial_states=None):
     # 3. Compute the inter-chunk SSM recurrence; produces correct SSM states at chunk boundaries
     # (middle term of factorization of off-diag blocks; A terms)
     if initial_states is None:
-        initial_states = torch.zeros_like(states[:, :1])
-    states = torch.cat([initial_states, states], dim=1)
+        initial_states = torch.zeros_like(states[:, 0])
+    states = torch.cat([initial_states.unsqueeze(1), states], dim=1)
     decay_chunk = torch.exp(segsum(F.pad(A_cumsum[:, :, :, -1], (1, 0))))
     new_states = torch.einsum("bhzc,bchpn->bzhpn", decay_chunk, states)
     states, final_state = new_states[:, :-1], new_states[:, -1]
