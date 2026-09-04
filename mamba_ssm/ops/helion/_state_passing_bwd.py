@@ -185,7 +185,10 @@ def _state_passing_bwd_kernel(
                 dim=0,
             )
             tmp_dstates_local = A_cum * dstates_local[None, :] + B_cum
-            last_mask = hl.arange(0, block_c) == (block_c - 1)
+            # On a partial last tile (nchunks - 1 not a multiple of block_c) lane
+            # block_c - 1 is out of range and would carry garbage into the next tile;
+            # tile_c.end - 1 is this tile's last valid index.
+            last_mask = tile_c.index == (tile_c.end - 1)
             dstates_local = torch.where(
                 last_mask[:, None],
                 tmp_dstates_local,
@@ -254,7 +257,31 @@ def _state_passing_bwd_kernel(
                 tile_m.id,
             ] = hl.zeros((), dtype=torch.float32)
         else:
-            dinitstates[tile_b.begin, tile_h.begin, tile_m] = dstates_local
+            # Triton applies the recurrence once more for chunk 0 after leaving the
+            # chunk loop (ssd_state_passing.py:182-193):
+            #     dinitial_states = scale_0 * dstates[0] + dout[0]
+            # Without this step dstates[0] would leave as initial_states' gradient.
+            # (chunk 0's ddA_chunk_cumsum is already produced by the loop's last
+            # iteration.)
+            dA_cs_first_local = dA_chunk_cumsum[tile_b.begin, tile_h.begin, 0].to(
+                torch.float32
+            )
+            scale_first = torch.exp(dA_cs_first_local)
+            if HAS_SEQ_IDX:
+                # The seq_idx Triton tracks is seq_idx[chunk_size - 1] at this point,
+                # compared against the value 0 it started the loop with.
+                seq_idx_first_local = seq_idx[tile_b.begin, chunk_size - 1]
+                scale_first = torch.where(
+                    seq_idx_first_local == 0,
+                    scale_first,
+                    torch.zeros_like(scale_first),
+                )
+            dout_first_local = dout[tile_b.begin, 0, tile_h.begin, tile_m].to(
+                torch.float32
+            )
+            dinitstates[tile_b.begin, tile_h.begin, tile_m] = (
+                scale_first * dstates_local + dout_first_local
+            )
 
     ddA_chunk_cumsum = ddA_chunk_cumsum.sum(dim=-1).to(dtype=dA_chunk_cumsum.dtype)
     if states_dtype is not None and states_dtype == states.dtype:

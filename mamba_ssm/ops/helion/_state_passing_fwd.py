@@ -179,10 +179,27 @@ def _state_passing_fwd_kernel_v2(
             scale = torch.exp(dA_cs_local)
 
             if HAS_SEQ_IDX:
-                seq_idx_new_local = seq_idx[
-                    tile_b.begin, (tile_c.index + 1) * chunk_size - 1
-                ]
-                seq_idx_local = seq_idx[tile_b.begin, tile_c.index * chunk_size - 1]
+                # On a partial last tile tile_c.index runs past nchunks, and with it
+                # the seq_idx index past seqlen, so the load has to be masked.
+                chunk_valid = tile_c.index < nchunks
+                seq_idx_new_local = hl.load(
+                    seq_idx,
+                    [tile_b.begin, (tile_c.index + 1) * chunk_size - 1],
+                    extra_mask=chunk_valid,
+                )
+                # Triton initializes seq_idx = 0 before the chunk loop
+                # (ssd_state_passing.py:71). Reading this slot as seq_idx[b, -1] at
+                # chunk 0 would go out of bounds (batch 0) or pick up the previous
+                # batch row's last value (batch > 0), so substitute the constant 0.
+                first_chunk = tile_c.index == 0
+                seq_idx_local = hl.load(
+                    seq_idx,
+                    [tile_b.begin, tile_c.index * chunk_size - 1],
+                    extra_mask=chunk_valid & (tile_c.index > 0),
+                )
+                seq_idx_local = torch.where(
+                    first_chunk, torch.zeros_like(seq_idx_local), seq_idx_local
+                )
                 scale_mask = seq_idx_new_local == seq_idx_local
                 scale = torch.where(scale_mask, scale, torch.zeros_like(scale))
 
@@ -197,7 +214,9 @@ def _state_passing_fwd_kernel_v2(
             tmp_states_local = A_cum * states_local[None, :] + B_cum
             # Carry the scan's last row into the next tile. A kernel tensor cannot be
             # indexed by an integer, so the row is extracted with a one-hot mask + sum.
-            last_mask = hl.arange(0, block_c) == (block_c - 1)
+            # On a partial last tile lane block_c - 1 is out of range and would carry
+            # garbage, so key the mask on tile_c.end - 1, the last valid index.
+            last_mask = tile_c.index == (tile_c.end - 1)
             states_local = torch.where(
                 last_mask[:, None], tmp_states_local, torch.zeros_like(tmp_states_local)
             ).sum(dim=0)

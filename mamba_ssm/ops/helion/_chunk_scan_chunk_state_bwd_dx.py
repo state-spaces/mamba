@@ -206,7 +206,7 @@ def _chunk_scan_chunk_state_bwd_dx_kernel(
     dstates: torch.Tensor,
     D: Optional[torch.Tensor] = None,
     seq_idx: Optional[torch.Tensor] = None,
-    dx: Optional[torch.Tensor] = None,
+    dx: Optional[torch.Tensor] = None,  # required in practice; see host wrapper
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     batch, seqlen, nheads, headdim = x.shape
     _, _, nchunks, chunk_size = dt.shape
@@ -241,10 +241,10 @@ def _chunk_scan_chunk_state_bwd_dx_kernel(
         )
     else:
         dD = None
-    if dx is None:
-        dx = torch.empty_like(x)
-    else:
-        assert dx.shape == x.shape
+    # dx must already be a tensor: allocating it here would make Helion's type
+    # propagation merge LiteralType(None) with TensorType and fail at bind() time.
+    assert dx is not None, "dx must be preallocated by the caller"
+    assert dx.shape == x.shape
     ddt = torch.zeros(
         (batch, nheads, nchunks, chunk_size),
         device=dt.device,
@@ -446,10 +446,15 @@ def _chunk_scan_chunk_state_bwd_dx(
     seq_idx: Optional[torch.Tensor] = None,
     dx: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if dx is None:
+        dx = torch.empty_like(x)
+    else:
+        assert dx.shape == x.shape
     dx, ddt, dD = _chunk_scan_chunk_state_bwd_dx_kernel(
         x, dt, dA_cumsum, B, CB, dout, dstates, D, seq_idx, dx
     )
-    if D is not None and D.dim() == 1:
-        dD = dD.sum(dim=-1)
+    if D is not None:
+        if D.dim() == 1:
+            dD = dD.sum(dim=-1)
         dD = dD.to(dtype=D.dtype)
     return dx, ddt, dD
