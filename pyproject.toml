@@ -34,6 +34,14 @@ Repository = "https://github.com/state-spaces/mamba"
 causal-conv1d = [
     "causal-conv1d>=1.2.0"
 ]
+# Opt-in Helion kernel backend (MAMBA_USE_HELION=1); see mamba_ssm/ops/helion/README.md.
+# helion is pinned rather than lower-bounded: a config is generated for one toolchain and
+# Helion's config schema is still moving, so a different version can need re-autotuning
+# (or fail to load a config) even when the kernels themselves are unchanged.
+helion = [
+    "helion==1.4.0",
+    "triton>=3.6.0",
+]
 dev = [
     "pytest"
 ]

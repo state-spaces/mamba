@@ -14,6 +14,8 @@ import triton.language as tl
 
 from einops import rearrange
 
+from ..helion.dispatch import get_helion_layer_norm_bwd, use_helion
+
 
 def rms_norm_ref(x, weight, bias, z=None, eps=1e-6, group_size=None, norm_before_gate=True, upcast=True):
     dtype = x.dtype
@@ -372,8 +374,9 @@ class LayerNormFn(torch.autograd.Function):
         if dy.stride(-1) != 1:
             dy = dy.contiguous()
         assert dy.shape == x.shape
-        dx, dw, db, dz = _layer_norm_bwd(dy, x, weight, bias, ctx.eps, mean, rstd, z, ctx.group_size,
-                                         ctx.norm_before_gate, ctx.is_rms_norm)
+        layer_norm_bwd = get_helion_layer_norm_bwd() if use_helion() else _layer_norm_bwd
+        dx, dw, db, dz = layer_norm_bwd(dy, x, weight, bias, ctx.eps, mean, rstd, z, ctx.group_size,
+                                        ctx.norm_before_gate, ctx.is_rms_norm)
         return dx.reshape(ctx.x_shape_og), dw, db, dz.reshape(ctx.x_shape_og) if dz is not None else None, None, None, None, None
 
 

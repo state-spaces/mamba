@@ -7,6 +7,7 @@ from typing import Optional
 
 import math
 from packaging import version
+from types import SimpleNamespace
 
 import torch
 import torch.nn.functional as F
@@ -48,6 +49,8 @@ from mamba_ssm.utils.determinism import (
     finalize_tile_workspace,
     use_deterministic_mode,
 )
+
+from ..helion.dispatch import get_helion_ssd_kernels, use_helion
 
 TRITON_22 = version.parse(triton.__version__) >= version.parse('2.2.0')
 
@@ -340,7 +343,25 @@ def _chunk_scan_chunk_state_bwd_dx(x, dt, dA_cumsum, B, CB, dout, dstates, D=Non
     return dx, ddt, dD
 
 
+_TRITON_SSD_KERNELS = SimpleNamespace(
+    chunk_scan_bwd_dC=_chunk_scan_bwd_dC,
+    chunk_scan_bwd_ddAcs_stable=_chunk_scan_bwd_ddAcs_stable,
+    chunk_scan_bwd_dstates=_chunk_scan_bwd_dstates,
+    chunk_scan_chunk_state_bwd_dx=_chunk_scan_chunk_state_bwd_dx,
+    chunk_scan_fwd=_chunk_scan_fwd,
+    chunk_state_bwd_db=_chunk_state_bwd_db,
+    chunk_state_fwd=_chunk_state_fwd,
+    state_passing_bwd=_state_passing_bwd,
+    state_passing_fwd=_state_passing_fwd,
+)
+
+
+def _ssd_kernel_impls():
+    return get_helion_ssd_kernels() if use_helion() else _TRITON_SSD_KERNELS
+
+
 def _mamba_chunk_scan_combined_fwd(x, dt, A, B, C, chunk_size, D=None, z=None, dt_bias=None, initial_states=None, seq_idx=None, cu_seqlens=None, dt_softplus=False, dt_limit=(0.0, float("inf")), state_dtype=None):
+    kernels = _ssd_kernel_impls()
     batch, seqlen, nheads, headdim = x.shape
     _, _, ngroups, dstate = B.shape
     assert nheads % ngroups == 0
@@ -372,11 +393,11 @@ def _mamba_chunk_scan_combined_fwd(x, dt, A, B, C, chunk_size, D=None, z=None, d
     # dA_cumsum_tmp1, dt_tmp1 = _chunk_cumsum_fwd(dt[:, 147:], A, chunk_size, dt_bias=dt_bias, dt_softplus=dt_softplus)
     # dA_cumsum_tmp2, dt_tmp2 = _chunk_cumsum_fwd(dt[:, 147:256], A, chunk_size, dt_bias=dt_bias, dt_softplus=dt_softplus)
     dA_cumsum, dt = _chunk_cumsum_fwd(dt, A, chunk_size, dt_bias=dt_bias, dt_softplus=dt_softplus, dt_limit=dt_limit)
-    states = _chunk_state_fwd(B, x, dt, dA_cumsum, seq_idx=seq_idx, states_in_fp32=True)
+    states = kernels.chunk_state_fwd(B, x, dt, dA_cumsum, seq_idx=seq_idx, states_in_fp32=True)
     # states_tmp0 = _chunk_state_fwd(B[:, :147], x[:, :147], dt_tmp0, dA_cumsum_tmp0, states_in_fp32=True)
     # states_tmp1 = _chunk_state_fwd(B[:, 147:], x[:, 147:], dt_tmp1, dA_cumsum_tmp1, states_in_fp32=True)
     # states_tmp2 = _chunk_state_fwd(B[:, 147:256], x[:, 147:256], dt_tmp2, dA_cumsum_tmp2, states_in_fp32=True)
-    states, final_states = _state_passing_fwd(rearrange(states, "... p n -> ... (p n)"), dA_cumsum[:, :, :, -1],
+    states, final_states = kernels.state_passing_fwd(rearrange(states, "... p n -> ... (p n)"), dA_cumsum[:, :, :, -1],
                                               initial_states=rearrange(initial_states, "... p n -> ... (p n)") if initial_states is not None else None,
                                               seq_idx=seq_idx, chunk_size=chunk_size,
                                               out_dtype=state_dtype if state_dtype is not None else C.dtype)
@@ -384,7 +405,7 @@ def _mamba_chunk_scan_combined_fwd(x, dt, A, B, C, chunk_size, D=None, z=None, d
     # states_tmp0 = rearrange(_state_passing_fwd(rearrange(states_tmp0, "... p n -> ... (p n)"), dA_cumsum_tmp0[:, :, :, -1], chunk_size=chunk_size), "... (p n) -> ... p n", n=dstate)
     # states_tmp1 = rearrange(_state_passing_fwd(rearrange(states_tmp1, "... p n -> ... (p n)"), dA_cumsum_tmp1[:, :, :, -1], chunk_size=chunk_size), "... (p n) -> ... p n", n=dstate)
     CB = _bmm_chunk_fwd(C, B, chunk_size, seq_idx=seq_idx, output_dtype=torch.float32)
-    out, out_x = _chunk_scan_fwd(CB, x, dt, dA_cumsum, C, states, D=D, z=z, seq_idx=seq_idx)
+    out, out_x = kernels.chunk_scan_fwd(CB, x, dt, dA_cumsum, C, states, D=D, z=z, seq_idx=seq_idx)
     if cu_seqlens is None:
         return out, out_x, dt, dA_cumsum, states, final_states
     else:
@@ -399,6 +420,7 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
                                    dt_limit=(0.0, float("inf")),
                                    dx=None, ddt=None, dB=None, dC=None, dz=None, recompute_output=False,
                                    state_dtype=None):
+    kernels = _ssd_kernel_impls()
     if dout.stride(-1) != 1:
         dout = dout.contiguous()
     batch, seqlen, nheads, headdim = x.shape
@@ -441,8 +463,8 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
     dA_cumsum, dt = _chunk_cumsum_fwd(dt_in, A, chunk_size, dt_bias=dt_bias, dt_softplus=dt_softplus,
                                       dt_limit=dt_limit)
     CB = _bmm_chunk_fwd(C, B, chunk_size, seq_idx=seq_idx, output_dtype=torch.float32)
-    states = _chunk_state_fwd(B, x, dt, dA_cumsum, seq_idx=seq_idx, states_in_fp32=True)
-    states, _ = _state_passing_fwd(rearrange(states, "... p n -> ... (p n)"), dA_cumsum[:, :, :, -1],
+    states = kernels.chunk_state_fwd(B, x, dt, dA_cumsum, seq_idx=seq_idx, states_in_fp32=True)
+    states, _ = kernels.state_passing_fwd(rearrange(states, "... p n -> ... (p n)"), dA_cumsum[:, :, :, -1],
                                    initial_states=rearrange(initial_states, "... p n -> ... (p n)") if initial_states is not None else None,
                                    seq_idx=seq_idx, chunk_size=chunk_size)
     states = rearrange(states, "... (p n) -> ... p n", n=dstate)
@@ -452,13 +474,13 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
     else:
         dz = None
         outz = out
-    dstates = _chunk_scan_bwd_dstates(C, dA_cumsum, dout, seq_idx=seq_idx, dtype=states.dtype)
+    dstates = kernels.chunk_scan_bwd_dstates(C, dA_cumsum, dout, seq_idx=seq_idx, dtype=states.dtype)
     # dstates has length nchunks, containing the gradient to initial states at index 0 and
     # gradient to the states of chunk (nchunks - 2) at index (nchunks - 1)
     # Do computation in fp32 but convert dstates and states to fp16/bf16 since dstates and states
     # will be used in matmul in the next kernels. When state_dtype is set, keep them in that
     # dtype instead so the backward consumes states at the same precision the forward used.
-    dstates, ddA_chunk_cumsum, dinitial_states, states = _state_passing_bwd(
+    dstates, ddA_chunk_cumsum, dinitial_states, states = kernels.state_passing_bwd(
         rearrange(states, "... p n -> ... (p n)"),
         dA_cumsum[:, :, :, -1],
         rearrange(dstates, "... p n -> ... (p n)"),
@@ -476,11 +498,11 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
     states = rearrange(states, "... (p n) -> ... p n", n=dstate)
     dstates = rearrange(dstates, "... (p n) -> ... p n", n=dstate)
     dinitial_states = rearrange(dinitial_states, "... (p n) -> ... p n", n=dstate) if dinitial_states is not None else None
-    dx, ddt, dD_from_x = _chunk_scan_chunk_state_bwd_dx(x, dt, dA_cumsum, B, CB, dout, dstates, D=D, seq_idx=seq_idx, dx=dx)
+    dx, ddt, dD_from_x = kernels.chunk_scan_chunk_state_bwd_dx(x, dt, dA_cumsum, B, CB, dout, dstates, D=D, seq_idx=seq_idx, dx=dx)
     # dB = _chunk_state_bwd_db(x, dt, dA_cumsum, dstates, seq_idx=seq_idx, ngroups=ngroups)
-    dB, ddA_next = _chunk_state_bwd_db(x, dt, dA_cumsum, dstates, seq_idx=seq_idx, B=B, ngroups=ngroups)
+    dB, ddA_next = kernels.chunk_state_bwd_db(x, dt, dA_cumsum, dstates, seq_idx=seq_idx, B=B, ngroups=ngroups)
     # dC = _chunk_scan_bwd_dC(states[:, :-1].to(x.dtype), dA_cumsum, dout, seq_idx=seq_idx, ngroups=ngroups)
-    dC, ddA_cumsum_prev = _chunk_scan_bwd_dC(states.to(state_dtype if state_dtype is not None else x.dtype), dA_cumsum, dout, seq_idx=seq_idx, C=C, ngroups=ngroups)
+    dC, ddA_cumsum_prev = kernels.chunk_scan_bwd_dC(states.to(state_dtype if state_dtype is not None else x.dtype), dA_cumsum, dout, seq_idx=seq_idx, C=C, ngroups=ngroups)
     # Computing ddA with the dcb kernel is much slower, so we're not using it for now
     dCB = _chunk_scan_bwd_dcb(x, dt, dA_cumsum, dout, seq_idx=seq_idx, ngroups=ngroups)
     # dCB, ddA_tmp = _chunk_scan_bwd_dcb(x, dt, dA_cumsum, dout, seq_idx=seq_idx, CB=CB, ngroups=ngroups)
@@ -503,7 +525,7 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
     # This is already done as part of bwd_dB kernel
     # ddA_next = _chunk_state_bwd_ddAcs_stable(B, x, dt, dA_cumsum, dstates, seq_idx=seq_idx)
     # We don't need to pass in seq_idx because CB also zeros out entries where seq_idx[i] != seq_idx[j]
-    ddA = _chunk_scan_bwd_ddAcs_stable(x, dt, dA_cumsum, dout, CB)
+    ddA = kernels.chunk_scan_bwd_ddAcs_stable(x, dt, dA_cumsum, dout, CB)
     ddA += ddA_next + ddA_prev
 
     ddt_given, dA, ddt_bias = _chunk_cumsum_bwd(ddA, ddt, dt_in, A, dt_bias=dt_bias, dt_softplus=dt_softplus, dt_limit=dt_limit, ddt=ddt_given)
