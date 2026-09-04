@@ -205,8 +205,20 @@ def decode(
     def should_stop(current_token, inference_params):
         if inference_params.seqlen_offset == 0:
             return False
-        if eos_token_id is not None and (current_token == eos_token_id).all():
-            return True
+        if eos_token_id is not None:
+            # Support int, list/tuple, or 1-D tensor of EOS ids (HF-style).
+            if isinstance(eos_token_id, (list, tuple)):
+                eos_ids = torch.as_tensor(
+                    eos_token_id, device=current_token.device, dtype=current_token.dtype
+                )
+            elif torch.is_tensor(eos_token_id):
+                eos_ids = eos_token_id.to(device=current_token.device, dtype=current_token.dtype)
+            else:
+                eos_ids = torch.as_tensor(
+                    [eos_token_id], device=current_token.device, dtype=current_token.dtype
+                )
+            if torch.isin(current_token, eos_ids).all():
+                return True
         if inference_params.seqlen_offset >= max_length - 1:
             return True
         return False
