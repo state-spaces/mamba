@@ -85,6 +85,9 @@ def sample(logits, top_k=1, top_p=0.0, min_p=0.0, temperature=1.0):
     Arguments:
         logits: Tensor of shape (batch_size, vocab_size)
     """
+    # Non-positive temperature is undefined for softmax sampling; treat as greedy.
+    if temperature is not None and temperature <= 0:
+        return logits.argmax(dim=-1)
     if top_k == 1:  # Short-circuit for greedy decoding
         return logits.argmax(dim=-1)
     else:
