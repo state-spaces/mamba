@@ -36,6 +36,13 @@ Install PyTorch first. By default, `mamba-ssm` installs the core package without
 | CUDA selective scan opt-in | `MAMBA_KEEP_CUDA_BUILD=TRUE pip install mamba-ssm --no-build-isolation` | Installs `selective_scan_cuda`; pip first tries a matching prebuilt CUDA/HIP wheel, then compiles locally if no wheel is available. |
 | Force local CUDA selective scan build | `MAMBA_FORCE_BUILD=TRUE MAMBA_KEEP_CUDA_BUILD=TRUE pip install mamba-ssm --no-build-isolation` | Skips cached wheels and compiles `selective_scan_cuda` locally. |
 
+Prebuilt CUDA wheels (when using `MAMBA_KEEP_CUDA_BUILD=TRUE`) are published on
+[GitHub releases](https://github.com/state-spaces/mamba/releases) for select
+torch/CUDA/Python/platform combinations. The release CI matrix in
+`.github/workflows/publish.yaml` defines which torch versions are built; if your
+stack is newer than the latest release (e.g. torch 2.11+ on Colab), pip falls
+back to a local `selective_scan_cuda` compile with no warning beyond setup logs.
+
 `--no-build-isolation` is required for CUDA builds so that pip uses your existing CUDA-enabled
 PyTorch instead of installing torch-cpu in an isolated build environment.
 
