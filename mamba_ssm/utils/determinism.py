@@ -42,17 +42,28 @@ def _estimate_config_cost(cfg):
 
 
 def _filter_configs_by_block_sizes(configs):
-    """Filter configs by TRITON_AUTOTUNE_BLOCK_SIZE_* env vars."""
-    env_filters = {}
-    for suffix in ('M', 'N', 'K', 'DSTATE'):
-        env_val = os.environ.get(f"TRITON_AUTOTUNE_BLOCK_SIZE_{suffix}")
-        if env_val is not None:
-            env_filters[f'BLOCK_SIZE_{suffix}'] = int(env_val)
-    if not env_filters:
+    """Pin tile sizes from ``TRITON_AUTOTUNE_BLOCK*`` environment variables.
+
+    ``TRITON_AUTOTUNE_<BLOCK_KEY>=<int>`` constrains the configs whose kwargs contain
+    ``<BLOCK_KEY>`` (for example ``TRITON_AUTOTUNE_BLOCK_SIZE_H=2`` or
+    ``TRITON_AUTOTUNE_BLOCK_SIZE_M=64``). Variables naming a key that none of
+    this kernel's configs use are ignored for this kernel, so one environment
+    can pin different kernels at once; the constraints that do apply are ANDed.
+
+    Returns ``[first matching config]``, or ``None`` when no constraint applies
+    to this kernel or none of its configs satisfies them (the caller then falls
+    back to the cheapest config).
+    """
+    prefix = "TRITON_AUTOTUNE_"
+    keys_present = {key for cfg in configs for key in cfg.kwargs}
+    applicable = {}
+    for env_key, env_val in os.environ.items():
+        key = env_key[len(prefix):]
+        if env_key.startswith(prefix + "BLOCK") and key in keys_present:
+            applicable[key] = int(env_val)  # only values for this kernel's keys are parsed; "" is an error
+    if not applicable:
         return None
-    matching = configs
-    for key, target in env_filters.items():
-        matching = [c for c in matching if c.kwargs.get(key) == target]
+    matching = [c for c in configs if all(c.kwargs.get(k) == v for k, v in applicable.items())]
     return matching[:1] if matching else None
 
 
