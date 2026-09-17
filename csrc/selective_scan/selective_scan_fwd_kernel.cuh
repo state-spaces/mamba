@@ -4,9 +4,9 @@
 
 #pragma once
 
-#include <c10/util/BFloat16.h>
-#include <c10/util/Half.h>
-#include <c10/cuda/CUDAException.h>  // For C10_CUDA_CHECK and C10_CUDA_KERNEL_LAUNCH_CHECK
+#include <torch/headeronly/util/BFloat16.h>
+#include <torch/headeronly/util/Half.h>
+#include <torch/csrc/stable/macros.h>
 
 #ifndef USE_ROCM
     #include <cub/block/block_load.cuh>
@@ -102,29 +102,29 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     const int batch_id = blockIdx.x;
     const int dim_id = blockIdx.y;
     const int group_id = dim_id / (params.dim_ngroups_ratio);
-    input_t *u = reinterpret_cast<input_t *>(params.u_ptr) + batch_id * params.u_batch_stride
+    const input_t *u = reinterpret_cast<const input_t *>(params.u_ptr) + batch_id * params.u_batch_stride
         + dim_id * kNRows * params.u_d_stride;
-    input_t *delta = reinterpret_cast<input_t *>(params.delta_ptr) + batch_id * params.delta_batch_stride
+    const input_t *delta = reinterpret_cast<const input_t *>(params.delta_ptr) + batch_id * params.delta_batch_stride
         + dim_id * kNRows * params.delta_d_stride;
-    weight_t *A = reinterpret_cast<weight_t *>(params.A_ptr) + dim_id * kNRows * params.A_d_stride;
-    weight_t *B = reinterpret_cast<weight_t *>(params.B_ptr) + dim_id * kNRows * params.B_d_stride;
-    input_t *Bvar = reinterpret_cast<input_t *>(params.B_ptr) + batch_id * params.B_batch_stride + group_id * params.B_group_stride;
-    weight_t *C = reinterpret_cast<weight_t *>(params.C_ptr) + dim_id * kNRows * params.C_d_stride;
-    input_t *Cvar = reinterpret_cast<input_t *>(params.C_ptr) + batch_id * params.C_batch_stride + group_id * params.C_group_stride;
+    const weight_t *A = reinterpret_cast<const weight_t *>(params.A_ptr) + dim_id * kNRows * params.A_d_stride;
+    const weight_t *B = reinterpret_cast<const weight_t *>(params.B_ptr) + dim_id * kNRows * params.B_d_stride;
+    const input_t *Bvar = reinterpret_cast<const input_t *>(params.B_ptr) + batch_id * params.B_batch_stride + group_id * params.B_group_stride;
+    const weight_t *C = reinterpret_cast<const weight_t *>(params.C_ptr) + dim_id * kNRows * params.C_d_stride;
+    const input_t *Cvar = reinterpret_cast<const input_t *>(params.C_ptr) + batch_id * params.C_batch_stride + group_id * params.C_group_stride;
     scan_t *x = reinterpret_cast<scan_t *>(params.x_ptr) + (batch_id * params.dim + dim_id * kNRows) * params.n_chunks * params.dstate;
 
     float D_val[kNRows] = {0};
     if (params.D_ptr != nullptr) {
         #pragma unroll
         for (int r = 0; r < kNRows; ++r) {
-            D_val[r] = reinterpret_cast<float *>(params.D_ptr)[dim_id * kNRows + r];
+            D_val[r] = reinterpret_cast<const float *>(params.D_ptr)[dim_id * kNRows + r];
         }
     }
     float delta_bias[kNRows] = {0};
     if (params.delta_bias_ptr != nullptr) {
         #pragma unroll
         for (int r = 0; r < kNRows; ++r) {
-            delta_bias[r] = reinterpret_cast<float *>(params.delta_bias_ptr)[dim_id * kNRows + r];
+            delta_bias[r] = reinterpret_cast<const float *>(params.delta_bias_ptr)[dim_id * kNRows + r];
         }
     }
 
@@ -283,7 +283,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
         }
 
         if constexpr (kHasZ) {
-            input_t *z = reinterpret_cast<input_t *>(params.z_ptr) + batch_id * params.z_batch_stride
+            const input_t *z = reinterpret_cast<const input_t *>(params.z_ptr) + batch_id * params.z_batch_stride
                 + dim_id * kNRows * params.z_d_stride + chunk * kChunkSize;
             input_t *out_z = reinterpret_cast<input_t *>(params.out_z_ptr) + batch_id * params.out_z_batch_stride
                 + dim_id * kNRows * params.out_z_d_stride + chunk * kChunkSize;
@@ -330,17 +330,17 @@ void selective_scan_fwd_launch(SSMParamsBase &params, cudaStream_t stream) {
                     
                     if (kSmemSize >= 48 * 1024) {
                         #ifndef USE_ROCM
-                        C10_CUDA_CHECK(cudaFuncSetAttribute(
+                        STD_CUDA_CHECK(cudaFuncSetAttribute(
                             kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
                         #else
-                        C10_CUDA_CHECK(cudaFuncSetAttribute(
+                        STD_CUDA_CHECK(cudaFuncSetAttribute(
                             (void *) kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
                             std::cerr << "Warning (selective_scan_fwd_kernel): attempting to set maxDynamicSharedMemorySize on an AMD GPU which is currently a non-op (in ROCm versions <= 6.1). This might lead to undefined behavior. \n" << std::endl;
                         #endif
                     }
 
                     kernel<<<grid, Ktraits::kNThreads, kSmemSize, stream>>>(params);
-                    C10_CUDA_KERNEL_LAUNCH_CHECK();
+                    STD_CUDA_KERNEL_LAUNCH_CHECK();
                 });
             });
         });

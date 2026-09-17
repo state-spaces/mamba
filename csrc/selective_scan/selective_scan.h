@@ -36,16 +36,16 @@ struct SSMParamsBase {
     index_t out_z_d_stride;
 
     // Common data pointers.
-    void *__restrict__ A_ptr;
-    void *__restrict__ B_ptr;
-    void *__restrict__ C_ptr;
-    void *__restrict__ D_ptr;
-    void *__restrict__ u_ptr;
-    void *__restrict__ delta_ptr;
-    void *__restrict__ delta_bias_ptr;
+    const void *__restrict__ A_ptr;
+    const void *__restrict__ B_ptr;
+    const void *__restrict__ C_ptr;
+    const void *__restrict__ D_ptr;
+    const void *__restrict__ u_ptr;
+    const void *__restrict__ delta_ptr;
+    const void *__restrict__ delta_bias_ptr;
     void *__restrict__ out_ptr;
     void *__restrict__ x_ptr;
-    void *__restrict__ z_ptr;
+    const void *__restrict__ z_ptr;
     void *__restrict__ out_z_ptr;
 };
 
@@ -70,7 +70,7 @@ struct SSMParamsBwd: public SSMParamsBase {
     index_t ddelta_d_stride;
 
     // Common data pointers.
-    void *__restrict__ dout_ptr;
+    const void *__restrict__ dout_ptr;
     void *__restrict__ dA_ptr;
     void *__restrict__ dB_ptr;
     void *__restrict__ dC_ptr;

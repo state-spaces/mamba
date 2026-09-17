@@ -10,7 +10,12 @@
     #include <hip/hip_bf16.h>
 #endif
 #include <cuda_fp16.h>
-#include <c10/util/complex.h>  // For scalar_value_type
+#include <torch/headeronly/util/complex.h>
+
+// <c10/util/complex.h> used to pull these in transitively; the headeronly
+// replacement does not, and custom_max/constexpr_min below need them.
+#include <algorithm>
+#include <initializer_list>
 
 
 #ifndef USE_ROCM
@@ -40,7 +45,7 @@
 
 #define MAX_DSTATE 256
 
-using complex_t = c10::complex<float>;
+using complex_t = torch::headeronly::complex<float>;
 
 inline __device__ float2 operator+(const float2 & a, const float2 & b){
     return {a.x + b.x, a.y + b.y};
@@ -94,8 +99,8 @@ struct Converter{
 };
 
 template<int N>
-struct Converter<at::Half, N>{
-    static inline __device__ void to_float(const at::Half (&src)[N], float (&dst)[N]) {
+struct Converter<torch::headeronly::Half, N>{
+    static inline __device__ void to_float(const torch::headeronly::Half (&src)[N], float (&dst)[N]) {
         static_assert(N % 2 == 0);
         auto &src2 = reinterpret_cast<const half2 (&)[N / 2]>(src);
         auto &dst2 = reinterpret_cast<float2 (&)[N / 2]>(dst);
@@ -106,8 +111,8 @@ struct Converter<at::Half, N>{
 
 #if __CUDA_ARCH__ >= 800
 template<int N>
-struct Converter<at::BFloat16, N>{
-    static inline __device__ void to_float(const at::BFloat16 (&src)[N], float (&dst)[N]) {
+struct Converter<torch::headeronly::BFloat16, N>{
+    static inline __device__ void to_float(const torch::headeronly::BFloat16 (&src)[N], float (&dst)[N]) {
         static_assert(N % 2 == 0);
         auto &src2 = reinterpret_cast<const nv_bfloat162 (&)[N / 2]>(src);
         auto &dst2 = reinterpret_cast<float2 (&)[N / 2]>(dst);
@@ -176,7 +181,7 @@ template <typename scalar_t> struct SSMScanPrefixCallbackOp {
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 template<typename Ktraits>
-inline __device__ void load_input(typename Ktraits::input_t *u,
+inline __device__ void load_input(const typename Ktraits::input_t *u,
                                   typename Ktraits::input_t (&u_vals)[Ktraits::kNItems],
                                   typename Ktraits::BlockLoadT::TempStorage &smem_load,
                                   int seqlen) {
@@ -184,7 +189,7 @@ inline __device__ void load_input(typename Ktraits::input_t *u,
         auto& smem_load_vec = reinterpret_cast<typename Ktraits::BlockLoadVecT::TempStorage&>(smem_load);
         using vec_t = typename Ktraits::vec_t;
         typename Ktraits::BlockLoadVecT(smem_load_vec).Load(
-            reinterpret_cast<vec_t*>(u),
+            reinterpret_cast<const vec_t*>(u),
             reinterpret_cast<vec_t(&)[Ktraits::kNLoads]>(u_vals)
             #ifdef USE_ROCM
                 , Ktraits::kNThreads * Ktraits::kNLoads
@@ -197,7 +202,7 @@ inline __device__ void load_input(typename Ktraits::input_t *u,
 }
 
 template<typename Ktraits>
-inline __device__ void load_weight(typename Ktraits::input_t *Bvar,
+inline __device__ void load_weight(const typename Ktraits::input_t *Bvar,
                                    typename Ktraits::weight_t (&B_vals)[Ktraits::kNItems],
                                    typename Ktraits::BlockLoadWeightT::TempStorage &smem_load_weight,
                                    int seqlen) {
@@ -208,7 +213,7 @@ inline __device__ void load_weight(typename Ktraits::input_t *Bvar,
             auto& smem_load_weight_vec = reinterpret_cast<typename Ktraits::BlockLoadWeightVecT::TempStorage&>(smem_load_weight);
             using vec_t = typename Ktraits::vec_t;
             typename Ktraits::BlockLoadWeightVecT(smem_load_weight_vec).Load(
-                reinterpret_cast<vec_t*>(Bvar),
+                reinterpret_cast<const vec_t*>(Bvar),
                 reinterpret_cast<vec_t(&)[Ktraits::kNLoads]>(B_vals_load)
           );
         } else {
@@ -223,7 +228,7 @@ inline __device__ void load_weight(typename Ktraits::input_t *Bvar,
             auto& smem_load_weight_vec = reinterpret_cast<typename Ktraits::BlockLoadWeightVecT::TempStorage&>(smem_load_weight);
             using vec_t = typename Ktraits::vec_t;
             typename Ktraits::BlockLoadWeightVecT(smem_load_weight_vec).Load(
-                reinterpret_cast<vec_t*>(Bvar),
+                reinterpret_cast<const vec_t*>(Bvar),
                 reinterpret_cast<vec_t(&)[Ktraits::kNLoads * 2]>(B_vals_load)
           );
         } else {

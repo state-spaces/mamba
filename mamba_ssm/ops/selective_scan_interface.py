@@ -17,10 +17,21 @@ except ImportError:
 
 from mamba_ssm.ops.triton.layer_norm import _layer_norm_fwd
 
+selective_scan_cuda = None
+_selective_scan_fwd = None
+_selective_scan_bwd = None
 try:
-    import selective_scan_cuda
+    import selective_scan_cuda  # noqa: F811
+    if hasattr(torch.ops, "selective_scan") and hasattr(torch.ops.selective_scan, "fwd"):
+        _selective_scan_fwd = torch.ops.selective_scan.fwd
+        _selective_scan_bwd = torch.ops.selective_scan.bwd
+    else:
+        raise RuntimeError(
+            "selective_scan_cuda loaded but torch.ops.selective_scan not found. "
+            "The extension may have been built incorrectly."
+        )
 except ImportError:
-    selective_scan_cuda = None
+    pass
 
 
 def _check_selective_scan_cuda():
@@ -55,7 +66,7 @@ class SelectiveScanFn(torch.autograd.Function):
         if C.dim() == 3:
             C = rearrange(C, "b dstate l -> b 1 dstate l")
             ctx.squeeze_C = True
-        out, x, *rest = selective_scan_cuda.fwd(u, delta, A, B, C, D, z, delta_bias, delta_softplus)
+        out, x, *rest = _selective_scan_fwd(u, delta, A, B, C, D, z, delta_bias, delta_softplus)
         ctx.delta_softplus = delta_softplus
         ctx.has_z = z is not None
         last_state = x[:, :, -1, 1::2]  # (batch, dim, dstate)
@@ -80,7 +91,7 @@ class SelectiveScanFn(torch.autograd.Function):
         # The kernel supports passing in a pre-allocated dz (e.g., in case we want to fuse the
         # backward of selective_scan_cuda with the backward of chunk).
         # Here we just pass in None and dz will be allocated in the C++ code.
-        du, ddelta, dA, dB, dC, dD, ddelta_bias, *rest = selective_scan_cuda.bwd(
+        du, ddelta, dA, dB, dC, dD, ddelta_bias, *rest = _selective_scan_bwd(
             u, delta, A, B, C, D, z, delta_bias, dout, x, out, None, ctx.delta_softplus,
             False  # option to recompute out_z, not used here
         )
@@ -273,7 +284,7 @@ class MambaInnerFn(torch.autograd.Function):
             delta = rms_norm_forward(delta, dt_rms_weight, bias=None, eps=b_c_dt_rms_eps)
             delta = rearrange(delta, "(b l) d -> b d l", l=L).contiguous()
         
-        out, scan_intermediates, out_z = selective_scan_cuda.fwd(
+        out, scan_intermediates, out_z = _selective_scan_fwd(
             conv1d_out, delta, A, B, C, D, z, delta_bias, delta_softplus
         )
         ctx.delta_softplus = delta_softplus
@@ -334,7 +345,7 @@ class MambaInnerFn(torch.autograd.Function):
         dx, dz = dxz.chunk(2, dim=1)
         dout = rearrange(dout, "b l e -> e (b l)")
         dout_y = rearrange(out_proj_weight.t() @ dout, "d (b l) -> b d l", l=L)
-        dconv1d_out, ddelta, dA, dB, dC, dD, ddelta_bias, dz, out_z = selective_scan_cuda.bwd(
+        dconv1d_out, ddelta, dA, dB, dC, dD, ddelta_bias, dz, out_z = _selective_scan_bwd(
             conv1d_out, delta, A, B, C, D, z, delta_bias, dout_y, scan_intermediates, out, dz,
             ctx.delta_softplus,
             True  # option to recompute out_z
