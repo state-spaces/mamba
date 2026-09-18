@@ -10,6 +10,10 @@ import torch.nn.functional as F
 from mamba_ssm.ops.triton.layernorm_gated import RMSNorm as RMSNormGated
 
 try:
+    from mamba_ssm.ops.triton.mamba3.mamba3_siso_step import mamba3_siso_step
+except ImportError:
+    mamba3_siso_step = None
+try:
     from mamba_ssm.ops.tilelang.mamba3.mamba3_mimo import mamba3_mimo as mamba3_mimo_combined
 except ImportError:
     mamba3_mimo_combined = None
@@ -350,7 +354,7 @@ class Mamba3(nn.Module):
                 self.num_rope_angles,
             ],
             dim=-1)
-
+        trap_proj = trap # Triton fallback needs pre-sigmoid trap
         DT, B, C, x, z, trap, A, angles = self._preprocess(
             dd_A, dd_dt, B, C, x, z, trap, angles)
 
@@ -361,70 +365,101 @@ class Mamba3(nn.Module):
         # which permute the blockwise rotation matrix so that
         # the i-th entry is paired with the i+N//2-th entry:
         rotate_pairwise = not self.is_mimo
-        C, B, nxt_angle_state = apply_rotary_qk_inference_fwd(
-            q=C, k=B, angle_state=angle_state, 
-            angle_proj=angles, dt=DT, bias_q=bias_q, bias_k=bias_k, 
-            conjugate=False, inplace=False, # NOTE: inplace is incompatible with self.nheads != self.num_bc_heads
-            rotate_pairwise=rotate_pairwise)
-
-        nxt_v_state = x
-        nxt_k_state = B
-
-        if self.is_mimo:
-            xpj = rearrange(self.mimo_x, "h r p -> r h p", p=self.headdim).contiguous()
-            zpj = rearrange(self.mimo_z, "h r p -> r h p", p=self.headdim).contiguous()
-            outpj = rearrange(self.mimo_o, "h r p -> r h p", p=self.headdim).contiguous()
+        use_cute_step = self.is_mimo or (self.headdim % 64 == 0)
+        headdim_pow2 = (self.headdim & (self.headdim - 1)) == 0
+        if not use_cute_step and (not headdim_pow2 or self.is_outproj_norm):
+            raise NotImplementedError(
+            f"Mamba3.step() does not support headdim={self.headdim}"
+        + (" with is_outproj_norm=True" if self.is_outproj_norm else "")
+        + ". The CuTe step kernel requires headdim % 64 == 0 (it hardcodes "
+        "tile_D=64 without bounds checking, causing out-of-bounds writes that "
+        "corrupt model weights, see #1024), and the Triton fallback requires "
+        "a power-of-two headdim"
+        + (" and does not implement outproj_norm" if self.is_outproj_norm else "")
+        + ". Please use headdim in {16, 32, 64} (or any multiple of 64).")
+        if not use_cute_step:
+            if self.is_outproj_norm:
+                raise NotImplementedError(
+                    "Mamba3.step() does not yet support is_outproj_norm=True with "
+                    f"headdim={self.headdim} (not divisible by tile_D=64). "
+                    "The CuTe step kernel would perform out-of-bounds accesses in "
+                    "this configuration (see issue #1024).")
+            assert mamba3_siso_step is not None, (
+                    "Triton step kernel is required for headdim not divisible by 64. "
+                    "Please ensure triton is installed.")
+            y, (nxt_angle_state, state_out, nxt_k_state, nxt_v_state) = mamba3_siso_step(
+                Q=C.squeeze(1), K=B.squeeze(1), V=x,
+                ADT=A * DT, DT=DT, Trap=trap_proj,
+                Q_bias=self.C_bias.squeeze(1), K_bias=self.B_bias.squeeze(1),
+                Angles=angles, D=self.D, Z=z,
+                Input_States=(angle_state, ssm_state, k_state.squeeze(1), v_state))
+            nxt_k_state = nxt_k_state.unsqueeze(1)
+            ssm_state.copy_(state_out)
         else:
-            xpj = torch.ones(self.mimo_rank, self.nheads, self.headdim, device=x.device, dtype=x.dtype)
-            zpj = torch.ones(self.mimo_rank, self.nheads, self.headdim, device=z.device, dtype=z.dtype)
-            outpj = torch.ones(self.mimo_rank, self.nheads, self.headdim, device=x.device, dtype=x.dtype)
+            C, B, nxt_angle_state = apply_rotary_qk_inference_fwd(
+                q=C, k=B, angle_state=angle_state, 
+                angle_proj=angles, dt=DT, bias_q=bias_q, bias_k=bias_k, 
+                conjugate=False, inplace=False, # NOTE: inplace is incompatible with self.nheads != self.num_bc_heads
+                rotate_pairwise=rotate_pairwise)
 
-        if self.is_outproj_norm:
-            batch = x.shape[0]
-            y = torch.empty(batch, self.mimo_rank, self.nheads, self.headdim, device=x.device, dtype=x.dtype)
-            mamba3_step_fn(
-                ssm_state,
-                k_state,
-                v_state,
-                A,
-                B,
-                C,
-                self.D,
-                x,
-                DT,
-                trap,
-                xpj,
-                outproj=None,
-                state_out=None, # can be not in place if pass in state_out
-                out=y,
-                z=None,
-                zproj=None,
-                tile_D=64,
-                num_warps=4,
-            )
-            y = self._postprocess(y, outpj, z, zpj, self.headdim)
-        else:
-            y = torch.empty_like(x)
-            mamba3_step_fn(
-                ssm_state,
-                k_state,
-                v_state,
-                A,
-                B,
-                C,
-                self.D,
-                x,
-                DT,
-                trap,
-                xpj,
-                outproj=outpj,
-                state_out=None, # can be not in place if pass in state_out
-                out=y,
-                z=z,
-                zproj=zpj,
-                tile_D=64,
-                num_warps=4,
-            )
+            nxt_v_state = x
+            nxt_k_state = B
+
+            if self.is_mimo:
+                xpj = rearrange(self.mimo_x, "h r p -> r h p", p=self.headdim).contiguous()
+                zpj = rearrange(self.mimo_z, "h r p -> r h p", p=self.headdim).contiguous()
+                outpj = rearrange(self.mimo_o, "h r p -> r h p", p=self.headdim).contiguous()
+            else:
+                xpj = torch.ones(self.mimo_rank, self.nheads, self.headdim, device=x.device, dtype=x.dtype)
+                zpj = torch.ones(self.mimo_rank, self.nheads, self.headdim, device=z.device, dtype=z.dtype)
+                outpj = torch.ones(self.mimo_rank, self.nheads, self.headdim, device=x.device, dtype=x.dtype)
+
+            if self.is_outproj_norm:
+                batch = x.shape[0]
+                y = torch.empty(batch, self.mimo_rank, self.nheads, self.headdim, device=x.device, dtype=x.dtype)
+                mamba3_step_fn(
+                    ssm_state,
+                    k_state,
+                    v_state,
+                    A,
+                    B,
+                    C,
+                    self.D,
+                    x,
+                    DT,
+                    trap,
+                    xpj,
+                    outproj=None,
+                    state_out=None, # can be not in place if pass in state_out
+                    out=y,
+                    z=None,
+                    zproj=None,
+                    tile_D=64,
+                    num_warps=4,
+                )
+                y = self._postprocess(y, outpj, z, zpj, self.headdim)
+            else:
+                y = torch.empty_like(x)
+                mamba3_step_fn(
+                    ssm_state,
+                    k_state,
+                    v_state,
+                    A,
+                    B,
+                    C,
+                    self.D,
+                    x,
+                    DT,
+                    trap,
+                    xpj,
+                    outproj=outpj,
+                    state_out=None, # can be not in place if pass in state_out
+                    out=y,
+                    z=z,
+                    zproj=zpj,
+                    tile_D=64,
+                    num_warps=4,
+                )
 
         # out_proj
         out = rearrange(y, "b h p -> b (h p)")
