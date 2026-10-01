@@ -1047,7 +1047,7 @@ def mamba_split_conv1d_scan_ref(zxbcdt, conv1d_weight, conv1d_bias, dt_bias, A, 
     out = rearrange(out, "b s h p -> b s (h p)")
     if rmsnorm_weight is not None:
         out = rmsnorm_fn(out, rmsnorm_weight, None, z=rearrange(z, "b l h p -> b l (h p)"), eps=rmsnorm_eps,
-                         norm_before_gate=norm_before_gate)
+                         group_size=dim // ngroups, norm_before_gate=norm_before_gate)
     if outproj_weight is not None:
         out = F.linear(out, outproj_weight, outproj_bias)
     return out

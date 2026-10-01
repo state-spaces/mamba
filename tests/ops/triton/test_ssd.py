@@ -76,3 +76,30 @@ def test_chunk_state_varlen(chunk_size, ngroups, dtype):
     out_ref = torch.cat(out_ref, dim=0)
     print(f"Max diff = {(out - out_ref).abs().max().item()}")
     assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
+
+
+@pytest.mark.parametrize("ngroups", [1, 2, 4])
+@pytest.mark.parametrize("norm_before_gate", [False, True])
+def test_split_conv1d_scan_ref_grouped_rmsnorm(ngroups, norm_before_gate):
+    # Different head scales expose normalization across the wrong groups.
+    device = "cuda"
+    batch, seqlen, nheads, headdim, dstate = 2, 64, 4, 32, 16
+    dim = nheads * headdim
+    conv_dim = dim + 2 * ngroups * dstate
+    torch.manual_seed(0)
+    kwargs = dict(
+        zxbcdt=torch.randn(batch, seqlen, 2 * dim + 2 * ngroups * dstate + nheads, device=device) / 5,
+        conv1d_weight=torch.randn(conv_dim, 4, device=device) / 5,
+        conv1d_bias=torch.randn(conv_dim, device=device) / 5,
+        dt_bias=torch.randn(nheads, device=device) - 4,
+        A=-torch.rand(nheads, device=device),
+        D=torch.tensor([1.0, 10.0, 100.0, 1000.0], device=device),
+        chunk_size=64,
+        rmsnorm_weight=torch.ones(dim, device=device),
+        headdim=headdim,
+        ngroups=ngroups,
+        norm_before_gate=norm_before_gate,
+    )
+    out = mamba_split_conv1d_scan_combined(**kwargs)
+    out_ref = mamba_split_conv1d_scan_ref(**kwargs)
+    torch.testing.assert_close(out, out_ref, rtol=1e-3, atol=1e-3)
