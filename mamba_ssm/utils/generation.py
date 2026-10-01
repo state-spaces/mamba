@@ -59,6 +59,8 @@ def modify_logits_for_top_p_filtering(logits, top_p):
     cumulative_probs = sorted_logits.softmax(dim=-1).cumsum(dim=-1)
     # Remove tokens with cumulative top_p above the threshold (token with 0 are kept)
     sorted_indices_to_remove = cumulative_probs <= (1 - top_p)
+    # Rounding can make the threshold 1.0; always keep the most likely token.
+    sorted_indices_to_remove[..., -1] = False
     # scatter sorted tensors to original indexing
     indices_to_remove = sorted_indices_to_remove.scatter(
         1, sorted_indices, sorted_indices_to_remove
