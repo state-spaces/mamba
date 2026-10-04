@@ -154,6 +154,11 @@ def decode(
         streamer.put(input_ids.cpu())
 
     batch_size, seqlen_og = input_ids.shape
+    if seqlen_og >= max_length:
+        if streamer is not None:
+            streamer.end()
+        return GenerateDecoderOnlyOutput(sequences=input_ids, scores=())
+
     teacher_output_len = teacher_outputs.shape[1] if teacher_outputs is not None else 0
     if cg:
         if not hasattr(model, "_decoding_cache"):
