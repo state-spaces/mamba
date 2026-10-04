@@ -276,7 +276,10 @@ class ParallelEmbeddings(nn.Module):
         position_ids: (batch, seqlen)
         """
         batch_size, seqlen = input_ids.shape
-        world_size = torch.distributed.get_world_size(self.process_group)
+        world_size = (
+            torch.distributed.get_world_size(self.process_group)
+            if self.process_group is not None else 1
+        )
         embeddings = self.word_embeddings(input_ids)
         if self.max_position_embeddings > 0:
             if position_ids is None:
