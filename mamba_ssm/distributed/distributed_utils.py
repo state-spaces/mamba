@@ -123,7 +123,7 @@ def allreduce_sequence_parallel_grad(model: torch.nn.Module, process_group: Proc
     params_seqparallel = {
         name: p for name, p in model.named_parameters() if getattr(p, "_sequence_parallel", False)
     }
-    grads = [p.grad for _, p in sorted(params_seqparallel.items())]
+    grads = [p.grad for _, p in sorted(params_seqparallel.items()) if p.grad is not None]
     if grads:
         with torch.no_grad():
             coalesced = torch._utils._flatten_dense_tensors(grads)
