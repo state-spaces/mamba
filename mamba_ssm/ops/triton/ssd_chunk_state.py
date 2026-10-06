@@ -36,7 +36,7 @@ def init_to_zero(names):
     ]),
     key=['chunk_size', 'nheads'],
 )
-@triton.jit
+@triton.jit(do_not_specialize=['seqlen', 'stride_dt_batch'])
 def _chunk_cumsum_fwd_kernel(
     # Pointers to matrices
     dt_ptr, A_ptr, dt_bias_ptr, dt_out_ptr, dA_cumsum_ptr,
@@ -98,7 +98,7 @@ def _chunk_cumsum_fwd_kernel(
     ]),
     key=['chunk_size', 'nheads'],
 )
-@triton.jit
+@triton.jit(do_not_specialize=['seqlen', 'stride_dA_batch', 'stride_ddt_batch', 'stride_ddt_bias_batch', 'stride_dt_batch'])
 def _chunk_cumsum_bwd_kernel(
     # Pointers to matrices
     ddA_ptr, ddt_out_ptr, dt_ptr, A_ptr, dt_bias_ptr,
@@ -188,7 +188,7 @@ def _chunk_cumsum_bwd_kernel(
     ]),
     key=['hdim', 'dstate', 'chunk_size'],
 )
-@triton.jit
+@triton.jit(do_not_specialize=['seqlen', 'stride_seq_idx_batch'])
 def _chunk_state_fwd_kernel(
     # Pointers to matrices
     x_ptr, b_ptr, states_ptr, dt_ptr, dA_cumsum_ptr, seq_idx_ptr,
@@ -394,7 +394,7 @@ _CHUNK_STATE_BWD_DX_MIN_BLOCK_N = min(
     ]),
     key=['chunk_size', 'dstate', 'hdim'],
 )
-@triton.jit
+@triton.jit(do_not_specialize=['seqlen', 'stride_seq_idx_batch', 'nheads_per_program'])
 def _chunk_state_bwd_db_kernel(
     # Pointers to matrices
     x_ptr, dstates_ptr, b_ptr, dt_ptr, dA_cumsum_ptr, seq_idx_ptr,

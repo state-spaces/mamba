@@ -4,6 +4,7 @@ import torch
 import torch.nn.functional as F
 
 import pytest
+from triton import knobs
 
 from einops import rearrange, repeat
 
@@ -19,6 +20,61 @@ from mamba_ssm.ops.triton.ssd_combined import mamba_split_conv1d_scan_combined, 
 
 def detach_clone(*args):
     return tuple([arg.detach().clone().requires_grad_() if arg is not None else None for arg in args])
+
+
+@pytest.mark.parametrize('use_seq_idx', [False, True])
+def test_chunk_scan_dynamic_seqlen(use_seq_idx):
+    generator = torch.Generator(device='cuda').manual_seed(0)
+
+    def run(bounds):
+        seqlen = bounds[-1]
+
+        def sample(shape, dtype=torch.bfloat16):
+            return torch.randn(shape, device='cuda', dtype=dtype, generator=generator)
+
+        inputs = (
+            sample((1, seqlen, 8, 64)),
+            sample((1, seqlen, 8)) - 3.0,
+            -sample((8,), torch.float32).exp(),
+            sample((1, seqlen, 2, 128)),
+            sample((1, seqlen, 2, 128)),
+            sample((8,), torch.float32),
+            sample((8,), torch.float32) * 0.2,
+        )
+        x, dt, A, B, C, D, dt_bias = (value.requires_grad_() for value in inputs)
+        seq_idx = None
+        if use_seq_idx:
+            seq_idx = torch.cat([
+                torch.full((end - start,), i, device='cuda', dtype=torch.int32)
+                for i, (start, end) in enumerate(zip(bounds[:-1], bounds[1:]))
+            ]).unsqueeze(0)
+        out = mamba_chunk_scan_combined(
+            x, dt, A, B, C, chunk_size=128, D=D, dt_bias=dt_bias,
+            dt_softplus=True, seq_idx=seq_idx,
+        )
+        torch.autograd.grad(out, inputs, sample(out.shape))
+        torch.cuda.synchronize()
+
+    # Warm both forward and backward with a partial final chunk.
+    run((0, 17, 1023))
+    cache_misses = []
+
+    def record_cache_miss(fn, **kwargs):
+        cache_misses.append(fn.name)
+
+    # The JIT hook also sees new specializations loaded from the disk cache.
+    with knobs.runtime.scope():
+        knobs.runtime.jit_cache_hook = record_cache_miss
+        for bounds in (
+            (0, 17, 1025),          # Different number of chunks.
+            (0, 1, 17, 128, 1025),  # Different packed sequence boundaries.
+            (0, 17, 128),           # One chunk and a length divisible by 16.
+            (0, 17, 4097),          # Also changes backward head scheduling.
+            (0, 1),                # Triton normally specializes scalars equal to 1.
+        ):
+            cache_misses.clear()
+            run(bounds)
+            assert not cache_misses, f'{bounds=}: {cache_misses}'
 
 
 @pytest.mark.parametrize('dtype', [torch.float32, torch.float16, torch.bfloat16])

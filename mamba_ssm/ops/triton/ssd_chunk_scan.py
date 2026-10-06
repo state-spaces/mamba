@@ -45,7 +45,7 @@ def init_to_zero(names):
     ]),
     key=['chunk_size', 'hdim', 'dstate', 'IS_CAUSAL'],
 )
-@triton.jit
+@triton.jit(do_not_specialize=['seqlen', 'stride_seq_idx_batch'])
 def _chunk_scan_fwd_kernel(
     # Pointers to matrices
     cb_ptr, x_ptr, z_ptr, out_ptr, out_x_ptr, dt_ptr, dA_cumsum_ptr, seq_idx_ptr, C_ptr, prev_states_ptr, D_ptr,
@@ -445,7 +445,7 @@ def _chunk_scan_bwd_dz_kernel(
     ]),
     key=['hdim', 'dstate', 'chunk_size'],
 )
-@triton.jit
+@triton.jit(do_not_specialize=['nchunks', 'seqlen', 'stride_seq_idx_batch'])
 def _chunk_scan_bwd_dstates_kernel(
     # Pointers to matrices
     dout_ptr, c_ptr, dprev_states_ptr, dA_cumsum_ptr, seq_idx_ptr,
@@ -526,7 +526,7 @@ def _chunk_scan_bwd_dstates_kernel(
     ]),
     key=['chunk_size', 'dstate', 'hdim'],
 )
-@triton.jit
+@triton.jit(do_not_specialize=['seqlen', 'stride_seq_idx_batch', 'nheads_per_program'])
 def _chunk_scan_bwd_dc_kernel(
     # Pointers to matrices
     dout_ptr, prev_states_ptr, C_ptr, dA_cumsum_ptr, seq_idx_ptr,
@@ -770,7 +770,7 @@ _CHUNK_SCAN_BWD_DX_MIN_BLOCK_N = min(
 )
 # @triton.heuristics({"BLOCK_SIZE_N": lambda args: max(triton.next_power_of_2(args["chunk_size"]), 16)})
 # @triton.heuristics({"BLOCK_SIZE_N": lambda args: 32})
-@triton.jit
+@triton.jit(do_not_specialize=['seqlen', 'stride_seq_idx_batch', 'nheads_per_program'])
 def _chunk_scan_bwd_dcb_kernel(
     # Pointers to matrices
     x_ptr, dout_ptr, cb_ptr, dt_ptr, dA_cumsum_ptr, seq_idx_ptr,
@@ -1094,7 +1094,7 @@ def _chunk_scan_bwd_ddAcs_stable_kernel_old(
     ]),
     key=['chunk_size', 'hdim'],
 )
-@triton.jit
+@triton.jit(do_not_specialize=['seqlen'])
 def _chunk_scan_bwd_ddAcs_stable_kernel(
     # Pointers to matrices
     x_ptr, dout_ptr, dt_ptr, dA_cumsum_ptr, cb_ptr,
