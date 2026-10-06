@@ -4,27 +4,8 @@
 
 #pragma once
 
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-struct SSMScanParamsBase {
-    using index_t = uint32_t;
-
-    int batch, seqlen, n_chunks;
-    index_t a_batch_stride;
-    index_t b_batch_stride;
-    index_t out_batch_stride;
-
-    // Common data pointers.
-    void *__restrict__ a_ptr;
-    void *__restrict__ b_ptr;
-    void *__restrict__ out_ptr;
-    void *__restrict__ x_ptr;
-};
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
 struct SSMParamsBase {
-    using index_t = uint32_t;
+    using index_t = uint64_t;
 
     int batch, dim, seqlen, dstate, n_groups, n_chunks;
     int dim_ngroups_ratio;

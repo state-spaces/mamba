@@ -1,0 +1,73 @@
+name: Build wheels in a container
+
+on:
+  workflow_dispatch:
+    inputs:
+      runs-on:
+        description: "The runner to use for the build"
+        required: true
+        type: string
+        default: ubuntu-22.04
+      container-image:
+        description: "Container image"
+        required: true
+        type: string
+      upload-to-release:
+        description: "Upload wheel to this release"
+        required: false
+        type: boolean
+        default: false
+      release-version:
+        description: "Release version tag to checkout and upload to"
+        required: false
+        type: string
+
+  push:
+    tags-ignore:
+      - v*
+
+jobs:
+  get_version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get_version.outputs.version }}
+    steps:
+      - name: Get version from input or git
+        id: get_version
+        run: |
+          if [ -n "${{ inputs.release-version }}" ]; then
+            echo "version=${{ inputs.release-version }}" >> $GITHUB_OUTPUT
+          else
+            # Get the latest tag from the repo
+            git clone --filter=blob:none --no-checkout $GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git repo
+            cd repo
+            echo "version=$(git describe --tags --abbrev=0)" >> $GITHUB_OUTPUT
+          fi
+        shell: bash
+
+  check_for_ngc_images:
+    runs-on: ubuntu-latest
+    outputs:
+      images: ${{ steps.check_for_ngc_images.outputs.IMAGES }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check for NGC PyTorch images
+        id: check_for_ngc_images
+        run: |
+          bash ./.github/scripts/check_for_ngc_images.sh
+          echo "IMAGES=$(cat ngc_images.json| jq -cr)" >> $GITHUB_OUTPUT
+
+  build-wheels:
+    needs: [get_version, check_for_ngc_images]
+    uses: ./.github/workflows/_build_in_container.yml
+    strategy:
+      fail-fast: false
+      matrix:
+        container-image: ${{ fromJson(needs.check_for_ngc_images.outputs.images) }}
+    with:
+      runs-on: ${{ inputs.runs-on || 'ubuntu-22.04' }}
+      container-image: ${{ matrix.container-image }}
+      upload-to-release: ${{ inputs.upload-to-release || false }}
+      release-version: ${{ needs.get_version.outputs.version }}
