@@ -33,7 +33,7 @@ def init_to_zero(names):
     ]),
     key=['chunk_size', 'K', 'IS_CAUSAL'],
 )
-@triton.jit
+@triton.jit(do_not_specialize=['seqlen', 'stride_seq_idx_batch'])
 def _bmm_chunk_fwd_kernel(
     # Pointers to matrices
     a_ptr, b_ptr, out_ptr, seq_idx_ptr,
@@ -107,7 +107,7 @@ def _bmm_chunk_fwd_kernel(
     ]),
     key=['chunk_size', 'K'],
 )
-@triton.jit
+@triton.jit(do_not_specialize=['seqlen'])
 def _bmm_chunk_bwd_kernel(
     # Pointers to matrices
     a_ptr, dout_ptr, db_ptr, res_ptr,

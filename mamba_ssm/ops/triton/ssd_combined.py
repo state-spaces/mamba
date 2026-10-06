@@ -89,7 +89,7 @@ def ensure_stride(inp):
     ]),
     key=['chunk_size', 'hdim', 'dstate'],
 )
-@triton.jit
+@triton.jit(do_not_specialize=['seqlen', 'stride_dD_batch', 'stride_dD_csize', 'stride_seq_idx_batch'])
 def _chunk_scan_chunk_state_bwd_dx_kernel(
     # Pointers to matrices
     x_ptr, cb_ptr, dout_ptr, dt_ptr, dA_cumsum_ptr, seq_idx_ptr, D_ptr,

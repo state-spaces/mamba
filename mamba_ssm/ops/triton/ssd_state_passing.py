@@ -26,7 +26,7 @@ from mamba_ssm.utils.determinism import autotune_configs
     ]),
     key=['dim'],
 )
-@triton.jit
+@triton.jit(do_not_specialize=['nchunks', 'seqlen', 'stride_seq_idx_batch'])
 def _state_passing_fwd_kernel(
     # Pointers to matrices
     states_ptr, out_ptr, final_states_ptr, dA_cs_ptr, initstates_ptr, seq_idx_ptr,
@@ -98,7 +98,7 @@ def _state_passing_fwd_kernel(
     ]),
     key=['dim'],
 )
-@triton.jit
+@triton.jit(do_not_specialize=['nchunks', 'seqlen', 'stride_seq_idx_batch'])
 def _state_passing_bwd_kernel(
     # Pointers to matrices
     dout_ptr, out_ptr, dA_cs_ptr, dfinal_states_ptr, seq_idx_ptr,
