@@ -21,11 +21,9 @@ dependencies = [
     "apache-tvm-ffi<=0.1.12",
     "quack-kernels>=0.3.4",
     "triton>=3.5.0",
-    "ninja",
     "einops",
     "transformers",
     "packaging",
-    "setuptools>=61.0.0",
 ]
 [project.urls]
 Repository = "https://github.com/state-spaces/mamba"
