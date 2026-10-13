@@ -488,7 +488,10 @@ def mamba3_siso_bwd_kernel_dqkv(
         acc_dq = tl.dot(tl.trans(s_block).to(k_block.dtype), k_block)  # (CHUNK_SIZE, HEADDIM_QK)
 
         # Inter-chunk: gradient through states from previous chunks
-        acc_dq += tl.dot(do_block, ssm_states_block) * exp_da_cs[:, None]
+        # dO @ States is also reused below for dADT Part 2 (saves one MMA and one
+        # tensor-memory accumulator on Blackwell, see note there).
+        dOS = tl.dot(do_block, ssm_states_block)  # (CHUNK_SIZE, HEADDIM_QK)
+        acc_dq += dOS * exp_da_cs[:, None]
 
         dq_desc.store([chunk_start, 0], acc_dq)
 
@@ -564,9 +567,14 @@ def mamba3_siso_bwd_kernel_dqkv(
         # ============================================================
         # Compute dADT Gradient (Part 2): From Inter-chunk States
         # ============================================================
-        # Gradient from Q @ States^T term
-        QS = tl.dot(q_block, tl.trans(ssm_states_block))  # (CHUNK_SIZE, HEADDIM_V)
-        dM_rev_vector += tl.sum(QS * dO_reloaded, axis=1) * exp_da_cs  # (CHUNK_SIZE,)
+        # Gradient from Q @ States^T term:
+        #   rowsum((Q @ States^T) * dO) == rowsum(Q * (dO @ States))
+        # The right-hand form reuses dOS from the dQ computation instead of a
+        # separate Q @ States^T MMA. Besides saving the MMA, this keeps the
+        # kernel's tensor-memory footprint on SM100 at <= 512 columns so that
+        # num_warps >= 4 configs compile (each distinct tl.dot result is a
+        # separate TMEM accumulator that is hoisted out of the chunk loop).
+        dM_rev_vector += tl.sum(q_block.to(tl.float32) * dOS, axis=1) * exp_da_cs  # (CHUNK_SIZE,)
 
         # ============================================================
         # Compute dADT Gradient (Part 3): From State Accumulation
