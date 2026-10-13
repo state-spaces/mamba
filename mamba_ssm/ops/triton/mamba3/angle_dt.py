@@ -162,7 +162,7 @@ def angle_dt_fwd(
     if init_state is not None:
         assert init_state.shape == (num_sequences, nheads, dim), f"init_state shape mismatch: {init_state.shape}"
 
-    out = torch.empty_like(angle)
+    out = torch.empty_like(angle, dtype=torch.float32)
     BLOCK_D = triton.next_power_of_2(dim)
 
     # Handle None init_state for kernel
@@ -175,7 +175,7 @@ def angle_dt_fwd(
 
     # Handle output_state
     if return_output_state:
-        output_state = torch.empty(num_sequences, nheads, dim, device=angle.device, dtype=angle.dtype)
+        output_state = torch.empty(num_sequences, nheads, dim, device=angle.device, dtype=torch.float32)
         stride_output_state = output_state.stride()
     else:
         output_state = out  # dummy, won't be accessed
