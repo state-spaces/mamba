@@ -985,7 +985,7 @@ def test_mamba3_siso_fwd_blackwell_regression(nheads_qk=4, has_Z=True, has_D=Tru
     )
 
     # Kernel: full-sequence Triton forward via mamba3_siso_combined
-    out_kernel, *_ = mamba3_siso_combined(
+    out_kernel = mamba3_siso_combined(
         inputs["Q"], inputs["K"], inputs["V"],
         inputs["ADT"], inputs["DT"], inputs["Trap"],
         inputs["Q_bias"], inputs["K_bias"], inputs["Angles"],
