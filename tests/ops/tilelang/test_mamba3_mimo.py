@@ -2402,3 +2402,68 @@ def test_bwd_varlen_prereduce_relative_errors_lt_10pct(
     )
     for name, (ours, ref) in comparisons.items():
         assert_stable_rel(ours, ref, label=f"bwd_varlen_prereduce_{name}", cfg=cfg)
+
+
+# ---------------------------------------------------------------------------
+# Fixed-length path with seqlen not a multiple of chunk_size
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("seqlen", [15, 37, 100])
+def test_mamba_mimo_forward_backward_seqlen_not_multiple_of_chunk(
+    mods: SimpleNamespace, seqlen: int
+) -> None:
+    """Fixed-length (non-varlen) forward+backward with a partial last chunk.
+
+    The TileLang kernels handle a partial last chunk, but the Triton helpers
+    that finish ddt/dtrap used to assert ``S % chunk_size == 0`` (and
+    ``bwd_dtrap_ddt_triton`` silently dropped the tail chunk).  Check that the
+    ragged run matches the same inputs zero-padded to a chunk multiple, with
+    zero upstream gradient on the padding: by causality the outputs and
+    gradients on the first ``seqlen`` tokens must agree.
+    """
+    chunk_size = 16
+    batch = 2
+    assert seqlen % chunk_size != 0
+    seqlen_pad = math.ceil(seqlen / chunk_size) * chunk_size
+
+    padded = make_smoke_inputs(
+        batch=batch, seqlen=seqlen_pad, mimo_rank=4, nheads_qk=FIXED_G, nheads=FIXED_H,
+        headdim_qk=64, headdim_v=64, chunk_size=chunk_size,
+        rotary_dim_divisor=FIXED_ROTARY_DIM_DIVISOR, device="cuda", dtype=FIXED_DTYPE, seed=7,
+    )
+    # Zero the per-token decay/trapezoid inputs on the padding so the padded run
+    # sees no "next token" after position seqlen-1 (matches the ragged run).
+    with torch.no_grad():
+        for name in ("ADT", "DT", "Trap"):
+            padded[name][:, :, seqlen:] = 0
+
+    seq_dim = {"Q": 1, "K": 1, "V": 1, "Angles": 1, "Z": 1, "ADT": 2, "DT": 2, "Trap": 2}
+    ragged = {}
+    for name, value in padded.items():
+        if name in seq_dim:
+            ragged[name] = value.detach().narrow(seq_dim[name], 0, seqlen).clone().requires_grad_(True)
+        elif isinstance(value, Tensor):
+            ragged[name] = value.detach().clone().requires_grad_(True)
+        else:
+            ragged[name] = value
+
+    out_pad = mods.top.mamba3_mimo(**padded)
+    out = mods.top.mamba3_mimo(**ragged)
+    assert out.shape == (batch, seqlen, FIXED_H, 64)
+    assert max_rel_err(out, out_pad[:, :seqlen]) < 1e-2
+
+    torch.manual_seed(0)
+    dout = torch.randn_like(out)
+    dout_pad = torch.zeros_like(out_pad)
+    dout_pad[:, :seqlen] = dout
+    out_pad.backward(dout_pad)
+    out.backward(dout)
+
+    for name, dim in seq_dim.items():
+        assert ragged[name].grad is not None, f"Missing gradient for {name}"
+        ref = padded[name].grad.narrow(dim, 0, seqlen)
+        assert torch.isfinite(ragged[name].grad).all(), f"Non-finite gradient for {name}"
+        assert max_rel_err(ragged[name].grad, ref) < 2e-2, f"d{name} mismatch vs padded run"
+    for name in ("Q_bias", "K_bias", "MIMO_V", "MIMO_Z", "MIMO_Out", "D"):
+        assert ragged[name].grad is not None, f"Missing gradient for {name}"
+        assert max_rel_err(ragged[name].grad, padded[name].grad) < 2e-2, f"d{name} mismatch vs padded run"

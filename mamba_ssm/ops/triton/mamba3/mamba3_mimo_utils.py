@@ -166,6 +166,7 @@ def bwd_segsum_dadt_kernel(
     H: tl.constexpr,
     nchunks: tl.constexpr,
     C: tl.constexpr,
+    S: tl.constexpr,
     CHUNK_SIZE: tl.constexpr,
 ):
     """Accumulate the inter-token segsum contribution of dSSdA into ddt.
@@ -200,9 +201,16 @@ def bwd_segsum_dadt_kernel(
                     pid_head * stride_ddt_head +
                     offs_seq * stride_ddt_seq)
 
+    # The last chunk may be partial (S % CHUNK_SIZE != 0): only (i, j) pairs
+    # with both tokens inside the sequence contribute.
+    seq_mask = offs_seq < S
+    pair_mask = seq_mask[:, None] & seq_mask[None, :]
+
     # dSSdA is stored as (seq_k × seq_q); swap row/col strides to transpose on load.
-    dSSdA_block = tl.load(dSSdA_offset + offs_c[:, None]*stride_dSSdA_col + offs_c[None, :]*stride_dSSdA_row)
-    SSdA_block  = tl.load(SSdA_offset  + offs_c[:, None]*stride_SSdA_row  + offs_c[None, :]*stride_SSdA_col)
+    dSSdA_block = tl.load(dSSdA_offset + offs_c[:, None]*stride_dSSdA_col + offs_c[None, :]*stride_dSSdA_row,
+                          mask=pair_mask, other=0.0)
+    SSdA_block  = tl.load(SSdA_offset  + offs_c[:, None]*stride_SSdA_row  + offs_c[None, :]*stride_SSdA_col,
+                          mask=pair_mask, other=0.0)
 
     dSSdA_block = dSSdA_block * tl.exp(SSdA_block)
     dSSdA_block = tl.cumsum(dSSdA_block, axis=0, reverse=True)
@@ -212,9 +220,9 @@ def bwd_segsum_dadt_kernel(
     SS_mask = offs_i > offs_j
     dSSdA = tl.where(SS_mask, dSSdA_block, 0.0)
 
-    ddt_chunk = tl.load(ddt_ptrs)
+    ddt_chunk = tl.load(ddt_ptrs, mask=seq_mask, other=0.0)
     ddt_chunk += tl.sum(dSSdA, axis=1)
-    tl.store(ddt_ptrs, ddt_chunk)
+    tl.store(ddt_ptrs, ddt_chunk, mask=seq_mask)
 
 
 # ============================================================================
@@ -500,7 +508,10 @@ def dacs_segsum_kernel(
     tl.store(da_cs_rev_ptr + base_da_cs_rev + offs_seq * stride_da_cs_rev_seq, da_cs_rev, mask=mask)
 
     broadcasted_indices = tl.zeros_like(offs)
-    segsum = tl.load(da_ptr + base_da + offs_seq[:, None] * stride_da_seq + broadcasted_indices[None, :])
+    segsum = tl.load(
+        da_ptr + base_da + offs_seq[:, None] * stride_da_seq + broadcasted_indices[None, :],
+        mask=mask[:, None] & (offs[None, :] < CHUNK_SIZE), other=0.0,
+    )
     offs_i = offs[:, None]
     offs_j = offs[None, :]
     segsum = tl.where(offs_i > offs_j, segsum, 0.0)
@@ -533,15 +544,14 @@ def bwd_dadt_fused_triton(
     multiplied by NEG_LOG2E = -log2(e) ≈ -1.4427 by the caller to obtain the
     final ddt in log2-decay space.
 
-    S must be a multiple of chunk_size.
+    S need not be a multiple of chunk_size; the last chunk may be partial.
 
     Returns
     -------
     dadt_out : float32 tensor of shape [B, H, S]
     """
     B, H, S = ddA_cs.shape
-    nchunks = S // chunk_size
-    assert S % chunk_size == 0, f"Sequence length {S} must be divisible by chunk_size {chunk_size}"
+    nchunks = (S + chunk_size - 1) // chunk_size
     assert dSSdA.shape == (B, H, nchunks, chunk_size, chunk_size), \
         f"dSSdA shape mismatch: expected {(B, H, nchunks, chunk_size, chunk_size)}, got {dSSdA.shape}"
 
@@ -566,7 +576,7 @@ def bwd_dadt_fused_triton(
         SSdA.stride(0), SSdA.stride(1), SSdA.stride(2),
         SSdA.stride(3), SSdA.stride(4),
         dadt_out.stride(0), dadt_out.stride(1), dadt_out.stride(2),
-        B, H, nchunks, chunk_size,
+        B, H, nchunks, chunk_size, S,
         CHUNK_SIZE=chunk_size,
     )
 
@@ -587,7 +597,7 @@ def bwd_dtrap_ddt_triton(
     dtrap : tensor same shape and dtype as trap  (gradient w.r.t. trap_presigmoid)
     """
     B, H, S = dt.shape
-    nchunks = S // chunk_size
+    nchunks = (S + chunk_size - 1) // chunk_size
 
     ddt = torch.zeros_like(dt)
     dtrap = torch.zeros_like(trap)
