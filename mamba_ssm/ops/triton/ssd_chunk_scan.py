@@ -29,8 +29,32 @@ def init_to_zero(names):
     return lambda nargs: [nargs[name].zero_() for name in names if nargs[name] is not None]
 
 
+def _drop_racy_wgmma_configs(configs):
+    """Drop the configs that Triton miscompiles on sm90 (Hopper).
+
+    With whole warpgroups (num_warps % 4 == 0) and BLOCK_SIZE_M % 64 == 0,
+    `tl.dot(cb, x)` lowers to wgmma with `cb` in registers. With
+    num_stages > 1, Triton leaves that wgmma running across the loop
+    back-edge while the next iteration overwrites the registers of `cb`,
+    which writes NaN/Inf into whole output rows.
+
+    Ported from vllm-project/vllm#61718; root cause is
+    triton-lang/triton#9433 (fixed in Triton >= 3.8.0 only).
+    """
+    if not (torch.cuda.is_available()
+            and torch.cuda.get_device_capability(0) == (9, 0)):
+        return configs
+    return [
+        c
+        for c in configs
+        if c.num_stages == 1
+        or c.num_warps % 4 != 0
+        or c.kwargs["BLOCK_SIZE_M"] % 64 != 0
+    ]
+
+
 @triton.autotune(
-    configs=autotune_configs([
+    configs=autotune_configs(_drop_racy_wgmma_configs([
         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64}, num_stages=3, num_warps=8),
         triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4),
         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4),
@@ -42,7 +66,7 @@ def init_to_zero(names):
         triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32}, num_stages=5, num_warps=2),
         triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32}, num_stages=5, num_warps=2),
         triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=2),
-    ]),
+    ])),
     key=['chunk_size', 'hdim', 'dstate', 'IS_CAUSAL'],
 )
 @triton.jit
