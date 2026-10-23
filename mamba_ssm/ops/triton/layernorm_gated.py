@@ -13,6 +13,7 @@ import triton
 import triton.language as tl
 
 from einops import rearrange
+from mamba_ssm.utils.torch import device_ctx
 
 
 def rms_norm_ref(x, weight, bias, z=None, eps=1e-6, group_size=None, norm_before_gate=True, upcast=True):
@@ -136,7 +137,7 @@ def _layer_norm_fwd(x, weight, bias, eps, z=None, out=None, group_size=None, nor
     # heuristics for number of warps
     num_warps = min(max(BLOCK_N // 256, 1), 8)
     grid = (M, ngroups)
-    with torch.cuda.device(x.device.index):
+    with device_ctx(x.device):
         _layer_norm_fwd_1pass_kernel[grid](x, out, weight, bias, z, mean, rstd,
                                            x.stride(0), out.stride(0), z.stride(0) if z is not None else 0,
                                            M, group_size, eps,
@@ -306,7 +307,13 @@ def _layer_norm_bwd(dy, x, weight, bias, eps, mean, rstd, z=None, group_size=Non
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
     # heuristics for number of warps
     num_warps = min(max(BLOCK_N // 256, 1), 8)
-    sm_count = torch.cuda.get_device_properties(x.device).multi_processor_count
+    # torch_npu exposes multi_processor_count as None; fall back to the NPU
+    # core-count attributes. Non-NPU devices keep the original CUDA path.
+    if x.device.type == "npu":
+        _props = torch.npu.get_device_properties(x.device)
+        sm_count = getattr(_props, "vector_core_num", None) or getattr(_props, "multi_processor_count", None) or 1
+    else:
+        sm_count = torch.cuda.get_device_properties(x.device).multi_processor_count
     # If group size is small (e.g., 64), we're only using 1 warp. So having just 108 programs
     # would limit the occupancy.
     nrow_groups = math.ceil(sm_count * math.ceil(4 / num_warps) / ngroups)
@@ -314,7 +321,7 @@ def _layer_norm_bwd(dy, x, weight, bias, eps, mean, rstd, z=None, group_size=Non
     _db = torch.empty((nrow_groups, N), dtype=torch.float32, device=bias.device) if bias is not None else None
     rows_per_program = math.ceil(M / nrow_groups)
     grid = (nrow_groups, ngroups)
-    with torch.cuda.device(x.device.index):
+    with device_ctx(x.device):
         _layer_norm_bwd_kernel[grid](x, weight, bias, z, out if recompute_output else None,
                                      dy, dx, _dw, _db, dz, mean, rstd,
                                      x.stride(0),
