@@ -11,7 +11,7 @@ from mamba_ssm.ops.triton.layernorm_gated import RMSNorm as RMSNormGated
 
 try:
     from mamba_ssm.ops.tilelang.mamba3.mamba3_mimo import mamba3_mimo as mamba3_mimo_combined
-except ImportError:
+except Exception:
     mamba3_mimo_combined = None
 
 from mamba_ssm.ops.triton.mamba3.mamba3_siso_combined import mamba3_siso_combined
@@ -20,7 +20,7 @@ from mamba_ssm.ops.triton.mamba3.mamba3_mimo_rotary_step import apply_rotary_qk_
 
 try:
     from mamba_ssm.ops.cute.mamba3.mamba3_step_fn import mamba3_step_fn
-except ImportError:    
+except Exception:
     mamba3_step_fn = None
 
 
