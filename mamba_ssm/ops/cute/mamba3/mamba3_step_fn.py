@@ -15,6 +15,11 @@ import cutlass
 import cutlass.cute as cute
 from cutlass import Int32, Float32, Float16, BFloat16, Boolean, const_expr
 
+try:
+    from cutlass.memory import SmemAllocator  # nvidia-cutlass-dsl >= 4.8
+except ImportError:
+    from cutlass.utils import SmemAllocator
+
 from quack.compile_utils import make_fake_tensor
 from quack.cute_dsl_utils import torch2cute_dtype_map
 
@@ -294,7 +299,7 @@ class Mamba3Step():
         # ///////////////////////////////////////////////////////////////////////////////
         #  Generate smem tensors
         # ///////////////////////////////////////////////////////////////////////////////
-        smem = cutlass.utils.SmemAllocator()
+        smem = SmemAllocator()
         storage = smem.allocate(self.shared_storage)
 
         sState = storage.sState.get_tensor(sState_layout)

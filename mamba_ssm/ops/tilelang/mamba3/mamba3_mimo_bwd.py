@@ -935,7 +935,11 @@ def mamba_mimo_bwd_bwd(
                     T.copy(MIMO_V[i_h, :, :], Psi_dD_frag)
                     for cs, r, p in T.Parallel(chunk_size, R, P):
                         dPhiO_frag[cs, r, p] *= v_dD_frag[cs, p] * Psi_dD_frag[r, p]
-                    T.reduce_sum(T.view(dPhiO_frag, shape=[fused_chunk_size*P]), dD_frag, clear=False)
+                    dD_rowsum_frag = T.alloc_fragment([chunk_size, R], accum_dtype)
+                    T.reduce_sum(dPhiO_frag, dD_rowsum_frag, dim=-1, clear=True)
+                    dD_chunk_frag = T.alloc_fragment([chunk_size], accum_dtype)
+                    T.reduce_sum(dD_rowsum_frag, dD_chunk_frag, dim=-1, clear=True)
+                    T.reduce_sum(dD_chunk_frag, dD_frag, dim=-1, clear=False)
 
                 # --- Prepare Rotated/Scaled QK and Compute dPsiV ---
                 # Load q and apply q_bias to it:
@@ -1096,13 +1100,10 @@ def mamba_mimo_bwd_bwd(
                 for cs, r_out, r_in in T.Parallel(chunk_size, R, R):
                     dgamma_diag_prereduce_frag[cs, r_out, r_in] *= dqk_from_diag_shared[cs*R + r_out, cs*R + r_in]
 
+                dgamma_diag_rowsum_frag = T.alloc_fragment([chunk_size, R], accum_dtype)
+                T.reduce_sum(dgamma_diag_prereduce_frag, dgamma_diag_rowsum_frag, dim=-1, clear=True)
                 dgamma_diag_reduced_frag = T.alloc_fragment([chunk_size], accum_dtype)
-                T.reduce_sum(
-                    T.view(dgamma_diag_prereduce_frag, shape=[chunk_size, R*R]),
-                    dgamma_diag_reduced_frag,
-                    dim=-1,
-                    clear=True
-                    )
+                T.reduce_sum(dgamma_diag_rowsum_frag, dgamma_diag_reduced_frag, dim=-1, clear=True)
                 T.copy(dgamma_diag_reduced_frag, DGAMMA_DIAG[i_b, i_h, chunk_start:chunk_start+chunk_size])
                 # Apply shifted gamma to dqk:
                 gamma_qk_frag = T.alloc_fragment([chunk_size], accum_dtype)
@@ -1116,13 +1117,22 @@ def mamba_mimo_bwd_bwd(
                 T.gemm(PsiV_shared, dstates_shared, dk_frag, transpose_B=True, clear_accum=True)
 
                 # Compute contribution to ddA from KV part of state update (part 1 of 4)
+                # Row-reduce over N in dk_frag's GEMM layout, then sum each group of R rows
+                # through shared memory: TileLang 0.1.15 cannot lower a single reduction
+                # over the [chunk_size, R*N] regrouping of this fragment.
                 ddA_state_kv_prereduce_frag = T.alloc_fragment([fused_chunk_size, N], accum_dtype)
                 T.copy(k_shared, ddA_state_kv_prereduce_frag)
                 for csr, n in T.Parallel(fused_chunk_size, N):
                     ddA_state_kv_prereduce_frag[csr, n] *= dk_frag[csr, n]
-                ddA_state_kv_prereduce_frag_reshaped = T.view(ddA_state_kv_prereduce_frag, shape=[chunk_size, R*N])
+                ddA_state_kv_row_frag = T.alloc_fragment([fused_chunk_size], accum_dtype)
+                T.reduce_sum(ddA_state_kv_prereduce_frag, ddA_state_kv_row_frag, dim=-1, clear=True)
+                ddA_state_kv_row_shared = T.alloc_shared([fused_chunk_size], accum_dtype)
+                T.copy(ddA_state_kv_row_frag, ddA_state_kv_row_shared)
                 ddA_state_kv_frag = T.alloc_fragment([chunk_size], accum_dtype)
-                T.reduce_sum(ddA_state_kv_prereduce_frag_reshaped, ddA_state_kv_frag, dim=-1, clear=True)
+                T.clear(ddA_state_kv_frag)
+                for cs in T.Parallel(chunk_size):
+                    for r in T.serial(R):
+                        ddA_state_kv_frag[cs] += ddA_state_kv_row_shared[cs*R + r]
                 T.copy(ddA_state_kv_frag, DDA_CS_REV[i_b, i_h, chunk_start:chunk_start+chunk_size])
 
                 # Interchunk path uses k_scaled * exp(dA_cs_rev) in forward,
@@ -1138,16 +1148,17 @@ def mamba_mimo_bwd_bwd(
                 T.gemm(PsiV_shared, dPhiO_shared, dk_intrachunk_frag, transpose_B=True, clear_accum=True)
 
                 # Compute contribution to ddA from intrachunk (part 2 of 4)
-                kq_frag = T.alloc_fragment([fused_chunk_size, fused_chunk_size], dtype)
-                T.copy(lkq_masked__or__dkq_masked_shared, kq_frag)
-                for csr_i, csr_j in T.Parallel(fused_chunk_size, fused_chunk_size):
-                    kq_frag[csr_i, csr_j] *= dk_intrachunk_frag[csr_i, csr_j]
-                kq_frag_reshaped = T.view(kq_frag, shape=[fused_chunk_size, chunk_size, R])
-                interchunk_dda_prereduce_frag = T.alloc_fragment([fused_chunk_size, chunk_size], accum_dtype)
-                T.reduce_sum(kq_frag_reshaped, interchunk_dda_prereduce_frag, dim=-1, clear=True)
-                interchunk_dda_prereduce_frag_reshaped = T.view(interchunk_dda_prereduce_frag, shape=[chunk_size, R, chunk_size])
+                kq_frag = T.alloc_fragment([chunk_size, R, chunk_size, R], dtype)
+                for cs_i, r_i, cs_j, r_j in T.Parallel(chunk_size, R, chunk_size, R):
+                    kq_frag[cs_i, r_i, cs_j, r_j] = T.cast(
+                        lkq_masked__or__dkq_masked_shared[cs_i*R + r_i, cs_j*R + r_j]
+                        * dk_intrachunk_frag[cs_i*R + r_i, cs_j*R + r_j],
+                        dtype,
+                    )
+                interchunk_dda_prereduce_frag = T.alloc_fragment([chunk_size, R, chunk_size], accum_dtype)
+                T.reduce_sum(kq_frag, interchunk_dda_prereduce_frag, dim=-1, clear=True)
                 interchunk_dda_frag = T.alloc_fragment([chunk_size, chunk_size], accum_dtype)
-                T.reduce_sum(interchunk_dda_prereduce_frag_reshaped, interchunk_dda_frag, dim=1, clear=True)
+                T.reduce_sum(interchunk_dda_prereduce_frag, interchunk_dda_frag, dim=1, clear=True)
                 T.copy(interchunk_dda_frag, DSSDA[i_b, i_h, chunk_idx, :, :])
 
                 for csr_i, csr_j in T.Parallel(fused_chunk_size, fused_chunk_size):
@@ -1165,13 +1176,20 @@ def mamba_mimo_bwd_bwd(
                 T.copy(dk_shared, dk_nodiag_frag)
                 T.gemm(lkq_masked__or__dkq_masked_shared, q_shared, dk_nodiag_frag, clear_accum=False) # Adding dk_interchunk to dkq_intrachunk @ q
                 # Compute dfactor, using dk_nodiag_frag:
-                k_factor_frag = T.alloc_fragment([chunk_size, R, N], accum_dtype)
-                T.copy(k_pre_trap_shared, T.view(k_factor_frag, shape=[fused_chunk_size, N]))
-                dfactor_prereduce_frag = T.alloc_fragment([chunk_size, R, N], accum_dtype)
-                for cs, r, n in T.Parallel(chunk_size, R, N):
-                    dfactor_prereduce_frag[cs, r, n] = k_factor_frag[cs, r, n] * dk_nodiag_frag[cs*R + r, n]
+                # Same two-stage reduction as ddA_state_kv above.
+                dfactor_prereduce_frag = T.alloc_fragment([fused_chunk_size, N], accum_dtype)
+                T.copy(k_pre_trap_shared, dfactor_prereduce_frag)
+                for csr, n in T.Parallel(fused_chunk_size, N):
+                    dfactor_prereduce_frag[csr, n] *= dk_nodiag_frag[csr, n]
+                dfactor_row_frag = T.alloc_fragment([fused_chunk_size], accum_dtype)
+                T.reduce_sum(dfactor_prereduce_frag, dfactor_row_frag, dim=-1, clear=True)
+                dfactor_row_shared = T.alloc_shared([fused_chunk_size], accum_dtype)
+                T.copy(dfactor_row_frag, dfactor_row_shared)
                 dfactor_frag = T.alloc_fragment([chunk_size], accum_dtype)
-                T.reduce_sum(T.view(dfactor_prereduce_frag, shape=[chunk_size, R*N]), dfactor_frag, dim=-1, clear=True)
+                T.clear(dfactor_frag)
+                for cs in T.Parallel(chunk_size):
+                    for r in T.serial(R):
+                        dfactor_frag[cs] += dfactor_row_shared[cs*R + r]
                 T.copy(dfactor_frag, DFACTOR[i_b, i_h, chunk_start:chunk_start+chunk_size])
                 # Account for the effect of trap_scale = gamma + shifted_gamma:
                 trap_scale_dk_frag = T.alloc_fragment([chunk_size], dtype)
@@ -1186,23 +1204,24 @@ def mamba_mimo_bwd_bwd(
                 # Contribution from state passing.
                 T.copy(states_frag, states_shared)
                 ddA_state_passing = T.alloc_fragment([1], T.float32)
-                ddA_state_passing_prereduce_frag = T.alloc_fragment([N, P], T.float32)
                 da_cs_sum = T.alloc_var(T.float32)
                 if tail_len > 0 and chunk_idx == nchunks - 1:
                     T.copy(DA_CS[i_b, i_h, S - 1], da_cs_sum)
                 else:
                     T.copy(DA_CS[i_b, i_h, chunk_start+chunk_size-1], da_cs_sum)
+                # Accumulate per thread, then reduce across the block once. TileLang 0.1.15
+                # cannot reduce a flattened [N*P] view, and reducing over P first costs one
+                # block-wide AllReduce per N row this thread owns.
+                ddA_state_passing_acc = T.alloc_reducer([1], T.float32, op="sum")
+                T.reducer_init(ddA_state_passing_acc)
                 for n, p in T.Parallel(N, P):
-                    ddA_state_passing_prereduce_frag[n, p] = (
+                    T.reducer_update(
+                        ddA_state_passing_acc[0],
                         states_frag[n, p]
                         * dstates_frag[n, p]
                         * T.exp(da_cs_sum)
                     )
-                T.reduce_sum(
-                    T.view(ddA_state_passing_prereduce_frag, shape=[N*P]),
-                    ddA_state_passing,
-                    dim=-1, clear=True,
-                )
+                T.finalize_reducer(ddA_state_passing_acc, ddA_state_passing)
                 dda_frag = T.alloc_fragment([chunk_size,], T.float32)
                 for cs in T.Parallel(chunk_size):
                     dda_frag[cs] = ddA_state_passing[0]
@@ -1211,13 +1230,20 @@ def mamba_mimo_bwd_bwd(
                 dq_frag = T.alloc_fragment([fused_chunk_size, N], accum_dtype)
                 T.gemm(dPhiO_shared, states_shared, dq_frag, transpose_B=True, clear_accum=True)
                 # Contribution from applying dA_cs to q * state.
+                # Same two-stage reduction as ddA_state_kv above.
                 dda_cs_prereduce_frag = T.alloc_fragment([fused_chunk_size, N], accum_dtype)
                 T.copy(q_shared, dda_cs_prereduce_frag)
                 for csr, n in T.Parallel(fused_chunk_size, N):
                     dda_cs_prereduce_frag[csr, n] *= dq_frag[csr, n]
+                dda_cs_row_frag = T.alloc_fragment([fused_chunk_size], accum_dtype)
+                T.reduce_sum(dda_cs_prereduce_frag, dda_cs_row_frag, dim=-1, clear=True)
+                dda_cs_row_shared = T.alloc_shared([fused_chunk_size], accum_dtype)
+                T.copy(dda_cs_row_frag, dda_cs_row_shared)
                 dda_cs_frag = T.alloc_fragment([chunk_size], accum_dtype)
-                T.reduce_sum(T.view(dda_cs_prereduce_frag, shape=[chunk_size, R*N]),
-                             dda_cs_frag, dim=-1, clear=True)
+                T.clear(dda_cs_frag)
+                for cs in T.Parallel(chunk_size):
+                    for r in T.serial(R):
+                        dda_cs_frag[cs] += dda_cs_row_shared[cs*R + r]
                 T.copy(dda_cs_frag, DDA_CS[i_b, i_h, chunk_start:chunk_start+chunk_size])
 
                 dA_cs_dq_frag = T.alloc_fragment([chunk_size], T.float32)

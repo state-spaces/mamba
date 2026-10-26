@@ -136,6 +136,8 @@ if KEEP_CUDA_BUILD:
     print("\n\ntorch.__version__  = {}\n\n".format(torch.__version__))
     TORCH_MAJOR = int(torch.__version__.split(".")[0])
     TORCH_MINOR = int(torch.__version__.split(".")[1])
+    # PyTorch 2.14 headers require C++20 (ATen.h errors out otherwise).
+    CXX_STD = "-std=c++20" if (TORCH_MAJOR, TORCH_MINOR) >= (2, 14) else "-std=c++17"
 
     cc_flag = []
 
@@ -210,10 +212,10 @@ if KEEP_CUDA_BUILD:
     if HIP_BUILD:
 
         extra_compile_args = {
-            "cxx": ["-O3", "-std=c++17"],
+            "cxx": ["-O3", CXX_STD],
             "nvcc": [
                 "-O3",
-                "-std=c++17",
+                CXX_STD,
                 f"--offload-arch={os.getenv('HIP_ARCHITECTURES', 'native')}",
                 "-U__CUDA_NO_HALF_OPERATORS__",
                 "-U__CUDA_NO_HALF_CONVERSIONS__",
@@ -223,11 +225,11 @@ if KEEP_CUDA_BUILD:
         }
     else:
         extra_compile_args = {
-            "cxx": ["-O3", "-std=c++17"],
+            "cxx": ["-O3", CXX_STD],
             "nvcc": append_nvcc_threads(
                 [
                     "-O3",
-                    "-std=c++17",
+                    CXX_STD,
                     "-U__CUDA_NO_HALF_OPERATORS__",
                     "-U__CUDA_NO_HALF_CONVERSIONS__",
                     "-U__CUDA_NO_BFLOAT16_OPERATORS__",
@@ -399,9 +401,9 @@ setup(
         "einops",
         "triton>=3.5.0",
         "transformers",
-        "tilelang==0.1.8",
-        "apache-tvm-ffi<=0.1.12",
-        "quack-kernels>=0.3.4",
+        "tilelang==0.1.15",
+        "apache-tvm-ffi>=0.1.12,<0.1.13",
+        "quack-kernels>=0.6.5",
         # "causal_conv1d>=1.4.0",
     ],
 )

@@ -17,9 +17,9 @@ classifiers = [
 ]
 dependencies = [
     "torch",
-    "tilelang==0.1.8",
-    "apache-tvm-ffi<=0.1.12",
-    "quack-kernels>=0.3.4",
+    "tilelang==0.1.15",
+    "apache-tvm-ffi>=0.1.12,<0.1.13",
+    "quack-kernels>=0.6.5",
     "triton>=3.5.0",
     "ninja",
     "einops",
