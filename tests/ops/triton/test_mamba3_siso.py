@@ -665,9 +665,66 @@ def test_mamba3_siso_combined_batched(nheads_qk=4, has_Z=True, has_D=True, headd
         err = relative_error(inputs['Input_States'][i].grad, inputs_ref['Input_States'][i].grad, name=f"dInput_{state_name}_State")
         print(f"dInput_{state_name}_State error: {err:.2e}")
 
-# ================================================================== 
+# ==================================================================
+# Rotary-angle gradient vs sequence length
+# ==================================================================
+
+# dAngles is a reverse cumsum over the whole sequence of per-token angle gradients. Each of those terms carries
+# bf16-level error, so summing them chunk by chunk makes the error grow with seqlen (roughly as sqrt(seqlen)) while
+# the true sum does not. The backward now takes the gradient carried across chunk boundaries from the SSM states
+# (<dStates, States J> + a constant fixed by the last chunk), so the error should stay flat in seqlen.
+@pytest.mark.parametrize("seqlen", [512, 4096])
+def test_mamba3_siso_angle_grad_long_seq(seqlen, nheads_qk=1, has_Z=True, has_D=True, headdim_qk=64):
+    device = 'cuda'
+    rtol = 3e-2
+    dtype = torch.bfloat16
+    torch.random.manual_seed(0)
+
+    batch = 1
+    nheads = 4
+    headdim_v = 64
+
+    inputs = create_mamba3_siso_inputs(
+        batch, seqlen, nheads, nheads_qk, headdim_qk, headdim_v,
+        dtype, device, has_D=has_D, has_Z=has_Z, has_input_states=True,
+        requires_grad=True
+    )
+    # float64 reference on the same (bf16-rounded) inputs
+    inputs_ref = {
+        k: (None if v is None else
+            tuple(x.detach().double().requires_grad_() for x in v) if isinstance(v, tuple) else
+            v.detach().double().requires_grad_())
+        for k, v in inputs.items()
+    }
+    Out_ref, Final_States_ref = mamba3_siso_fwd_ref(
+        inputs_ref['Q'], inputs_ref['K'], inputs_ref['V'],
+        inputs_ref['ADT'], inputs_ref['DT'], inputs_ref['Trap'],
+        inputs_ref['Q_bias'], inputs_ref['K_bias'], inputs_ref['Angles'],
+        inputs_ref['D'], inputs_ref['Z'], inputs_ref['Input_States'],
+        dtype=torch.float64,
+    )
+    outs = mamba3_siso_combined(
+        inputs['Q'], inputs['K'], inputs['V'],
+        inputs['ADT'], inputs['DT'], inputs['Trap'],
+        inputs['Q_bias'], inputs['K_bias'], inputs['Angles'],
+        inputs['D'], inputs['Z'], inputs['Input_States'],
+        chunk_size=64,
+        return_final_states=True,
+    )
+    outs_ref = [Out_ref, *Final_States_ref]
+    cots = [torch.randn_like(o, dtype=torch.float64) for o in outs_ref]
+    torch.autograd.backward(outs_ref, cots)
+    torch.autograd.backward(list(outs), [c.to(o.dtype) for c, o in zip(cots, outs)])
+
+    for grad_name in ['Angles', 'DT']:
+        ker, ref = inputs[grad_name].grad.double(), inputs_ref[grad_name].grad
+        err = ((ker - ref).norm() / ref.norm()).item()
+        print(f"seqlen {seqlen}: d{grad_name} normwise relative error {err:.2e}")
+        assert err < rtol, f"d{grad_name} normwise relative error {err:.2e} exceeds {rtol} at seqlen {seqlen}"
+
+# ==================================================================
 # Triton Forward+Backward Varlen Kernel Test
-# ================================================================== 
+# ==================================================================
 
 # Combined Forward+Backward varlen mode test
 # NOTE: Relative erros for tensors are within 6-8% (especially when they are reduced). 

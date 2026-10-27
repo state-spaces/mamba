@@ -226,14 +226,14 @@ def angle_dt_fwd(
         for s in [1, 2, 3]
         for w in [2, 4, 8]
     ],
-    key=["CHUNK_SIZE", "BLOCK_D", "HAS_INIT_STATE", "HAS_GRAD_OUTPUT_STATE", "IS_VARLEN"],
+    key=["CHUNK_SIZE", "BLOCK_D", "HAS_INIT_STATE", "HAS_GRAD_OUTPUT_STATE", "IS_VARLEN", "HAS_BOUNDARY_TERMS"],
 )
 @triton.jit
 def angle_dt_bwd_kernel(
     # Outputs
     GRAD_ANGLE, GRAD_DT, GRAD_INIT_STATE,
     # Inputs
-    GRAD_OUT, GRAD_OUTPUT_STATE, ANGLE, DT, CU_SEQLENS,
+    GRAD_OUT, GRAD_OUTPUT_STATE, ANGLE, DT, CU_SEQLENS, BOUNDARY_TERMS,
     # Strides for GRAD_ANGLE (batch, seqlen, nheads, dim)
     stride_grad_angle_batch, stride_grad_angle_seq, stride_grad_angle_head, stride_grad_angle_dim,
     # Strides for GRAD_DT (batch, nheads, seqlen)
@@ -250,6 +250,8 @@ def angle_dt_bwd_kernel(
     stride_dt_batch, stride_dt_head, stride_dt_seq,
     # Stride for CU_SEQLENS
     stride_cu_seqlen,
+    # Strides for BOUNDARY_TERMS (num_sequences, nheads, nchunks, dim)
+    stride_bnd_seq, stride_bnd_head, stride_bnd_chunk, stride_bnd_dim,
     # Dimensions
     seqlen, dim,
     # Meta-parameters
@@ -258,6 +260,7 @@ def angle_dt_bwd_kernel(
     HAS_INIT_STATE: tl.constexpr,
     HAS_GRAD_OUTPUT_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    HAS_BOUNDARY_TERMS: tl.constexpr,
 ):
     pid_h = tl.program_id(0)
     pid_b = tl.program_id(1)
@@ -295,11 +298,24 @@ def angle_dt_bwd_kernel(
     else:
         grad_state = tl.zeros((BLOCK_D,), dtype=tl.float32)
 
+    # With BOUNDARY_TERMS, the gradient carried into chunk c from later chunks is not accumulated over chunks:
+    # carry_c = B_{c+1} + const, where B_c = <dStates_c, States_c J> (from compute_dqkv) and const is fixed by the
+    # last chunk, whose carry is computed as usual. Accumulating per-token terms over many chunks lets their
+    # rounding errors grow with the sequence length; this keeps the error at the level of a single chunk.
+    bnd_const = tl.zeros((BLOCK_D,), dtype=tl.float32)
+
     # Loop in reverse: derivative of cumsum is reverse cumsum
     for chunk_idx in range(nchunks - 1, -1, -1):
         chunk_start = chunk_idx * CHUNK_SIZE
         seq_range = tl.arange(0, CHUNK_SIZE)
         seq_mask = (chunk_start + seq_range) < seq_len
+
+        if HAS_BOUNDARY_TERMS:
+            bnd_next = tl.load(
+                BOUNDARY_TERMS + seq_idx * stride_bnd_seq + pid_h * stride_bnd_head
+                + (chunk_idx + 1) * stride_bnd_chunk + dim_range * stride_bnd_dim,
+                mask=dim_mask & (chunk_idx + 1 < nchunks), other=0.0)
+            grad_state = tl.where(chunk_idx == nchunks - 1, grad_state, bnd_next + bnd_const)
 
         # Load grad_out (CHUNK_SIZE, BLOCK_D)
         grad_out_ptrs = GRAD_OUT + (chunk_start + seq_range[:, None]) * stride_grad_out_seq + dim_range[None, :] * stride_grad_out_dim
@@ -335,6 +351,12 @@ def angle_dt_bwd_kernel(
 
         # Update state for previous chunk
         grad_state = grad_state + chunk_sum
+        if HAS_BOUNDARY_TERMS:
+            bnd_here = tl.load(
+                BOUNDARY_TERMS + seq_idx * stride_bnd_seq + pid_h * stride_bnd_head
+                + chunk_idx * stride_bnd_chunk + dim_range * stride_bnd_dim,
+                mask=dim_mask, other=0.0)
+            bnd_const = tl.where(chunk_idx == nchunks - 1, grad_state - bnd_here, bnd_const)
 
     # Store gradient for init_state if provided
     if HAS_INIT_STATE:
@@ -350,6 +372,7 @@ def angle_dt_bwd(
     chunk_size: int = 64,
     grad_output_state: Optional[Tensor] = None,
     cu_seqlens: Optional[Tensor] = None,
+    boundary_terms: Optional[Tensor] = None,
 ) -> Tuple[Tensor, Tensor, Optional[Tensor]]:
     """Backward pass for angle * dt cumsum.
 
@@ -361,6 +384,9 @@ def angle_dt_bwd(
         chunk_size: Chunk size for chunked computation
         grad_output_state: Gradient of output state (num_sequences, nheads, dim) or None
         cu_seqlens: Cumulative sequence lengths (num_sequences + 1,) for varlen mode
+        boundary_terms: Optional (num_sequences, nheads, nchunks, dim) fp32, B_c = <dStates_c, States_c J> from
+            compute_dqkv. If given, the gradient carried across chunk boundaries is B_{c+1} + const instead of a
+            running sum over chunks. Not supported in varlen mode.
 
     Returns:
         grad_angle: Gradient for angle       (batch, seqlen, nheads, dim)
@@ -405,6 +431,16 @@ def angle_dt_bwd(
         cu_seqlens = angle  # dummy, won't be accessed
         stride_cu_seqlen = 0
 
+    # Handle boundary_terms
+    HAS_BOUNDARY_TERMS = boundary_terms is not None
+    if HAS_BOUNDARY_TERMS:
+        assert not is_varlen, "boundary_terms is not supported in varlen mode"
+        assert boundary_terms.shape == (num_sequences, nheads, triton.cdiv(seqlen, chunk_size), dim), boundary_terms.shape
+        stride_bnd = boundary_terms.stride()
+    else:
+        boundary_terms = grad_angle  # dummy, won't be accessed
+        stride_bnd = (0, 0, 0, 0)
+
     # Grid setup
     if is_varlen:
         grid = (nheads, batch, num_sequences)
@@ -413,7 +449,7 @@ def angle_dt_bwd(
 
     angle_dt_bwd_kernel[grid](
         grad_angle, grad_dt, grad_init_state if has_init_state else grad_init_dummy,
-        grad_out, grad_output_state, angle, dt, cu_seqlens,
+        grad_out, grad_output_state, angle, dt, cu_seqlens, boundary_terms,
         grad_angle.stride(0), grad_angle.stride(1), grad_angle.stride(2), grad_angle.stride(3),
         grad_dt.stride(0), grad_dt.stride(1), grad_dt.stride(2),
         stride_grad_init[0], stride_grad_init[1], stride_grad_init[2],
@@ -422,11 +458,13 @@ def angle_dt_bwd(
         angle.stride(0), angle.stride(1), angle.stride(2), angle.stride(3),
         dt.stride(0), dt.stride(1), dt.stride(2),
         stride_cu_seqlen,
+        stride_bnd[0], stride_bnd[1], stride_bnd[2], stride_bnd[3],
         seqlen, dim,
         CHUNK_SIZE=chunk_size,
         BLOCK_D=BLOCK_D,
         HAS_INIT_STATE=has_init_state,
         HAS_GRAD_OUTPUT_STATE=HAS_GRAD_OUTPUT_STATE,
         IS_VARLEN=is_varlen,
+        HAS_BOUNDARY_TERMS=HAS_BOUNDARY_TERMS,
     )
     return grad_angle, grad_dt, grad_init_state
