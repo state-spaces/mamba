@@ -197,6 +197,13 @@ class _Mamba3Function(torch.autograd.Function):
             dZ = None
             grad_out_scaled = grad_out
 
+        # Boundary terms for the angle cumsum backward (Step 5); varlen keeps the plain reverse cumsum
+        if cu_seqlens is None:
+            dAngle_Bnd = torch.empty((V.shape[0], V.shape[2], triton.cdiv(V.shape[1], ctx.chunk_size), Q_rot.shape[-1] // 2),
+                                     dtype=torch.float32, device=V.device)
+        else:
+            dAngle_Bnd = None
+
         # Step 2: Compute main gradients (dQ_mid, dK_mid, dV, dADT, dQK_dot, dD, dInput_SSM_State)
         dQ_mid, dK_mid, dV, dADT, dQK_dot, dD, dInput_SSM_State = compute_dqkv(
             q=Q_rot,
@@ -213,6 +220,7 @@ class _Mamba3Function(torch.autograd.Function):
             chunk_size=ctx.chunk_size,
             has_input_state=ctx.has_input_state,
             Cu_Seqlens=cu_seqlens,
+            d_angle_bnd=dAngle_Bnd,
         )
         
         # Step 3: Compute gradients through rotary embeddings and biases
@@ -253,6 +261,7 @@ class _Mamba3Function(torch.autograd.Function):
             chunk_size=ctx.chunk_size,
             grad_output_state=grad_final_angle_state if ctx.return_final_states else None,
             cu_seqlens=cu_seqlens,
+            boundary_terms=dAngle_Bnd[..., :Angles.shape[-1]] if dAngle_Bnd is not None else None,
         )
         
         # Accumulate DT gradients from angle_dt backward

@@ -198,14 +198,14 @@ def compute_dzdo(
         for w in [2, 4, 8]
         for r in [None, 128, 256]
     ],
-    key=["CHUNK_SIZE", "HEADDIM_QK", "HEADDIM_V", "IS_VARLEN"]
+    key=["CHUNK_SIZE", "HEADDIM_QK", "HEADDIM_V", "IS_VARLEN", "RETURN_DANGLE_BND"]
 )
 @triton.jit
 def mamba3_siso_bwd_kernel_dqkv(
     # Input tensors
     Q, K, V, DA_CS, DA_CS_SUM, QK_Dot, D, SSM_States, dO, d_OSSM_State, Cu_Seqlens, # dO is scaled with Z
     # Output tensors
-    dQ, dK, dV, dADT, dQK_Dot, dD, d_ISSM_State, # dQK_Dot is scaled with scale
+    dQ, dK, dV, dADT, dQK_Dot, dD, d_ISSM_State, dAngle_Bnd, # dQK_Dot is scaled with scale
     # Strides for Inputs
     # Strides for Q: (batch, seqlen, nheads_qk, HEADDIM_QK)
     stride_q_batch, stride_q_seqlen, stride_q_head, stride_q_qkdim,
@@ -244,6 +244,8 @@ def mamba3_siso_bwd_kernel_dqkv(
     stride_dd_batch, stride_dd_head,
     # Strides for d_ISSM_State: (num_sequences, nheads, HEADDIM_V, HEADDIM_QK)
     stride_d_issm_state_batch, stride_d_issm_state_head, stride_d_issm_state_vdim, stride_d_issm_state_qkdim,
+    # Strides for dAngle_Bnd: (batch, nheads, nchunks, HEADDIM_QK // 2)
+    stride_dangle_bnd_batch, stride_dangle_bnd_head, stride_dangle_bnd_chunk, stride_dangle_bnd_dim,
     # Dimensions
     seqlen, nheads_qk, headdim_qk, headdim_v,
     CHUNK_SIZE: tl.constexpr,
@@ -253,6 +255,7 @@ def mamba3_siso_bwd_kernel_dqkv(
     HAS_D_OSSM_STATE: tl.constexpr,
     RETURN_D_ISSM_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    RETURN_DANGLE_BND: tl.constexpr,
 ):
     """
     Backward kernel for Mamba-3 attention mechanism.
@@ -268,6 +271,9 @@ def mamba3_siso_bwd_kernel_dqkv(
         - dQK_Dot: Gradient for the QK dot product term
         - dD: Gradient for the skip connection (if present)
         - dISSM_State: Gradient for the input SSM state (if present)
+        - dAngle_Bnd: <dStates_c, States_c J_i> per chunk c and rotary pair i (if RETURN_DANGLE_BND), where States_c
+          is the state entering chunk c and dStates_c its gradient from chunks >= c. Used by angle_dt_bwd to get the
+          rotary-angle gradient carried across chunk boundaries without accumulating it over chunks.
 
     Grid:
         - Normal mode: (nheads, batch)
@@ -602,6 +608,23 @@ def mamba3_siso_bwd_kernel_dqkv(
         d_ssm_states_acc = (tl.math.exp2(da_cs_chunk_sum) * d_ssm_states_acc +
                        tl.dot(tl.trans(dO_reloaded).to(q_block.dtype), q_block))
 
+        # ============================================================
+        # Rotary-angle boundary term: <dStates_c, States_c J_i> for each pair i = (2i, 2i+1)
+        # Shifting every angle at or after the start of this chunk by eps (pair i) is the same as rotating
+        # the state entering the chunk by eps, so this is the angle gradient summed over the rest of the
+        # sequence up to a constant (see angle_dt_bwd).
+        # ============================================================
+        if RETURN_DANGLE_BND:
+            states_f32 = tl.where(SSM_States_mask, SSM_States_reloaded.to(tl.float32), 0.0)
+            s_r0, s_r1 = tl.split(tl.reshape(states_f32, [HEADDIM_V, HEADDIM_QK // 2, 2]))
+            ds_r0, ds_r1 = tl.split(tl.reshape(d_ssm_states_acc, [HEADDIM_V, HEADDIM_QK // 2, 2]))
+            dangle_bnd = tl.sum(ds_r0 * s_r1 - ds_r1 * s_r0, axis=0)  # (HEADDIM_QK // 2,)
+            offs_pair = tl.arange(0, HEADDIM_QK // 2)
+            tl.store(
+                dAngle_Bnd + pid_batch * stride_dangle_bnd_batch + pid_head * stride_dangle_bnd_head
+                + chunk_idx * stride_dangle_bnd_chunk + offs_pair * stride_dangle_bnd_dim,
+                dangle_bnd, mask=offs_pair < headdim_qk // 2)
+
     # Store Final dD Gradient
     if D is not None:
         tl.store(dD + dD_offset + tl.arange(0, 1), dD_acc)
@@ -628,6 +651,7 @@ def compute_dqkv(
     chunk_size: int = 64,
     has_input_state: bool = False,
     Cu_Seqlens: Optional[torch.Tensor] = None,
+    d_angle_bnd: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
     """
     Compute gradients dQ_mid, dK_mid, dV, dADT, dQK_dot, dD, d_issm_state for Mamba-3 backward pass.
@@ -648,6 +672,8 @@ def compute_dqkv(
         D: Optional skip connection weight (nheads,)
         chunk_size: Chunk size (default: 64)
         has_input_state: Whether to compute gradient for input states
+        d_angle_bnd: Optional fp32 output buffer (batch, nheads, nchunks, headdim_qk // 2), filled with the rotary-angle
+            boundary terms <dStates_c, States_c J_i> consumed by angle_dt_bwd. Not supported in varlen mode.
 
     Returns:
         Tuple of (dQ_mid, dK_mid, dV, dADT, dQK_dot, dD, d_issm_state)
@@ -679,6 +705,9 @@ def compute_dqkv(
     assert d_ov_state is None or d_ov_state.shape == (num_sequences, nheads, headdim_v)
     if D is not None:
         assert D.shape == (nheads,)
+    if d_angle_bnd is not None:
+        assert not is_varlen, "d_angle_bnd is not supported in varlen mode"
+        assert d_angle_bnd.shape == (batch, nheads, nchunks, headdim_qk // 2) and d_angle_bnd.dtype == torch.float32
 
     # Ensure all tensors satisfy TMA alignment constraints.
     #
@@ -735,7 +764,7 @@ def compute_dqkv(
     # Launch kernel
     mamba3_siso_bwd_kernel_dqkv[grid](
         q, k, v, da_cs, da_cs_sum, qk_dot, D, SSM_States, do, d_ossm_state, Cu_Seqlens,
-        dq, dk, dv, dAdt, dQK, dD, d_issm_state,
+        dq, dk, dv, dAdt, dQK, dD, d_issm_state, d_angle_bnd,
         # Q strides
         q.stride(0), q.stride(1), q.stride(2), q.stride(3),
         # K strides
@@ -780,6 +809,8 @@ def compute_dqkv(
         d_issm_state.stride(1) if d_issm_state is not None else 0,
         d_issm_state.stride(2) if d_issm_state is not None else 0,
         d_issm_state.stride(3) if d_issm_state is not None else 0,
+        # d_angle_bnd strides
+        *(d_angle_bnd.stride() if d_angle_bnd is not None else (0, 0, 0, 0)),
         # Dimensions
         seqlen, nheads_qk, headdim_qk, headdim_v,
         # Compile-time constants
@@ -790,6 +821,7 @@ def compute_dqkv(
         HAS_D_OSSM_STATE=d_ossm_state is not None,
         RETURN_D_ISSM_STATE=has_input_state,
         IS_VARLEN=is_varlen,
+        RETURN_DANGLE_BND=d_angle_bnd is not None,
     )
 
     # Add output V state gradients to the last token
