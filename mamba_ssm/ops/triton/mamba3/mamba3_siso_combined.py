@@ -390,11 +390,14 @@ def mamba3_siso_combined(
     # Typecast all derived tensors to bf16.
     # ADT, DT should be in fp32 for stability
     # Q_bias, K_bias, D should be in fp32 as they are model parameters
+    # Angles should be in fp32: the rates are integrated by the cumsum in angle_dt_fwd,
+    # so rounding them to bf16 accumulates into a phase error that grows with seqlen
+    # (and differs from the fp32 rates used by the decode step). The kernels load them as fp32.
     Q = Q.to(torch.bfloat16)
     K = K.to(torch.bfloat16)
     V = V.to(torch.bfloat16)
     Trap = Trap.to(torch.bfloat16)
-    Angles = Angles.to(torch.bfloat16)
+    Angles = Angles.to(torch.float32)
     if Z is not None:
         Z = Z.to(torch.bfloat16)
 
