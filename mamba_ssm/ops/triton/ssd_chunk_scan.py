@@ -1283,28 +1283,29 @@ def _chunk_scan_fwd(cb, x, dt, dA_cumsum, C, states, D=None, z=None, seq_idx=Non
                     batch * nchunks, nheads)
     z_strides = ((z.stride(0), z.stride(1), z.stride(2), z.stride(3))
                   if z is not None else (0, 0, 0, 0))
-    _chunk_scan_fwd_kernel[grid](
-        cb, x, z, out, out_x, dt, dA_cumsum, seq_idx, C, states, D,
-        chunk_size, headdim, dstate,
-        batch, seqlen, nheads // ngroups,
-        cb.stride(0), cb.stride(1), cb.stride(2), cb.stride(3), cb.stride(4),
-        x.stride(0), x.stride(1), x.stride(2), x.stride(3),
-        z_strides[0], z_strides[1], z_strides[2], z_strides[3],
-        out.stride(0), out.stride(1), out.stride(2), out.stride(3),
-        dt.stride(0), dt.stride(2), dt.stride(1), dt.stride(3),
-        dA_cumsum.stride(0), dA_cumsum.stride(2), dA_cumsum.stride(1), dA_cumsum.stride(3),
-        *((seq_idx.stride(0), seq_idx.stride(1)) if seq_idx is not None else (0, 0)),
-        C.stride(0), C.stride(1), C.stride(2), C.stride(3),
-        states.stride(0), states.stride(1), states.stride(2), states.stride(3), states.stride(4),
-        D.stride(0) if D is not None else 0,
-        True,
-        D is not None,
-        D.dim() == 2 if D is not None else True,
-        BLOCK_SIZE_DSTATE=max(triton.next_power_of_2(dstate), 16),
-        HAS_Z=z is not None,
-        HAS_SEQ_IDX=seq_idx is not None,
-        IS_TRITON_22=TRITON_22,
-    )
+    with torch.cuda.device(x.device.index):
+        _chunk_scan_fwd_kernel[grid](
+            cb, x, z, out, out_x, dt, dA_cumsum, seq_idx, C, states, D,
+            chunk_size, headdim, dstate,
+            batch, seqlen, nheads // ngroups,
+            cb.stride(0), cb.stride(1), cb.stride(2), cb.stride(3), cb.stride(4),
+            x.stride(0), x.stride(1), x.stride(2), x.stride(3),
+            z_strides[0], z_strides[1], z_strides[2], z_strides[3],
+            out.stride(0), out.stride(1), out.stride(2), out.stride(3),
+            dt.stride(0), dt.stride(2), dt.stride(1), dt.stride(3),
+            dA_cumsum.stride(0), dA_cumsum.stride(2), dA_cumsum.stride(1), dA_cumsum.stride(3),
+            *((seq_idx.stride(0), seq_idx.stride(1)) if seq_idx is not None else (0, 0)),
+            C.stride(0), C.stride(1), C.stride(2), C.stride(3),
+            states.stride(0), states.stride(1), states.stride(2), states.stride(3), states.stride(4),
+            D.stride(0) if D is not None else 0,
+            True,
+            D is not None,
+            D.dim() == 2 if D is not None else True,
+            BLOCK_SIZE_DSTATE=max(triton.next_power_of_2(dstate), 16),
+            HAS_Z=z is not None,
+            HAS_SEQ_IDX=seq_idx is not None,
+            IS_TRITON_22=TRITON_22,
+        )
     return out, out_x
 
 
