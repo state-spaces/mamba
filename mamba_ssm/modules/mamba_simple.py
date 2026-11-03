@@ -10,6 +10,8 @@ from torch import Tensor
 
 from einops import rearrange, repeat
 
+from mamba_ssm.modules.a_floor import apply_a_floor
+
 from mamba_ssm.ops.selective_scan_interface import selective_scan_fn, mamba_inner_fn
 
 try:
@@ -41,6 +43,7 @@ class Mamba(nn.Module):
         dt_init="random",
         dt_scale=1.0,
         dt_init_floor=1e-4,
+        A_floor=1e-4,
         conv_bias=True,
         bias=False,
         use_fast_path=True,  # Fused kernel options
@@ -56,6 +59,7 @@ class Mamba(nn.Module):
         self.expand = expand
         self.d_inner = int(self.expand * self.d_model)
         self.dt_rank = math.ceil(self.d_model / 16) if dt_rank == "auto" else dt_rank
+        self.A_floor = A_floor
         self.use_fast_path = use_fast_path
         self.layer_idx = layer_idx
 
@@ -140,7 +144,7 @@ class Mamba(nn.Module):
         if self.in_proj.bias is not None:
             xz = xz + rearrange(self.in_proj.bias.to(dtype=xz.dtype), "d -> d 1")
 
-        A = -torch.exp(self.A_log.float())  # (d_inner, d_state)
+        A = apply_a_floor(-torch.exp(self.A_log.float()), self.A_floor)  # (d_inner, d_state)
         # In the backward pass we write dx and dz next to each other to avoid torch.cat
         if self.use_fast_path and causal_conv1d_fn is not None and inference_params is None:  # Doesn't support outputting the states
             out = mamba_inner_fn(
@@ -232,7 +236,7 @@ class Mamba(nn.Module):
         dt, B, C = torch.split(x_db, [self.dt_rank, self.d_state, self.d_state], dim=-1)
         # Don't add dt_bias here
         dt = F.linear(dt, self.dt_proj.weight)  # (B d_inner)
-        A = -torch.exp(self.A_log.float())  # (d_inner, d_state)
+        A = apply_a_floor(-torch.exp(self.A_log.float()), self.A_floor)  # (d_inner, d_state)
 
         # SSM step
         if selective_state_update is None:

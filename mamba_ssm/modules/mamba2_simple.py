@@ -7,6 +7,8 @@ import torch.nn.functional as F
 
 from einops import rearrange, repeat
 
+from mamba_ssm.modules.a_floor import apply_a_floor
+
 try:
     from causal_conv1d import causal_conv1d_fn
 except ImportError:
@@ -32,6 +34,7 @@ class Mamba2Simple(nn.Module):
         headdim=128,
         ngroups=1,
         A_init_range=(1, 16),
+        A_floor=1e-4,
         dt_min=0.001,
         dt_max=0.1,
         dt_init_floor=1e-4,
@@ -60,6 +63,7 @@ class Mamba2Simple(nn.Module):
         assert self.d_inner % self.headdim == 0
         self.nheads = self.d_inner // self.headdim
         self.dt_limit = dt_limit
+        self.A_floor = A_floor
         self.learnable_init_states = learnable_init_states
         self.activation = activation
         self.chunk_size = chunk_size
@@ -129,7 +133,7 @@ class Mamba2Simple(nn.Module):
         batch, seqlen, dim = u.shape
 
         zxbcdt = self.in_proj(u)  # (B, L, d_in_proj)
-        A = -torch.exp(self.A_log)  # (nheads) or (d_inner, d_state)
+        A = apply_a_floor(-torch.exp(self.A_log), self.A_floor)  # (nheads) or (d_inner, d_state)
         initial_states=repeat(self.init_states, "... -> b ...", b=batch) if self.learnable_init_states else None
         dt_limit_kwargs = {} if self.dt_limit == (0.0, float("inf")) else dict(dt_limit=self.dt_limit)
 

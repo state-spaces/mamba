@@ -8,6 +8,8 @@ import torch.nn.functional as F
 
 from einops import rearrange, repeat
 
+from mamba_ssm.modules.a_floor import apply_a_floor
+
 try:
     from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
 except ImportError:
@@ -46,6 +48,7 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
         d_ssm=None,  # If not None, we only apply SSM on this many dimensions, the rest uses gated MLP
         ngroups=1,
         A_init_range=(1, 16),
+        A_floor=1e-4,
         D_has_hdim=False,
         rmsnorm=True,
         norm_before_gate=False,
@@ -87,6 +90,7 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
         self.rmsnorm = rmsnorm
         self.norm_before_gate = norm_before_gate
         self.dt_limit = dt_limit
+        self.A_floor = A_floor
         self.activation = "silu"
         self.chunk_size = chunk_size
         self.use_mem_eff_path = use_mem_eff_path
@@ -179,7 +183,7 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
         if seqlen_og is not None:
             zxbcdt = rearrange(zxbcdt, "(b l) d -> b l d", l=seqlen)
         # If the model is loaded in fp16, without the .float() here, A might be -inf
-        A = -torch.exp(self.A_log.float())  # (nheads) or (d_inner, d_state)
+        A = apply_a_floor(-torch.exp(self.A_log.float()), self.A_floor)  # (nheads) or (d_inner, d_state)
         dt_limit_kwargs = {} if self.dt_limit == (0.0, float("inf")) else dict(dt_limit=self.dt_limit)
         if self.use_mem_eff_path and inference_params is None:
             out = mamba_split_conv1d_scan_combined(
@@ -304,7 +308,7 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
             )
 
         x, B, C = torch.split(xBC, [self.d_ssm, self.ngroups * self.d_state, self.ngroups * self.d_state], dim=-1)
-        A = -torch.exp(self.A_log.float())  # (nheads,)
+        A = apply_a_floor(-torch.exp(self.A_log.float()), self.A_floor)  # (nheads,)
 
         # SSM step
         if selective_state_update is None:
