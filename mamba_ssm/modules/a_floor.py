@@ -1,5 +1,7 @@
-import torch
+import math
 from typing import Optional
+
+import torch
 
 
 def apply_a_floor(A: torch.Tensor, A_floor: Optional[float]) -> torch.Tensor:
@@ -14,4 +16,8 @@ def apply_a_floor(A: torch.Tensor, A_floor: Optional[float]) -> torch.Tensor:
     """
     if A_floor is None:
         return A
+    if not math.isfinite(A_floor) or A_floor <= 0:
+        raise ValueError(
+            f"A_floor must be a positive finite number or None, got {A_floor}"
+        )
     return torch.clamp(A, max=-A_floor)
