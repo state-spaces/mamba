@@ -197,6 +197,13 @@ class _Mamba3Function(torch.autograd.Function):
             dZ = None
             grad_out_scaled = grad_out
 
+        # Boundary terms for the angle cumsum backward (Step 5); varlen keeps the plain reverse cumsum
+        if cu_seqlens is None:
+            dAngle_Bnd = torch.empty((V.shape[0], V.shape[2], triton.cdiv(V.shape[1], ctx.chunk_size), Q_rot.shape[-1] // 2),
+                                     dtype=torch.float32, device=V.device)
+        else:
+            dAngle_Bnd = None
+
         # Step 2: Compute main gradients (dQ_mid, dK_mid, dV, dADT, dQK_dot, dD, dInput_SSM_State)
         dQ_mid, dK_mid, dV, dADT, dQK_dot, dD, dInput_SSM_State = compute_dqkv(
             q=Q_rot,
@@ -213,6 +220,7 @@ class _Mamba3Function(torch.autograd.Function):
             chunk_size=ctx.chunk_size,
             has_input_state=ctx.has_input_state,
             Cu_Seqlens=cu_seqlens,
+            d_angle_bnd=dAngle_Bnd,
         )
         
         # Step 3: Compute gradients through rotary embeddings and biases
@@ -253,6 +261,7 @@ class _Mamba3Function(torch.autograd.Function):
             chunk_size=ctx.chunk_size,
             grad_output_state=grad_final_angle_state if ctx.return_final_states else None,
             cu_seqlens=cu_seqlens,
+            boundary_terms=dAngle_Bnd[..., :Angles.shape[-1]] if dAngle_Bnd is not None else None,
         )
         
         # Accumulate DT gradients from angle_dt backward
@@ -390,11 +399,14 @@ def mamba3_siso_combined(
     # Typecast all derived tensors to bf16.
     # ADT, DT should be in fp32 for stability
     # Q_bias, K_bias, D should be in fp32 as they are model parameters
+    # Angles should be in fp32: the rates are integrated by the cumsum in angle_dt_fwd,
+    # so rounding them to bf16 accumulates into a phase error that grows with seqlen
+    # (and differs from the fp32 rates used by the decode step). The kernels load them as fp32.
     Q = Q.to(torch.bfloat16)
     K = K.to(torch.bfloat16)
     V = V.to(torch.bfloat16)
     Trap = Trap.to(torch.bfloat16)
-    Angles = Angles.to(torch.bfloat16)
+    Angles = Angles.to(torch.float32)
     if Z is not None:
         Z = Z.to(torch.bfloat16)
 
