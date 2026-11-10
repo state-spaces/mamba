@@ -15,6 +15,18 @@
   - §2.4 参数表 / §2.5 实现约束：全部参数合法性由本入口在 host 侧校验并抛 ``ValueError``；
   - §2.6 精度见 ``SELFTEST.md``。
 
+PLUT-189 D3（下发侧第三块，语义等价，与 CATLASS 路线 PLUT-181 同一做法）：§2.4/§2.5 的
+**同一套**参数校验从「Python 逐项属性访问」改成「一次 C++ 调用」
+（``Mamba3DecodeStepHostValidator::check`` → ``op_extension/mamba3_decode_step_validate.cpp``）。
+约束与做法：
+  * 校验项、判定顺序、拒绝时机（host 侧、下发 kernel 之前）与原实现相同；
+  * **每次调用都完整跑一遍**，不缓存结果、不抽样、不异步；
+  * 拒绝路径**重放**下面的原逐项 Python 实现（``_mamba3_step_fn_python``，逐行未改），
+    因此异常类型（``ValueError``）与文案与原实现**逐字一致**——重放只是一次「再校验」，
+    不是把校验从通过路径上省掉：通过/拒绝两侧每次调用都真跑了全部判据；
+  * 张量类型判定仍由 C++ 侧的 pybind11 签名兜住（非 ``torch.Tensor`` 的参数原实现在读取
+    ``.shape`` 时会先抛其它异常，这类输入的原始行为由同一份原实现兜住）。
+
 用法::
 
     from mamba_ssm.ops.ascendc import mamba3_step_fn
@@ -37,7 +49,10 @@ SUPPORTED_TILE_D = (32, 64, 128)
 
 _OP_NAME = "mamba3_decode_step"
 _LIB_ENV = "MAMBA3_DECODE_STEP_LIB"
+_EXT_MODULE = "mamba3_decode_step_ext"
 _lib_handle = None
+_VALIDATOR = None
+_STEP = None
 
 
 def _lib_path() -> Path:
@@ -62,6 +77,38 @@ def _load_op():
     torch.ops.load_library(str(path))
     _lib_handle = getattr(torch.ops.npu, _OP_NAME)
     return _lib_handle
+
+
+def _validator():
+    """取 C++ 侧参数校验函数（进程内只取一次；每次调用仍逐项跑全部判据）。
+
+    走 pybind11 直调（``spec_from_file_location`` 加载同一个 .so 里的
+    ``mamba3_decode_step_ext.validate``）：不装箱成 IValue、不查 dispatcher schema。
+    与 CATLASS 侧 PLUT-181 的口径一致（那份实测见其报告；两边的模块名不同，
+    避免两条路线的 .so 在同一进程加载时互相顶替）。
+
+    PLUT-215：模块加载时顺带取 ``step``（单跨边界入口，校验 + 下发一次调用完成）。
+    旧 .so 没有该符号时保持 ``None``，调用方回落到「validate + op 派发」两步路径。
+    """
+    global _VALIDATOR, _STEP
+    if _VALIDATOR is None:
+        path = _lib_path()
+        if not path.is_file():
+            raise RuntimeError(
+                f"{_OP_NAME}: 未找到算子动态库 {path}；请先执行 "
+                f"`bash {Path(__file__).resolve().parent / 'build.sh'}` 编译，"
+                f"或通过环境变量 {_LIB_ENV} 指定 .so 路径"
+            )
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(_EXT_MODULE, str(path))
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"{_OP_NAME}: 无法加载校验扩展 {path}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _VALIDATOR = module.validate
+        _STEP = getattr(module, "step", None)
+    return _VALIDATOR
 
 
 def _check_tensor(name: str, tensor: torch.Tensor, rank: int, shape, need_npu: bool = True) -> None:
@@ -118,7 +165,7 @@ def _as_innermost_contiguous(name: str, tensor: torch.Tensor, is_output: bool = 
     return tensor.contiguous()
 
 
-def mamba3_step_fn(
+def _mamba3_step_fn_python(
     state: torch.Tensor,
     Bstate: torch.Tensor,
     Xstate: torch.Tensor,
@@ -138,7 +185,11 @@ def mamba3_step_fn(
     tile_D: int = 64,
     num_warps: int = 2,
 ) -> None:
-    """单 token Mamba-3 SSM 递推（语义等同参考实现 ``mamba3_step_fn``）。"""
+    """PLUT-189 之前的原逐项实现（逐行保留，作为「拒绝路径重放 / 非张量参数」的同一份判据）。
+
+    这份实现没有被删除，也不允许被改成「只留几条」：C++ 判定拒绝时由它复现原异常，
+    非 ``torch.Tensor`` 参数由它兜住原始行为。它跑的就是 §2.4/§2.5 全量校验。
+    """
     # ---- 标量属性 ----
     if isinstance(tile_D, bool) or not isinstance(tile_D, int) or tile_D not in SUPPORTED_TILE_D:
         raise ValueError(f"{_OP_NAME}: tile_D 必须属于 {SUPPORTED_TILE_D}，实际 {tile_D!r}")
@@ -236,3 +287,106 @@ def mamba3_step_fn(
     op = _load_op()
     op(state_in, Bstate, Xstate, A, B, C, D, x, dt, trap, xproj, outproj, z, zproj, state_out_t, out, int(tile_D))
     return None
+
+
+def mamba3_step_fn(
+    state: torch.Tensor,
+    Bstate: torch.Tensor,
+    Xstate: torch.Tensor,
+    A: torch.Tensor,
+    B: torch.Tensor,
+    C: torch.Tensor,
+    D: torch.Tensor,
+    x: torch.Tensor,
+    dt: torch.Tensor,
+    trap: torch.Tensor,
+    xproj: torch.Tensor,
+    outproj: Optional[torch.Tensor] = None,
+    state_out: Optional[torch.Tensor] = None,
+    out: Optional[torch.Tensor] = None,
+    z: Optional[torch.Tensor] = None,
+    zproj: Optional[torch.Tensor] = None,
+    tile_D: int = 64,
+    num_warps: int = 2,
+) -> None:
+    """单 token Mamba-3 SSM 递推（语义等同参考实现 ``mamba3_step_fn``）。"""
+    # ---- 标量属性：与原实现同一判定、同一文案（Python 侧保留，开销 ~0.3 µs） ----
+    if isinstance(tile_D, bool) or not isinstance(tile_D, int) or tile_D not in SUPPORTED_TILE_D:
+        raise ValueError(f"{_OP_NAME}: tile_D 必须属于 {SUPPORTED_TILE_D}，实际 {tile_D!r}")
+    if isinstance(num_warps, bool) or not isinstance(num_warps, int) or num_warps <= 0:
+        raise ValueError(f"{_OP_NAME}: num_warps 必须为正整数（兼容参数，接收后忽略），实际 {num_warps!r}")
+    if out is None:
+        raise ValueError(f"{_OP_NAME}: out 必须由调用方预分配（不支持内部创建输出）")
+    if (z is None) != (zproj is None):
+        raise ValueError(f"{_OP_NAME}: z 与 zproj 必须同时为 None 或同时存在")
+
+    # ---- 快速路径：张量侧全部判据（§2.4/§2.5）下沉 C++，**每次调用真跑一遍** ----
+    # 非 torch.Tensor 的实参由 pybind11 抛 TypeError（零成本 try：不改解释器状态），
+    # 此时交回原逐项实现，由它复现改动前对这类输入的原始行为（异常类型/文案/时机）。
+    #
+    # PLUT-215：默认走单跨边界入口 ``step``（同一调用内完成全部判据 + 下发），
+    # 相比旧的「validate 一次 + torch 派发一次」少一次跨边界、少一遍 17 个张量拆箱；
+    # 判据、判定顺序、拒绝时机、下发实参、kernel 语义均不变。
+    entry = _STEP
+    if entry is None:
+        _validator()  # 加载扩展；顺带填充 _VALIDATOR / _STEP
+        entry = _STEP
+    if entry is not None:
+        try:
+            rc = entry(
+                state, Bstate, Xstate, A, B, C, D, x, dt, trap, xproj,
+                outproj, state_out, out, z, zproj, tile_D,
+            )
+        except TypeError:
+            return _mamba3_step_fn_python(
+                state, Bstate, Xstate, A, B, C, D, x, dt, trap, xproj,
+                outproj=outproj, state_out=state_out, out=out, z=z, zproj=zproj,
+                tile_D=tile_D, num_warps=num_warps,
+            )
+        if rc == 0:
+            return None
+        # 拒绝路径：重放同一份原逐项实现，保证异常类型/文案/拒绝时机与改动前逐字一致。
+        # 注意这不是「跳过校验」：上面 C++ 已经跑完全部判据，这里再跑一遍只为构造原异常。
+        _mamba3_step_fn_python(
+            state, Bstate, Xstate, A, B, C, D, x, dt, trap, xproj,
+            outproj=outproj, state_out=state_out, out=out, z=z, zproj=zproj,
+            tile_D=tile_D, num_warps=num_warps,
+        )
+        raise RuntimeError(f"{_OP_NAME}: 内部校验口径不一致（C++ rc={rc}，Python 逐项校验未拒绝）")
+
+    # ---- 兼容路径（旧 .so 无 step 符号）：validate 一次 + torch 派发一次 ----
+    validate = _VALIDATOR
+    try:
+        rc, resolved = validate(
+            state, Bstate, Xstate, A, B, C, D, x, dt, trap, xproj,
+            outproj, state_out, out, z, zproj, tile_D,
+        )
+    except TypeError:
+        return _mamba3_step_fn_python(
+            state, Bstate, Xstate, A, B, C, D, x, dt, trap, xproj,
+            outproj=outproj, state_out=state_out, out=out, z=z, zproj=zproj,
+            tile_D=tile_D, num_warps=num_warps,
+        )
+
+    if rc == 0:
+        if resolved is None:
+            # 常见路径：没有输入需要物化，直接下发（实参就是调用方给的那批对象）。
+            # state_out 缺省即 state（任务书 §2.4 state_out 行）；z 与 zproj 同时缺省时
+            # kernel 侧按 hasZ=false 走无门控分支，与改动前完全一致。
+            _load_op()(
+                state, Bstate, Xstate, A, B, C, D, x, dt, trap, xproj, outproj, z, zproj,
+                state if state_out is None else state_out, out, tile_D,
+            )
+        else:
+            # 少数路径：末维非连续的输入已被物化成连续副本，用回传的实参下发
+            _load_op()(*resolved, tile_D)
+        return None
+    # 拒绝路径：重放同一份原逐项实现，保证异常类型/文案/拒绝时机与改动前逐字一致。
+    # 注意这不是「跳过校验」：上面 C++ 已经跑完全部判据，这里再跑一遍只为构造原异常。
+    _mamba3_step_fn_python(
+        state, Bstate, Xstate, A, B, C, D, x, dt, trap, xproj,
+        outproj=outproj, state_out=state_out, out=out, z=z, zproj=zproj,
+        tile_D=tile_D, num_warps=num_warps,
+    )
+    # 原实现未拒绝 => C++ 判定与 §2.4/§2.5 不一致（实现缺陷），必须显形而不是静默放行
+    raise RuntimeError(f"{_OP_NAME}: 内部校验口径不一致（C++ rc={rc}，Python 逐项校验未拒绝）")

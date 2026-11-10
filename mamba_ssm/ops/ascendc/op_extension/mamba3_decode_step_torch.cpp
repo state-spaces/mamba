@@ -15,13 +15,21 @@
 //
 // 参数合法性由 Python 入口 (mamba_ssm/ops/ascendc/mamba3_step.py) 按任务书
 // §2.4 / §2.5 校验; 本层只负责: 读取 shape/stride/dtype -> 生成 tiling -> 下发 kernel。
+// （PLUT-189 D3 起，张量侧的这套判据由 op_extension/mamba3_decode_step_validate.cpp
+//   以一次 C++ 调用执行，本层仍然不做校验，也不做任何数值计算。）
 //
 // Stream 同步: 使用 getCurrentNPUStream().stream(true) 清 queue 后再调用 kernel,
 // 避免与之前的 NPU 操作乱序 (见 torch-ascendc-op-extension / direct-invoke)。
+//
+// PLUT-189 D1/D2（下发侧，语义等价搬迁自 CATLASS 路线 PLUT-179）：
+//   tiling 走「2 槽设备缓冲 + 逐字节指纹缓存 + 同流异步 H2D + 8 槽 pinned ring」，
+//   稳态命中即不拷贝、不同步；kernel 侧看到的 tiling 内容与每次重传完全一致。
 // ============================================================================
 
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include "acl/acl.h"
 #include <torch/extension.h>
 #include "torch_npu/csrc/core/npu/NPUStream.h"
@@ -96,8 +104,27 @@ int64_t UbBytesForChunk(int64_t rows, int64_t dState, int64_t rank, int64_t rank
     return total;
 }
 
+// Cube 通路在 UB 里的**额外**占用（字节），必须与 op_kernel ProcessCube() 的 InitBuffer 逐项一致：
+//   bufCube_     2 * 16 * nPad  float   （16x16 转置暂存，源/目的各一半）
+//   bufCubeW_        16 * rows  float   （W 的 [16][rows] 暂存）
+//   bufCubeOrr_  2 * 16 * rows  float   （out_r 读回）
+//   bufCubeTx_ / bufCubeOff_ / bufCubeAux_ / bufCubeT1_ / bufCubeT2_ 各 1024 个 4 B 元素
+// 16 = kernel 侧 MAMBA3_CUBE_KV，与 tiling.h 的 Mamba3CubeScratchFloats 同一个常量口径。
+int64_t UbBytesForCube(int64_t rows, int64_t nPad)
+{
+    int64_t total = 0;
+    total += 2 * Align32(16 * nPad * 4);
+    total += Align32(16 * rows * 4);
+    total += Align32(2 * 16 * rows * 4);
+    total += 5 * 1024 * 4;
+    return total;
+}
+
+// useCube=1 时 cube 自己的 UB 占用一并计入预算：
+// 只按 v4 的缓冲清单反推 chunkRows 会漏掉这 ~48 KiB，实测 R=1 只剩 3.4 KiB 余量能过、
+// R≥2 直接越过 192 KiB 的 UB 容量（scalar 访问 AICore 内部 buffer 越界）。
 int64_t ChooseChunkRows(int64_t tileD, int64_t dState, int64_t rank, int64_t rankBlock, int64_t eszState,
-                        int64_t eszBC, int64_t eszX, int64_t eszProj)
+                        int64_t eszBC, int64_t eszX, int64_t eszProj, bool useCube, int64_t nPad)
 {
     // 每行必须是 8 的倍数：Brcb 以 8 个元素为一组做 32B 广播
     const int64_t divisors[5] = {128, 64, 32, 16, 8};
@@ -106,32 +133,56 @@ int64_t ChooseChunkRows(int64_t tileD, int64_t dState, int64_t rank, int64_t ran
         if (tileD % cand != 0) {
             continue;
         }
-        if (UbBytesForChunk(cand, dState, rank, rankBlock, eszState, eszBC, eszX, eszProj) <= kUbChunkBudget) {
+        int64_t bytes = UbBytesForChunk(cand, dState, rank, rankBlock, eszState, eszBC, eszX, eszProj);
+        if (useCube) {
+            bytes += UbBytesForCube(cand, nPad);
+        }
+        if (bytes <= kUbChunkBudget) {
             return cand;
         }
     }
     return 8;
 }
 
+// PLUT-204 H2：核数查询按「线程 × 设备」缓存。
+// aclrtGetDeviceInfo 在 910B3 上实测 9.3–11.3 µs/次，而核数与 shape 无关、只随设备变；
+// 每次调用都查是纯重复开销。缓存以 aclrtGetDevice 取到的 deviceId 为键（该调用是线程局部读，
+// 实测亚微秒，见 docs/results/plut194-perf/round2/）：换设备即失效重查，故不改变语义——
+// 仍返回「当前设备此刻」的核数；若 aclrtGetDevice 失败则照旧走完整查询并按原文案报错。
 int64_t AivCoreNum()
 {
+    static thread_local int32_t cachedDeviceId = -1;
+    static thread_local int64_t cachedCoreNum = 0;
     int32_t deviceId = -1;
-    aclrtGetDevice(&deviceId);
+    if (aclrtGetDevice(&deviceId) == ACL_SUCCESS && deviceId == cachedDeviceId) {
+        return cachedCoreNum;
+    }
     int64_t coreNum = 0;
     auto ret = aclrtGetDeviceInfo(deviceId, ACL_DEV_ATTR_VECTOR_CORE_NUM, &coreNum);
     TORCH_CHECK(ret == ACL_SUCCESS && coreNum > 0, "mamba3_decode_step: failed to query AIV core count");
+    cachedDeviceId = deviceId;
+    cachedCoreNum = coreNum;
     return coreNum;
 }
 
-// Cube 通路的 blockDim 是**AIC 核数**（mix 核 1 AIC : 2 AIV，见 kernel 入口 __mix__(1, 2)），
+// Cube 通路的 blockDim 是**AIC 核数**（mix 核 1 AIC : 1 AIV，见 kernel 入口 __mix__(1, 1)），
 // 不是 v4 的 AIV 核数 —— 同一个数字在两条路上含义不同，所以分成两个查询，不共用 AivCoreNum()。
+// 910B3 实测（aclrtGetDeviceInfo，2026-10-30）：CUBE_CORE_NUM = 20、VECTOR_CORE_NUM = 40，
+// 证据 docs/results/plut132-aic-core-num.json —— scratch 量级不要再按「24 AIC」这个旧假设算。
+// 同 H2：AIC 核数按「线程 × 设备」缓存，键与失效规则同 AivCoreNum()。
 int64_t AicCoreNum()
 {
+    static thread_local int32_t cachedDeviceId = -1;
+    static thread_local int64_t cachedCoreNum = 0;
     int32_t deviceId = -1;
-    aclrtGetDevice(&deviceId);
+    if (aclrtGetDevice(&deviceId) == ACL_SUCCESS && deviceId == cachedDeviceId) {
+        return cachedCoreNum;
+    }
     int64_t coreNum = 0;
     auto ret = aclrtGetDeviceInfo(deviceId, ACL_DEV_ATTR_CUBE_CORE_NUM, &coreNum);
     TORCH_CHECK(ret == ACL_SUCCESS && coreNum > 0, "mamba3_decode_step: failed to query AIC core count");
+    cachedDeviceId = deviceId;
+    cachedCoreNum = coreNum;
     return coreNum;
 }
 
@@ -145,6 +196,69 @@ bool CubePathEnabled()
 int64_t CubeNPad(int64_t dState)
 {
     return ((dState + 15) / 16) * 16;
+}
+
+// ---------------------------------------------------------------------------
+// PLUT-215 H3：自管 launch（绕开生成桩的每调用固定开销）
+//
+// 依据（本轮反汇编 `objdump -d --disassemble=__cce_rtKernelEagerLaunch` 与
+// `--disassemble=AscendLaunchKernelWithHostArgs`，见 docs/results/plut215-perf/round2/）：
+// 生成桩每次调用依次做
+//   ① StartAscendProf
+//   ② aclrtBinaryGetFunction（**按 kernel 名做一次查找，每调用一次**）
+//   ③ aclrtLaunchKernelWithHostArgs
+//   ④ GetAscendProfStatus / AscendCGetProfkTypeImpl / ReportAscendProf
+// ② 的结果是常量，①④ 只在 profiling 打开时才写数据，但 host 侧每调用都要付。
+//
+// 本路径把 funcHandle 解析一次后缓存，之后只留 aclrtLaunchKernelWithHostArgs；
+// 参数数组与生成桩**逐字节同构**（17 个指针 = 136 B，对应生成桩里的 `mov w3, #0x88`）。
+// 解析失败（CANN 版本不支持或 kernel 未注册）自动回退生成桩，行为与之前完全一致；
+// MAMBA3_DECODE_STEP_LAUNCH=stub 可强制走生成桩做 A/B。
+// ---------------------------------------------------------------------------
+constexpr size_t kLaunchArgBytes = 17 * sizeof(void *);
+
+struct SelfLaunchSlot {
+    int resolved = 0;            // 0 = 尚未解析成功；1 = 可用；-1 = 已判定不可用
+    int stubLaunches = 0;        // 已经走过的生成桩次数（kernel 注册发生在这条路上）
+    aclrtFuncHandle func = nullptr;
+};
+thread_local SelfLaunchSlot g_selfLaunch;
+
+bool SelfLaunchAllowed()
+{
+    static const bool allowed = []() {
+        const char *v = std::getenv("MAMBA3_DECODE_STEP_LAUNCH");
+        return v == nullptr || std::strcmp(v, "stub") != 0;
+    }();
+    return allowed;
+}
+
+// 可用的 funcHandle；不可用时返回 nullptr。
+//
+// 关键时序：kernel 是在**第一次走生成桩**时才注册进 runtime 的（生成桩里那句
+// `__cce_rtLinkedDevBinaryEagerRegister`），因此注册前解析必然失败。这里只在
+// 「已经跑过至少一次生成桩」之后解析，且失败也只判一次（不再反复调 ACL）。
+aclrtFuncHandle ResolveSelfLaunchFunc()
+{
+    if (g_selfLaunch.resolved > 0) {
+        return g_selfLaunch.func;
+    }
+    if (g_selfLaunch.resolved < 0 || g_selfLaunch.stubLaunches == 0) {
+        return nullptr;
+    }
+    aclrtFuncHandle fh = nullptr;
+    const aclError rc = aclrtGetFuncBySymbol(reinterpret_cast<const void *>(&mamba3_decode_step), &fh);
+    if (rc == ACL_SUCCESS && fh != nullptr) {
+        g_selfLaunch.func = fh;
+        g_selfLaunch.resolved = 1;
+        return fh;
+    }
+    g_selfLaunch.resolved = -1;
+    if (std::getenv("MAMBA3_DECODE_STEP_LAUNCH_DEBUG") != nullptr) {
+        std::fprintf(stderr, "[mamba3_decode_step] self-launch unavailable: aclrtGetFuncBySymbol rc=%d\n",
+                     static_cast<int>(rc));
+    }
+    return nullptr;
 }
 
 }  // namespace
@@ -162,7 +276,9 @@ void mamba3_decode_step_torch(at::Tensor state, at::Tensor bstate, at::Tensor xs
     const bool hasOutproj = outproj.has_value();
     const bool hasZ = z.has_value();
 
-    Mamba3DecodeStepTiling t;
+    // 零初始化：t 是全整型字段的 POD（无填充位），零初始化让「逐字节指纹」在任何字段增删后
+    // 都保持确定性（填充字节不会引入假不命中）。
+    Mamba3DecodeStepTiling t{};
     t.batch = batch;
     t.heads = heads;
     t.headDim = headDim;
@@ -225,7 +341,7 @@ void mamba3_decode_step_torch(at::Tensor state, at::Tensor bstate, at::Tensor xs
     t.rankBlock = (rank < MAMBA3_RANK_BLOCK_MAX) ? rank : MAMBA3_RANK_BLOCK_MAX;
     t.chunkRows =
         ChooseChunkRows(tile_d, dState, rank, t.rankBlock, static_cast<int64_t>(ElemBytes(state)), ElemBytes(b),
-                        ElemBytes(x), ElemBytes(xproj));
+                        ElemBytes(x), ElemBytes(xproj), false, 0);
     t.chunksPerTile = tile_d / t.chunkRows;
 
     // ---- PLUT-132 R2：Cube 通路 dispatch（provisional，默认关）----
@@ -240,6 +356,12 @@ void mamba3_decode_step_torch(at::Tensor state, at::Tensor bstate, at::Tensor xs
         t.blockNum = (t.grid < aicNum) ? t.grid : aicNum;
         t.useCube = 1;
         t.cubePad = static_cast<int32_t>(nPad);
+        // R11 修复：cube 模式下 chunkRows 必须按「v4 缓冲 + cube 缓冲」一起反推（见 UbBytesForCube）。
+        // kernel 侧 AIV/AIC 都按 tileD / chunkRows 分块（ProcessTileCube 与 CubeAic::Process 各自有
+        // chunk 循环），所以这里变小只是多切几块，不改语义。
+        t.chunkRows = ChooseChunkRows(tile_d, dState, rank, t.rankBlock, static_cast<int64_t>(ElemBytes(state)),
+                                      ElemBytes(b), ElemBytes(x), ElemBytes(xproj), true, nPad);
+        t.chunksPerTile = tile_d / t.chunkRows;
         const int64_t perAiv = Mamba3CubeScratchFloats(t.chunkRows, nPad);
         cubeScratchFloats = t.blockNum * perAiv;  // mix 核 1 AIC : 1 AIV ⇒ 段数 = blockDim
     } else {
@@ -247,20 +369,80 @@ void mamba3_decode_step_torch(at::Tensor state, at::Tensor bstate, at::Tensor xs
         t.cubePad = 0;
     }
 
-    at::Tensor tilingTensor =
-        at::empty({static_cast<int64_t>(sizeof(Mamba3DecodeStepTiling))}, x.options().dtype(at::kByte));
-    aclrtMemcpy(tilingTensor.mutable_data_ptr(), sizeof(Mamba3DecodeStepTiling), &t,
-                sizeof(Mamba3DecodeStepTiling), ACL_MEMCPY_HOST_TO_DEVICE);
-
     // stream(true) 在返回 ACL stream 前清 queue, 保证与之前的 NPU 操作正确同步
     auto aclStream = c10_npu::getCurrentNPUStream().stream(true);
+
+    // ---- PLUT-189 D2 + D1：tiling 指纹缓存 + 2 槽双缓冲（与 CATLASS 侧 PLUT-179 同一实现）----
+    // t 的每个字段都只由 shape / stride / dtype / 分支 / 别名决定（**不含任何数据指针**），
+    // 所以「与某个槽里现存内容逐字节相同」等价于「重传与否，kernel 观测到的 tiling 毫无影响」。
+    //   * 命中任一槽 -> 直接复用该槽，既不拷贝也不同步（稳态零成本；两槽交替还能让
+    //     A/B 两种 tiling 轮流命中）；
+    //   * 都不命中 -> 写另一个槽。写设备槽用**同流 `aclrtMemcpyAsync`**，由流内按序执行保证
+    //     「拷贝 N+1 必须在 kernel N 结束之后才开始」，因此不存在「上一发还在读、这一发把它覆盖」
+    //     的窗口——用流序消除覆盖风险，不再需要整条 `aclrtSynchronizeStream`。
+    //   * 异步拷贝读取的 host 源不能提前被改：用 8 槽 pinned ring（`aclrtMallocHost`），
+    //     每写满一轮前做一次流同步，保证任一 ring 槽被复写时它的前一次拷贝一定已完成。
+    static thread_local void *tilingDev = nullptr;
+    static thread_local size_t tilingCap = 0;
+    static constexpr size_t kTilingSlots = 2;
+    static constexpr int kTilingRing = 8;
+    static thread_local Mamba3DecodeStepTiling tilingShadow[kTilingSlots];
+    static thread_local bool tilingValid[kTilingSlots] = {false, false};
+    static thread_local void *tilingHostRing = nullptr;  // pinned staging，kTilingRing 槽
+    static thread_local int tilingNextSlot = 0;          // 下一个「写」用的设备槽
+    static thread_local int tilingRingIdx = 0;           // pinned ring 游标
+    static thread_local int tilingSinceSync = 0;         // 上次流同步以来发起的异步拷贝数
+
+    const size_t tilingBytes = sizeof(Mamba3DecodeStepTiling);
+    if (tilingDev == nullptr || tilingCap < kTilingSlots * tilingBytes) {
+        if (tilingDev != nullptr) {
+            aclrtSynchronizeStream(aclStream);
+            aclrtFree(tilingDev);
+        }
+        tilingCap = kTilingSlots * tilingBytes;
+        aclrtMalloc(&tilingDev, tilingCap, ACL_MEM_MALLOC_HUGE_FIRST);
+        if (tilingHostRing == nullptr) {
+            aclrtMallocHost(&tilingHostRing, static_cast<size_t>(kTilingRing) * tilingBytes);
+        }
+        tilingValid[0] = false;  // 新缓冲区内容未知
+        tilingValid[1] = false;
+        tilingNextSlot = 0;
+        tilingRingIdx = 0;
+        tilingSinceSync = 0;
+    }
+
+    int useSlot = -1;
+    for (size_t s = 0; s < kTilingSlots; ++s) {
+        if (tilingValid[s] && std::memcmp(&tilingShadow[s], &t, tilingBytes) == 0) {
+            useSlot = static_cast<int>(s);
+            break;
+        }
+    }
+    if (useSlot < 0) {
+        useSlot = tilingNextSlot;
+        tilingNextSlot = (tilingNextSlot + 1) % static_cast<int>(kTilingSlots);
+        if (tilingSinceSync >= kTilingRing - 1) {
+            // 复写 pinned ring 之前先把流清空，保证该槽上一次的异步拷贝已读完
+            aclrtSynchronizeStream(aclStream);
+            tilingSinceSync = 0;
+        }
+        auto *hostSlot = static_cast<Mamba3DecodeStepTiling *>(tilingHostRing) + tilingRingIdx;
+        std::memcpy(hostSlot, &t, tilingBytes);
+        auto *devSlot = static_cast<Mamba3DecodeStepTiling *>(tilingDev) + useSlot;
+        aclrtMemcpyAsync(devSlot, tilingBytes, hostSlot, tilingBytes, ACL_MEMCPY_HOST_TO_DEVICE, aclStream);
+        tilingShadow[useSlot] = t;
+        tilingValid[useSlot] = true;
+        tilingRingIdx = (tilingRingIdx + 1) % kTilingRing;
+        ++tilingSinceSync;
+    }
+    uint8_t *tilingPtr = reinterpret_cast<uint8_t *>(tilingDev) + static_cast<size_t>(useSlot) * tilingBytes;
     uint8_t *outprojPtr = hasOutproj ? reinterpret_cast<uint8_t *>(outproj->data_ptr()) : nullptr;
     uint8_t *zPtr = hasZ ? reinterpret_cast<uint8_t *>(z->data_ptr()) : nullptr;
     uint8_t *zprojPtr = hasZ ? reinterpret_cast<uint8_t *>(zproj->data_ptr()) : nullptr;
 
     if (useCube) {
         // scratch 走 torch 分配（随本 stream 的 caching allocator，生命周期由张量持有）：
-        // 2 * blockDim(AIC) * perAiv 个 float，单常量单次分配 —— 量级见报告 D2 的 provisional 说明。
+        // blockDim(AIC) * perAiv 个 float，单常量单次分配 —— 量级见报告 D2 的 provisional 说明。
         at::Tensor scratch = at::empty({cubeScratchFloats}, x.options().dtype(at::kFloat));
         mamba3_decode_step_cube(
             static_cast<uint32_t>(t.blockNum), nullptr, aclStream,
@@ -271,19 +453,58 @@ void mamba3_decode_step_torch(at::Tensor state, at::Tensor bstate, at::Tensor xs
             reinterpret_cast<uint8_t *>(dt.data_ptr()), reinterpret_cast<uint8_t *>(trap.data_ptr()),
             reinterpret_cast<uint8_t *>(xproj.data_ptr()), outprojPtr, zPtr, zprojPtr,
             reinterpret_cast<uint8_t *>(state_out.data_ptr()), reinterpret_cast<uint8_t *>(out.data_ptr()),
-            reinterpret_cast<uint8_t *>(scratch.data_ptr()), reinterpret_cast<uint8_t *>(tilingTensor.data_ptr()));
+            reinterpret_cast<uint8_t *>(scratch.data_ptr()), tilingPtr);
         return;
     }
 
+    // 参数数组：与生成桩的实参顺序、字节布局逐一对应（17 × 8 B = 136 B）。
+    void *launchArgs[17] = {
+        reinterpret_cast<uint8_t *>(state.data_ptr()),     reinterpret_cast<uint8_t *>(bstate.data_ptr()),
+        reinterpret_cast<uint8_t *>(xstate.data_ptr()),    reinterpret_cast<uint8_t *>(a.data_ptr()),
+        reinterpret_cast<uint8_t *>(b.data_ptr()),         reinterpret_cast<uint8_t *>(c.data_ptr()),
+        reinterpret_cast<uint8_t *>(d.data_ptr()),         reinterpret_cast<uint8_t *>(x.data_ptr()),
+        reinterpret_cast<uint8_t *>(dt.data_ptr()),        reinterpret_cast<uint8_t *>(trap.data_ptr()),
+        reinterpret_cast<uint8_t *>(xproj.data_ptr()),     outprojPtr,
+        zPtr,                                              zprojPtr,
+        reinterpret_cast<uint8_t *>(state_out.data_ptr()), reinterpret_cast<uint8_t *>(out.data_ptr()),
+        tilingPtr,
+    };
+
+    // PLUT-215 H3：优先自管 launch（funcHandle 已缓存，省掉生成桩的每调用查找与 profiling 桩）。
+    const aclrtFuncHandle selfFunc = SelfLaunchAllowed() ? ResolveSelfLaunchFunc() : nullptr;
+    if (selfFunc != nullptr) {
+        const aclError rc = aclrtLaunchKernelWithHostArgs(selfFunc, static_cast<uint32_t>(t.blockNum), aclStream,
+                                                          nullptr, static_cast<void *>(launchArgs), kLaunchArgBytes,
+                                                          nullptr, 0);
+        TORCH_CHECK(rc == ACL_SUCCESS, "mamba3_decode_step: aclrtLaunchKernelWithHostArgs failed, rc=", rc);
+        return;
+    }
+
+    // 回退：生成桩（与改造前逐字节相同的调用形式）。
+    ++g_selfLaunch.stubLaunches;
     mamba3_decode_step(static_cast<uint32_t>(t.blockNum), nullptr, aclStream,
-                       reinterpret_cast<uint8_t *>(state.data_ptr()), reinterpret_cast<uint8_t *>(bstate.data_ptr()),
-                       reinterpret_cast<uint8_t *>(xstate.data_ptr()), reinterpret_cast<uint8_t *>(a.data_ptr()),
-                       reinterpret_cast<uint8_t *>(b.data_ptr()), reinterpret_cast<uint8_t *>(c.data_ptr()),
-                       reinterpret_cast<uint8_t *>(d.data_ptr()), reinterpret_cast<uint8_t *>(x.data_ptr()),
-                       reinterpret_cast<uint8_t *>(dt.data_ptr()), reinterpret_cast<uint8_t *>(trap.data_ptr()),
-                       reinterpret_cast<uint8_t *>(xproj.data_ptr()), outprojPtr, zPtr, zprojPtr,
-                       reinterpret_cast<uint8_t *>(state_out.data_ptr()), reinterpret_cast<uint8_t *>(out.data_ptr()),
-                       reinterpret_cast<uint8_t *>(tilingTensor.data_ptr()));
+                       static_cast<uint8_t *>(launchArgs[0]), static_cast<uint8_t *>(launchArgs[1]),
+                       static_cast<uint8_t *>(launchArgs[2]), static_cast<uint8_t *>(launchArgs[3]),
+                       static_cast<uint8_t *>(launchArgs[4]), static_cast<uint8_t *>(launchArgs[5]),
+                       static_cast<uint8_t *>(launchArgs[6]), static_cast<uint8_t *>(launchArgs[7]),
+                       static_cast<uint8_t *>(launchArgs[8]), static_cast<uint8_t *>(launchArgs[9]),
+                       static_cast<uint8_t *>(launchArgs[10]), static_cast<uint8_t *>(launchArgs[11]),
+                       static_cast<uint8_t *>(launchArgs[12]), static_cast<uint8_t *>(launchArgs[13]),
+                       static_cast<uint8_t *>(launchArgs[14]), static_cast<uint8_t *>(launchArgs[15]),
+                       static_cast<uint8_t *>(launchArgs[16]));
+}
+
+// 当前线程一次真实下发走的 launch 形态：1 = 自管，0 = 生成桩（解析失败或环境变量强制），
+// -1 = 尚未判定（还没跑过生成桩、kernel 未注册）。只读诊断入口，不触发任何解析以外的行为。
+int64_t SelfLaunchMode()
+{
+    if (!SelfLaunchAllowed()) {
+        return 0;
+    }
+    if (g_selfLaunch.resolved > 0) {
+        return 1;
+    }
+    return g_selfLaunch.resolved < 0 ? 0 : -1;
 }
 
 }  // namespace ascend_kernel

@@ -242,6 +242,16 @@ PYTHON=/path/to/conda/envs/<env>/bin/python bash build.sh --clean   # after swit
 export MAMBA3_DECODE_STEP_LIB=/abs/path/to/libmamba3_decode_step_ops.so
 ```
 
+The same .so exposes two entry points, and the Python side uses both:
+
+| Entry | Used for |
+|---|---|
+| `torch.ops.npu.mamba3_decode_step` | the dispatch path, registered through `torch.ops.load_library` |
+| module `mamba3_decode_step_ext` with `validate` / `step` / `launch_mode` | host-side argument validation; `step` validates and launches inside one pybind11 call and falls back to the two-step path when the symbol is absent; `launch_mode` reports which launch form the current thread took |
+
+`op_extension/mamba3_decode_step_validate.cpp` is what defines the pybind11 module, so it has to be part of the
+build. A .so compiled without it still registers the torch op but has no `mamba3_decode_step_ext` (see C5).
+
 ### C4. Verifying a build
 
 ```bash
@@ -273,6 +283,16 @@ mamba3_step_fn(
 )
 torch.npu.synchronize()
 print("ok", tuple(out.shape), float(out.abs().sum()))   # -> ok (1, 2, 32) <sum>
+
+# Both entry points, and the launch form this call took
+#   launch_mode() -> 1 = aclrtLaunchKernelWithHostArgs (fast path), 0 = generated stub, -1 = no launch yet
+import importlib.util, sys
+m = sys.modules["mamba_ssm.ops.ascendc.mamba3_step"]
+spec = importlib.util.spec_from_file_location("mamba3_decode_step_ext", str(m._lib_path()))
+ext = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(ext)
+print("entries:", [a for a in ("validate", "step", "launch_mode") if hasattr(ext, a)])
+print("launch_mode:", ext.launch_mode())   # -> -1 on the very first call (kernel handle resolved), 1 from the 2nd on
 PY
 
 # The whole SISO chain (angle_dt + decode step + combined fwd/bwd), i.e. the section B acceptance suite
@@ -290,3 +310,4 @@ The error strings in the left column are quoted verbatim from the code, so they 
 | `undefined symbol` / `ImportError` at `torch.ops.load_library` | the .so was built against a different torch ABI: rebuild with the target env (`--clean`) |
 | `mamba3_decode_step: 未找到算子动态库 <path>；请先执行 bash .../build.sh 编译，或通过环境变量 MAMBA3_DECODE_STEP_LIB 指定 .so 路径` | no artifact at the default path, or `MAMBA3_DECODE_STEP_LIB` points at a missing file |
 | results change after switching env | a stale .so is still there: `bash build.sh --clean` |
+| `ImportError: dynamic module does not define module export function (PyInit_mamba3_decode_step_ext)` | the .so was built without `op_extension/mamba3_decode_step_validate.cpp` (older source set or CMakeLists): rebuild from this tree with `--clean` |

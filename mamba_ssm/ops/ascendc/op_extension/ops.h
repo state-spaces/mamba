@@ -24,6 +24,10 @@ void mamba3_decode_step_torch(at::Tensor state, at::Tensor bstate, at::Tensor xs
                               at::Tensor xproj, c10::optional<at::Tensor> outproj, c10::optional<at::Tensor> z,
                               c10::optional<at::Tensor> zproj, at::Tensor state_out, at::Tensor out, int64_t tile_d);
 
+// PLUT-215 H3：当前线程一次真实下发走的 launch 形态 —— 1 = 自管（aclrtLaunchKernelWithHostArgs），
+// 0 = 生成桩（funcHandle 解析失败或 MAMBA3_DECODE_STEP_LAUNCH=stub 强制）。只读诊断入口。
+int64_t SelfLaunchMode();
+
 }  // namespace ascend_kernel
 
 #endif  // MAMBA3_DECODE_STEP_OPS_H
