@@ -6,6 +6,13 @@ import torch
 import triton
 import triton.language as tl
 
+from mamba_ssm.ops.triton.mamba3.npu_compat import IS_CANN
+
+# On Ascend, ``num_warps=8`` (and pipelining) makes the Triton-Ascend
+# ``GraphOptimize`` pass fail to apply its rewrite for these reduction kernels,
+# so fall back to a single warp / single stage there.
+_REDUCE_LAUNCH_KWARGS = dict(num_warps=1, num_stages=1) if IS_CANN else dict(num_warps=8)
+
 
 def reduce_grouped_qk_grads(qk_grads: torch.Tensor, num_qk_groups: int) -> torch.Tensor:
     """Collapse per-head Q/K grads from ``H`` heads back to ``G`` grouped heads.
@@ -157,8 +164,14 @@ def reduce_grouped_qk_grads_and_bias_triton(
         raise ValueError(
             f"Expected raw Q/K grads to have shape [B, S, R, H, N], got {tuple(dq_raw.shape)}."
         )
-    if not dq_raw.is_contiguous() or not dk_raw.is_contiguous():
-        raise ValueError("Expected raw Q/K grads to be contiguous.")
+    # The reduction kernel below indexes ``dq_raw``/``dk_raw`` with the packed
+    # ``[B, S, R, H, N]`` strides, so a non-contiguous grad view (e.g. a
+    # transposed TileLang output) is normalised to a contiguous copy here
+    # instead of being rejected.
+    if not dq_raw.is_contiguous():
+        dq_raw = dq_raw.contiguous()
+    if not dk_raw.is_contiguous():
+        dk_raw = dk_raw.contiguous()
 
     B, S, R, H, N = dq_raw.shape
     if H % num_qk_groups != 0:
@@ -206,24 +219,33 @@ def reduce_grouped_qk_grads_and_bias_triton(
         block_m,
         block_n,
         store_grouped,
-        num_warps=8,
+        **_REDUCE_LAUNCH_KWARGS,
     )
 
-    dq_bias = torch.empty((H, R, N), dtype=torch.float32, device=dq_raw.device)
-    dk_bias = torch.empty_like(dq_bias)
-    block_b = min(1024, _next_power_of_2(num_row_blocks))
-    _finalize_qk_bias_kernel[(H, R, n_blocks)](
-        dq_bias_partial,
-        dk_bias_partial,
-        dq_bias,
-        dk_bias,
-        num_row_blocks,
-        H,
-        R,
-        N,
-        block_b,
-        block_n,
-        num_warps=8,
-    )
+    if IS_CANN:
+        # Triton-Ascend's ``GraphOptimize`` pass cannot rewrite
+        # ``_finalize_qk_bias_kernel`` (independent of num_warps/num_stages), so
+        # on NPU do the row-block reduction with plain torch.  It is numerically
+        # identical: the kernel only sums ``dq_bias_partial`` over its leading
+        # ``num_row_blocks`` axis.
+        dq_bias = dq_bias_partial.sum(dim=0).to(torch.float32)
+        dk_bias = dk_bias_partial.sum(dim=0).to(torch.float32)
+    else:
+        dq_bias = torch.empty((H, R, N), dtype=torch.float32, device=dq_raw.device)
+        dk_bias = torch.empty_like(dq_bias)
+        block_b = min(1024, _next_power_of_2(num_row_blocks))
+        _finalize_qk_bias_kernel[(H, R, n_blocks)](
+            dq_bias_partial,
+            dk_bias_partial,
+            dq_bias,
+            dk_bias,
+            num_row_blocks,
+            H,
+            R,
+            N,
+            block_b,
+            block_n,
+            **_REDUCE_LAUNCH_KWARGS,
+        )
 
     return dq_out, dk_out, dq_bias, dk_bias

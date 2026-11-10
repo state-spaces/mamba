@@ -94,15 +94,23 @@ Two constraints:
 1. **The chunk size is clamped.** On NPU `chunk_size` is capped at <=64 by `effective_chunk_size`, and for `seqlen >= 64` it is reduced further to 32. Chunking is **mathematically equivalent but not bitwise equivalent**: the number of `mod 2*pi` folds changes with the chunk size, and so does the cross-chunk accumulation order.
 2. **The measured safe upper bound for `RMSNormGated`'s `group_size` is 8192** (with `is_outproj_norm=True` this is `headdim`). Exceeding it is a **compile-time** `ub overflow`, never a silent wrong result; `16384` measured **1.83x** over the limit.
 
-## B. Inference (decode): Triton `mamba3_siso_step` replaces cutlass
+## B. Inference (decode): `mamba3_siso_step` on NPU
 Upstream `Mamba3.step()` depends on the cutlass/CuteDSL `mamba3_step_fn`, which has **not been migrated to
 Ascend**. The import guard in `mamba3.py` leaves it as `None`, so `forward(inference_params=...)` with
-`seqlen_offset > 0` dispatches into `step()` and **fails an assertion**. On NPU, call the Triton
-`mamba3_siso_step` directly: keep using the module for prefill (internally `mamba3_siso_combined(...,
-return_final_states=True)`) to obtain the four states, then call step once per token. Runnable example:
-`scripts/infer_siso_step.py`; test version: `tests/ops/triton/test_mamba3_siso_module_decode_npu.py`
--- that test lives in the `mamba-main-npu` repo and was **not** merged in this batch, so it is not in
-this tree.
+`seqlen_offset > 0` dispatches into `step()` and **fails an assertion**. On NPU, call the SISO decode step
+directly: keep using the module for prefill (internally `mamba3_siso_combined(..., return_final_states=True)`)
+to obtain the four states, then call step once per token. Runnable example: `scripts/infer_siso_step.py`;
+test version: `tests/ops/triton/test_mamba3_siso_npu.py`.
+
+Two interchangeable implementations of the single-token step (same signature, same
+`(out, [angle_state, ssm_state, k_state, v_state])` return, so they are drop-in replacements):
+
+| Implementation | Import path | Notes |
+|---|---|---|
+| **Ascend C (default on NPU)** | `mamba_ssm.ops.ascendc.mamba3_siso_step` | The step itself runs the NPU kernel-direct operator `mamba3_decode_step` (i.e. `mamba3_step_fn`); rotary / angle-state reuse the Triton `apply_rotary_qk_inference_fwd`. Build `build/libmamba3_decode_step_ops.so` first (see section C) |
+| Triton (previous implementation, kept) | `mamba_ssm.ops.triton.mamba3.mamba3_siso_step` | Pure Triton, unchanged; useful as an A/B reference |
+
+`tests/ops/triton/test_mamba3_siso_npu.py` uses Ascend C by default; set `MAMBA3_SISO_STEP_IMPL=triton` to switch back.
 
 ### B1. Prefill: obtain the four states
 ```python
@@ -129,7 +137,8 @@ states = (a, s, k.squeeze(1).contiguous(), v)       # k: (b, 1, H, N) -> (b, H, 
 import torch.nn.functional as F
 from einops import rearrange
 from mamba_ssm.modules.mamba3 import heavy_tail_activation
-from mamba_ssm.ops.triton.mamba3.mamba3_siso_step import mamba3_siso_step
+from mamba_ssm.ops.ascendc.mamba3_siso_step import mamba3_siso_step   # default on NPU (Ascend C)
+# from mamba_ssm.ops.triton.mamba3.mamba3_siso_step import mamba3_siso_step   # previous Triton path, interchangeable
 
 NSPLIT = [
     model.d_inner, model.d_inner,
@@ -169,6 +178,10 @@ out_decode = torch.stack(outs, dim=1)   # (b, l - 16, d_model)
 print(out_decode.shape, out_decode.dtype, out_prefill.shape)
 ```
 
+Extra shape constraints of the Ascend C path (violations are reported by `mamba3_step_fn` itself, never silently):
+`d_state % 8 == 0`; `headdim_v` must be divisible by one of `32/64/128` (`tile_D` is picked automatically);
+`headdim_qk % 2 == 0`; NPU only. `D=None` is treated as zeros, whereas the Triton path simply omits the `D*v` term.
+
 ### B3. Four traps (all fail **silently**; none of them raises)
 
 1. `Trap` must be the projection **before** sigmoid (the kernel applies sigmoid itself). Passing the post-sigmoid value sigmoids twice: measured p95 degrades from `2.1e-2` to `1.28` (x62).
@@ -186,4 +199,94 @@ print(out_decode.shape, out_decode.dtype, out_prefill.shape)
 
 **`Final_SSM_State` (dtype contract, already ruled on).** It is still declared `torch.float32`, but the recurrence requantises it in place in the input dtype (`mamba3_siso_fwd.py:576-581`, declared at `:769`), so a bf16 chain is effectively bf16; it passes 43/43 under the bf16 criterion and the code stays fp32 (unchanged). Caveat: that 43/43 is an **A100-side** measurement plus NPU CPU-probe inference, not an NPU re-measurement.
 
-**Inference.** Prefill + Triton step decode PASS in bf16; fp16/fp32 inference is not supported.
+**Inference.** Prefill + decode step PASS in bf16 (decode step through both the Ascend C `mamba3_decode_step`
+path and the previous Triton path; `tests/ops/triton/test_mamba3_siso_npu.py` is green); fp16/fp32 inference is
+not supported.
+
+## C. Building the `mamba3_decode_step` operator (Ascend C kernel-direct .so)
+
+The Ascend C path in section B needs the Python extension `libmamba3_decode_step_ops.so`, which wraps
+`mamba3_decode_step` (the operator behind `mamba3_step_fn`). **That .so is not in the repository and is not
+shipped with the package**: build it once per machine and once per conda env.
+
+### C1. Prerequisites
+
+| Item | Requirement |
+|---|---|
+| CANN | `source /usr/local/Ascend/ascend-toolkit/set_env.sh` has been run and `ASCEND_HOME_PATH` is set (built and tested against CANN 9.1.0) |
+| Compiler | the `bisheng` / `ccec` binaries bundled with CANN (inside the toolkit; `set_env.sh` puts them on `PATH`, nothing else to install) |
+| cmake | >= 3.16 |
+| python | **the same env you run in**, with `torch` and `torch_npu` installed. The .so links against that env's libtorch, so a different env means a rebuild |
+
+### C2. Build
+
+```bash
+source /usr/local/Ascend/ascend-toolkit/set_env.sh
+cd mamba_ssm/ops/ascendc
+PYTHON=/path/to/conda/envs/<env>/bin/python bash build.sh           # normal
+PYTHON=/path/to/conda/envs/<env>/bin/python bash build.sh --clean   # after switching env, or if the build cache looks stale
+```
+
+- Output: `mamba_ssm/ops/ascendc/build/libmamba3_decode_step_ops.so`
+- `PYTHON` falls back to whatever `python` is on `PATH`: **always pass it explicitly** on a machine with several
+  envs, otherwise cmake may bind the wrong torch
+- A full `--clean` rebuild takes roughly 40 s on an 8-core host and is dominated by the `op_kernel/*.asc` pass
+  through bisheng; changes that only touch Python (`mamba3_step.py` / `mamba3_siso_step.py`) need no rebuild
+
+### C3. Loading
+
+`mamba_ssm/ops/ascendc/mamba3_step.py` loads the library lazily on first call and looks for
+`<repo>/mamba_ssm/ops/ascendc/build/libmamba3_decode_step_ops.so` by default. To use a different location:
+
+```bash
+export MAMBA3_DECODE_STEP_LIB=/abs/path/to/libmamba3_decode_step_ops.so
+```
+
+### C4. Verifying a build
+
+```bash
+# Smoke: confirm the .so loads and computes, with the smallest legal shape
+# (d_state % 8 == 0, headdim divisible by tile_D; shapes are exactly the operator contract)
+PYTHONPATH=$PWD python - <<'PY'
+import torch
+import torch_npu  # noqa: F401
+from mamba_ssm.ops.ascendc import mamba3_step_fn
+
+B, R, H, D, N = 1, 1, 2, 32, 16
+f = lambda *s: torch.randn(*s, device="npu", dtype=torch.float32)
+state = f(B, H, D, N)
+state_out = torch.empty_like(state)
+out = torch.empty(B, H, D, device="npu", dtype=torch.float32)
+mamba3_step_fn(
+    state,                # state    (B, H, D, N)
+    f(B, R, H, N),        # Bstate   (B, R, H, N)
+    f(B, H, D),           # Xstate   (B, H, D)
+    f(B, H),              # A        (B, H)
+    f(B, R, H, N),        # B        (B, R, H, N)
+    f(B, R, H, N),        # C        (B, R, H, N)
+    f(H),                 # D        (H,)
+    f(B, H, D),           # x        (B, H, D)
+    f(B, H),              # dt       (B, H)
+    f(B, H),              # trap     (B, H)
+    f(R, H, D),           # xproj    (R, H, D)
+    outproj=f(R, H, D), state_out=state_out, out=out, tile_D=32,
+)
+torch.npu.synchronize()
+print("ok", tuple(out.shape), float(out.abs().sum()))   # -> ok (1, 2, 32) <sum>
+PY
+
+# The whole SISO chain (angle_dt + decode step + combined fwd/bwd), i.e. the section B acceptance suite
+PYTHONPATH=$PWD python tests/ops/triton/test_mamba3_siso_npu.py
+```
+
+### C5. Common failures
+
+The error strings in the left column are quoted verbatim from the code, so they match what you will see.
+
+| Symptom | Cause / fix |
+|---|---|
+| `ERROR: ASCEND_HOME_PATH 未设置，请先 source CANN 的 set_env.sh` | `set_env.sh` was not sourced; `build.sh` refuses to run |
+| cmake cannot find `torch` / `Python3` | `PYTHON` points at the wrong env, or that env has no torch installed |
+| `undefined symbol` / `ImportError` at `torch.ops.load_library` | the .so was built against a different torch ABI: rebuild with the target env (`--clean`) |
+| `mamba3_decode_step: 未找到算子动态库 <path>；请先执行 bash .../build.sh 编译，或通过环境变量 MAMBA3_DECODE_STEP_LIB 指定 .so 路径` | no artifact at the default path, or `MAMBA3_DECODE_STEP_LIB` points at a missing file |
+| results change after switching env | a stale .so is still there: `bash build.sh --clean` |
