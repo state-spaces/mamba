@@ -26,6 +26,7 @@ def _selective_scan_update_kernel(
     state_ptr, x_ptr, dt_ptr, dt_bias_ptr, A_ptr, B_ptr, C_ptr, D_ptr, z_ptr, out_ptr, state_batch_indices_ptr,
     # Matrix dimensions
     batch, nheads, dim, dstate, nheads_ngroups_ratio,
+    dt_min, dt_max,
     # Strides
     stride_state_batch, stride_state_head, stride_state_dim, stride_state_dstate,
     stride_x_batch, stride_x_head, stride_x_dim,
@@ -39,6 +40,7 @@ def _selective_scan_update_kernel(
     stride_out_batch, stride_out_head, stride_out_dim,
     # Meta-parameters
     DT_SOFTPLUS: tl.constexpr,
+    HAS_DT_LIMIT: tl.constexpr,
     TIE_HDIM: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
     HAS_DT_BIAS: tl.constexpr,
@@ -100,6 +102,8 @@ def _selective_scan_update_kernel(
             dt += tl.load(dt_bias_ptrs, mask=offs_m < dim, other=0.0).to(tl.float32)
         if DT_SOFTPLUS:
             dt = tl.where(dt <= 20.0, softplus(dt), dt)
+        if HAS_DT_LIMIT:
+            dt = tl.minimum(tl.maximum(dt, dt_min), dt_max)
         A = tl.load(A_ptrs, mask=(offs_m[:, None] < dim) & (offs_n[None, :] < dstate), other=0.0).to(tl.float32)
         dA = tl.exp(A * dt[:, None])
     else:
@@ -108,6 +112,8 @@ def _selective_scan_update_kernel(
             dt += tl.load(dt_bias_ptr).to(tl.float32)
         if DT_SOFTPLUS:
             dt = tl.where(dt <= 20.0, softplus(dt), dt)
+        if HAS_DT_LIMIT:
+            dt = tl.minimum(tl.maximum(dt, dt_min), dt_max)
         A = tl.load(A_ptr).to(tl.float32)
         dA = tl.exp(A * dt)  # scalar, not a matrix
 
@@ -133,7 +139,7 @@ def _selective_scan_update_kernel(
 
 
 def selective_state_update(state, x, dt, A, B, C, D=None, z=None, dt_bias=None, dt_softplus=False,
-                           state_batch_indices=None):
+                           state_batch_indices=None, dt_limit=(0.0, float("inf"))):
     """
     Argument:
         state: (batch, dim, dstate) or (batch, nheads, dim, dstate)
@@ -145,6 +151,7 @@ def selective_state_update(state, x, dt, A, B, C, D=None, z=None, dt_bias=None, 
         D: (dim,) or (nheads, dim)
         z: (batch, dim) or (batch, nheads, dim)
         dt_bias: (dim,) or (nheads, dim)
+        dt_limit: dt is clamped to this range after dt_bias and softplus are applied
     Return:
         out: (batch, dim) or (batch, nheads, dim)
     """
@@ -201,6 +208,7 @@ def selective_state_update(state, x, dt, A, B, C, D=None, z=None, dt_bias=None, 
         _selective_scan_update_kernel[grid](
             state, x, dt, dt_bias, A, B, C, D, z, out, state_batch_indices,
             batch, nheads, dim, dstate, nheads // ngroups,
+            dt_limit[0], dt_limit[1],
             state.stride(0), state.stride(1), state.stride(2), state.stride(3),
             x.stride(0), x.stride(1), x.stride(2),
             dt.stride(0), dt.stride(1), dt.stride(2),
@@ -212,6 +220,7 @@ def selective_state_update(state, x, dt, A, B, C, D=None, z=None, dt_bias=None, 
             z_strides[0], z_strides[1], z_strides[2],
             out.stride(0), out.stride(1), out.stride(2),
             dt_softplus,
+            dt_limit != (0.0, float("inf")),
             tie_hdim,
             BLOCK_SIZE_M,
             num_warps=num_warps,
@@ -221,7 +230,8 @@ def selective_state_update(state, x, dt, A, B, C, D=None, z=None, dt_bias=None, 
     return out
 
 
-def selective_state_update_ref(state, x, dt, A, B, C, D=None, z=None, dt_bias=None, dt_softplus=False):
+def selective_state_update_ref(state, x, dt, A, B, C, D=None, z=None, dt_bias=None, dt_softplus=False,
+                               dt_limit=(0.0, float("inf"))):
     """
     Argument:
         state: (batch, dim, dstate) or (batch, nheads, dim, dstate)
@@ -233,6 +243,7 @@ def selective_state_update_ref(state, x, dt, A, B, C, D=None, z=None, dt_bias=No
         D: (dim,) or (nheads, dim)
         z: (batch, dim) or (batch, nheads, dim)
         dt_bias: (dim,) or (nheads, dim)
+        dt_limit: dt is clamped to this range after dt_bias and softplus are applied
     Return:
         out: (batch, dim) or (batch, nheads, dim)
     """
@@ -271,6 +282,8 @@ def selective_state_update_ref(state, x, dt, A, B, C, D=None, z=None, dt_bias=No
         assert dt_bias.shape == (nheads, dim)
         dt = dt + dt_bias
     dt = F.softplus(dt) if dt_softplus else dt
+    if dt_limit != (0.0, float("inf")):
+        dt = dt.clamp(min=dt_limit[0], max=dt_limit[1])
     dA = torch.exp(rearrange(dt, "b h d -> b h d 1") * A)  # (batch, nheads, dim, dstate)
     B = repeat(B, "b g n -> b (g h) n", h=nheads // ngroups)  # (batch, nheads, dstate)
     C = repeat(C, "b g n -> b (g h) n", h=nheads // ngroups)  # (batch, nheads, dstate)
