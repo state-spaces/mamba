@@ -1,0 +1,9 @@
+# Files under 3rdparty/bishengir/ are produced on Windows (core.autocrlf=true here)
+# but executed on Linux. Without these rules git checks out CRLF copies of the .sh
+# files, and bash fails with "bad interpreter: /bin/bash^M" or stray \r in output.
+*.sh     -text
+*.patch  -text
+*.npuir  -text
+
+# The prebuilt compiler is a 45.8 MB binary; keep it out of diff/merge machinery.
+*.tar.gz binary
