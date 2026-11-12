@@ -311,3 +311,18 @@ The error strings in the left column are quoted verbatim from the code, so they 
 | `mamba3_decode_step: 未找到算子动态库 <path>；请先执行 bash .../build.sh 编译，或通过环境变量 MAMBA3_DECODE_STEP_LIB 指定 .so 路径` | no artifact at the default path, or `MAMBA3_DECODE_STEP_LIB` points at a missing file |
 | results change after switching env | a stale .so is still there: `bash build.sh --clean` |
 | `ImportError: dynamic module does not define module export function (PyInit_mamba3_decode_step_ext)` | the .so was built without `op_extension/mamba3_decode_step_validate.cpp` (older source set or CMakeLists): rebuild from this tree with `--clean` |
+
+## D. Test suites shipped here
+
+Two NPU suites ship with this repository. Upstream has no counterpart for either: they are our own,
+and both are runnable scripts (`python <file>`) that print a measured report and exit non-zero on
+failure. Both need `torch_npu`, `triton-ascend` and, for the decode step, the built
+`libmamba3_decode_step_ops.so` (section C).
+
+| File | What it checks |
+|---|---|
+| `tests/ops/triton/test_mamba3_siso_npu.py` | Operator level, bf16 on `npu`, against the upstream PyTorch reference: `angle_dt`, a 64-step decode recurrence (the four states are carried across steps), and combined chunked forward + backward with every gradient. `MAMBA3_SISO_STEP_IMPL=ascendc` (default) or `triton` selects which decode step is measured, so one run per value gives the A/B comparison. |
+| `tests/ops/triton/test_mamba3_siso_module_decode_npu.py` | Module level: `Mamba3` prefill and token-by-token decode must agree, same device, teacher-forced input. It drives the Triton step (not the Ascend C operator) and skips itself when no accelerator is present. |
+
+The upstream CUDA suite `tests/ops/triton/test_mamba3_siso.py` is untouched and stays CUDA-only; the
+reference implementations the first suite compares against are imported from it.
