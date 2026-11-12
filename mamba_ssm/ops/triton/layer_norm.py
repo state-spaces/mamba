@@ -129,7 +129,12 @@ def rms_norm_ref(
 
 def config_prune(configs):
 
-    if torch.version.hip:
+    if torch.version.hip and not torch.cuda.is_available():
+        # Imported without a visible GPU (e.g. on a login node): the arch is unknown, so prune as for
+        # Instinct (warp 64). That only drops the num_warps=32 config, which every arch can run without.
+        # Querying the device here raises "No HIP GPUs are available" and `import mamba_ssm` fails.
+        warp_size = 64
+    elif torch.version.hip:
         try:
             # set warp size based on gcn architecure 
             gcn_arch_name = torch.cuda.get_device_properties(0).gcnArchName
