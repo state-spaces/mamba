@@ -76,3 +76,31 @@ def test_chunk_state_varlen(chunk_size, ngroups, dtype):
     out_ref = torch.cat(out_ref, dim=0)
     print(f"Max diff = {(out - out_ref).abs().max().item()}")
     assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
+
+
+@pytest.mark.parametrize("seqlens", [[50, 70, 80], [64, 64, 72], [130, 20]])
+def test_varlen_states_with_initial_states(seqlens):
+    # initial_states apply to the first packed sequence, so its varlen state must equal the final state
+    # of that sequence run on its own with the same initial_states, also when it ends inside the first chunk.
+    device = "cuda"
+    rtol, atol = 1e-3, 1e-3
+    torch.random.manual_seed(0)
+    chunk_size, nheads, headdim, dstate = 64, 4, 64, 64
+    total_seqlen = sum(seqlens)
+    cu_seqlens = torch.tensor([0] + seqlens, device=device).cumsum(0).to(torch.int32)
+    seq_idx = torch.cat([torch.full((s,), i, dtype=torch.int32, device=device) for i, s in enumerate(seqlens)]).unsqueeze(0)
+    x = torch.randn(1, total_seqlen, nheads, headdim, device=device)
+    dt = F.softplus(torch.randn(1, total_seqlen, nheads, device=device) - 2)
+    A = -torch.rand(nheads, device=device) - 0.1
+    B = torch.randn(1, total_seqlen, 1, dstate, device=device) / 8
+    C = torch.randn(1, total_seqlen, 1, dstate, device=device) / 8
+    initial_states = torch.randn(1, nheads, headdim, dstate, device=device)
+    _, varlen_states = mamba_chunk_scan_combined(x, dt, A, B, C, chunk_size, initial_states=initial_states,
+                                                 seq_idx=seq_idx, cu_seqlens=cu_seqlens, return_varlen_states=True)
+    for i in range(len(seqlens)):
+        s, e = cu_seqlens[i].item(), cu_seqlens[i + 1].item()
+        _, final_states = mamba_chunk_scan_combined(x[:, s:e], dt[:, s:e], A, B[:, s:e], C[:, s:e], chunk_size,
+                                                    initial_states=initial_states if i == 0 else None,
+                                                    return_final_states=True)
+        print(f"Sequence {i} max diff = {(varlen_states[i] - final_states[0]).abs().max().item()}")
+        assert torch.allclose(varlen_states[i], final_states[0], rtol=rtol, atol=atol)
