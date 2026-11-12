@@ -199,3 +199,35 @@ def test_selective_state_update_with_heads_with_batch_indices(dim, dstate, ngrou
     print(f"Output mean diff: {(out - out_ref).abs().mean().item()}")
     assert torch.allclose(state[state_indices,:], state_ref, rtol=rtol, atol=atol)
     assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
+
+
+@pytest.mark.parametrize("tie_hdim", [False, True])
+def test_selective_state_update_dt_limit(tie_hdim):
+    device = "cuda"
+    rtol, atol = 3e-4, 1e-3
+    torch.random.manual_seed(0)
+    batch_size, nheads, headdim, dstate = 2, 16, 64, 32
+    dt_limit = (0.05, 0.2)
+    state = torch.randn(batch_size, nheads, headdim, dstate, device=device)
+    x = torch.randn(batch_size, nheads, headdim, device=device)
+    if not tie_hdim:
+        dt = torch.randn(batch_size, nheads, headdim, device=device)
+        dt_bias = torch.randn(nheads, headdim, device=device)
+        A = -torch.rand(nheads, headdim, dstate, device=device) - 1.0
+    else:
+        dt = repeat(torch.randn(batch_size, nheads, device=device), "b h -> b h p", p=headdim)
+        dt_bias = repeat(torch.randn(nheads, device=device), "h -> h p", p=headdim)
+        A = repeat(-torch.rand(nheads, device=device) - 1.0, "h -> h p n", p=headdim, n=dstate)
+    D = torch.randn(nheads, headdim, device=device)
+    B = torch.randn(batch_size, 1, dstate, device=device)
+    C = torch.randn(batch_size, 1, dstate, device=device)
+    # Expected: the update with dt = clamp(softplus(dt + dt_bias), *dt_limit) precomputed
+    dt_clamped = F.softplus(dt + dt_bias).clamp(min=dt_limit[0], max=dt_limit[1])
+    # Make sure the limit is active for this input
+    assert (dt_clamped != F.softplus(dt + dt_bias)).any()
+    state_ref = state.detach().clone()
+    out = selective_state_update(state, x, dt, A, B, C, D=D, dt_bias=dt_bias, dt_softplus=True,
+                                 dt_limit=dt_limit)
+    out_ref = selective_state_update_ref(state_ref, x, dt_clamped, A, B, C, D=D)
+    assert torch.allclose(state, state_ref, rtol=rtol, atol=atol)
+    assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
