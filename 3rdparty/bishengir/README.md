@@ -26,6 +26,11 @@ a single environment variable.
 
 All scripts locate their siblings through `dirname $0`, so the directory can be moved as a whole.
 
+The 45.8 MB tarball is versioned in-tree on purpose — no Git LFS, no Release download: the target
+machines are often offline and `git clone` is the only distribution channel available. The sha256
+quoted in step 2 is the contract; `build_patched_bishengir.sh` regenerates an equivalent package from
+source if you would rather not trust a binary.
+
 ---
 
 ## 1. Pick an approach
