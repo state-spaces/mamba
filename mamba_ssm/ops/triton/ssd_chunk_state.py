@@ -697,8 +697,9 @@ def _chunk_state_varlen_kernel(
         dt_ptrs += BLOCK_SIZE_K * stride_dt_csize
         dA_cumsum_ptrs += BLOCK_SIZE_K * stride_dA_cs_csize
 
-    # If the sequence starts after the last chunk idx, we don't need to add the contribution from the last chunk
-    if start_idx < pid_c * chunk_size:
+    # If the sequence starts after the last chunk idx, we don't need to add the contribution from the last chunk.
+    # The first sequence (start_idx == 0) always takes it: for pid_c == 0 it holds the initial states.
+    if (start_idx < pid_c * chunk_size) or (start_idx == 0):
         chunk_states_ptrs = chunk_states_ptr + (offs_m[:, None] * stride_chunk_states_hdim + offs_n[None, :] * stride_chunk_states_dstate)
         chunk_states = tl.load(chunk_states_ptrs, mask=(offs_m[:, None] < hdim) & (offs_n[None, :] < dstate), other=0.0).to(tl.float32)
         # scale = tl.where(start_idx < pid_c * chunk_size, tl.exp(dA_cs_last), 0.0)
