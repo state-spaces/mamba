@@ -1,6 +1,9 @@
 # Copyright (c) 2026, Dao AI Lab, Goombalab.
 
 import math
+import os
+import warnings
+
 from einops import rearrange, repeat
 
 import torch
@@ -9,10 +12,36 @@ import torch.nn.functional as F
 
 from mamba_ssm.ops.triton.layernorm_gated import RMSNorm as RMSNormGated
 
-try:
-    from mamba_ssm.ops.tilelang.mamba3.mamba3_mimo import mamba3_mimo as mamba3_mimo_combined
-except ImportError:
+# TileLang's MIMO path cannot be built/imported on Ascend NPU (it fails with
+# non-ImportError errors such as ``PassConfigKey.TL_ENABLE_FAST_MATH``).  Setting
+# ``MAMBA3_DISABLE_TILELANG=1`` skips the import entirely so that the SISO Triton
+# path (``mamba3_siso_combined``) can be used on NPU.  On CUDA the variable is
+# unset and the tilelang path is imported as before.
+_TILELANG_DISABLED = os.environ.get("MAMBA3_DISABLE_TILELANG", "").lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
+if _TILELANG_DISABLED:
     mamba3_mimo_combined = None
+else:
+    try:
+        from mamba_ssm.ops.tilelang.mamba3.mamba3_mimo import mamba3_mimo as mamba3_mimo_combined
+    except ImportError:
+        mamba3_mimo_combined = None
+    except Exception as exc:
+        # TileLang can raise non-ImportError exceptions at import time; keep the
+        # module importable but surface the real error instead of silently
+        # swallowing it.
+        warnings.warn(
+            "mamba3_mimo (tilelang) could not be imported; the MIMO path is "
+            f"disabled. Set MAMBA3_DISABLE_TILELANG=1 to silence this. cause: {exc!r}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        mamba3_mimo_combined = None
 
 from mamba_ssm.ops.triton.mamba3.mamba3_siso_combined import mamba3_siso_combined
 

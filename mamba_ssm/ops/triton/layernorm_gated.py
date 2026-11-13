@@ -14,6 +14,124 @@ import triton.language as tl
 
 from einops import rearrange
 
+# Single implementation of the device guard and the core-count heuristic; the
+# non-gated LayerNorm/RMSNorm path (``layer_norm.py``) uses the same helpers.
+from mamba_ssm.ops.triton.mamba3.npu_compat import (
+    _device_ctx,
+    _npu_aiv_block_limit,
+    _sm_count,
+)
+
+
+# Ascend folds a 2D Triton grid onto a 1D ``coreDim`` that must fit
+# ``UINT16_MAX = 65535``.  The forward grid is ``(M, ngroups)`` where ``M`` is
+# the product of the leading dims and ``ngroups = N // group_size``, so the
+# constrained quantity is ``M * ngroups`` (the number of normalisation groups).
+# CUDA's ``grid.x`` limit is 2^31-1, so the CUDA launch is left exactly as
+# before (one row per program); on every other device the row extent is capped
+# and the kernel grid-strides over rows.
+_MAX_COREDIM = 65535
+_FWD_GRID_LIMIT = _MAX_COREDIM
+
+
+def set_fwd_grid_limit(limit):
+    """Test hook: lower the effective forward coreDim cap (``None`` = 65535).
+
+    Production leaves this at ``_MAX_COREDIM``.  Lowering it exercises the
+    capped-grid + inner-row-loop path on shapes small enough to run quickly,
+    without touching the kernel code the real overflow uses.
+    """
+    global _FWD_GRID_LIMIT
+    if limit is None:
+        _FWD_GRID_LIMIT = _MAX_COREDIM
+        return
+    limit = int(limit)
+    if not 1 <= limit <= _MAX_COREDIM:
+        raise ValueError(f"fwd grid limit must be in [1, {_MAX_COREDIM}], got {limit}")
+    _FWD_GRID_LIMIT = limit
+
+
+def _fwd_row_programs(M, ngroups, limit=None):
+    """Row extent for the forward launch: ``(row_programs, rows_per_program)``.
+
+    The flattened coreDim is ``row_programs * ngroups``; it is kept at or below
+    ``limit`` by capping the row extent at ``limit // ngroups`` and letting each
+    program loop over rows with a stride of ``row_programs``:
+
+        max_rows  = limit // ngroups
+        rows_per  = 1                              if M <= max_rows
+                    ceil(M / max_rows)              otherwise
+        programs  = ceil(M / rows_per)  (== M when not compressed)
+
+    A "tile" is one row, so there is no intra-tile tail mask: the loop bound
+    ``M`` short-circuits programs whose next row is out of range.
+    """
+    limit = _FWD_GRID_LIMIT if limit is None else int(limit)
+    M, ngroups = int(M), int(ngroups)
+    if ngroups > limit:
+        raise ValueError(
+            f"ngroups={ngroups} alone exceeds the coreDim limit {limit}: the group "
+            f"extent cannot be compressed by a row grid-stride")
+    max_row_programs = limit // ngroups
+    if M <= max_row_programs:
+        return M, 1
+    rows_per_program = -(-M // max_row_programs)  # ceil
+    return -(-M // rows_per_program), rows_per_program
+
+
+# Test-observable launch geometry.  Every forward launch records what it
+# actually emitted so tests can prove the capped path ran instead of inferring
+# it from a successful call:
+#   * ``num_tiles``       logical group count ``M * ngroups``;
+#   * ``num_row_programs`` row extent actually launched (``<= _MAX_COREDIM //
+#                         ngroups`` whenever the device is not CUDA);
+#   * ``rows_per_program`` rows each program visits (grid-stride length);
+#   * ``grid``            the emitted ``(row_programs, ngroups)`` tuple;
+#   * ``grid_stride``     True iff a program visits more than one row;
+#   * ``launched``        False for the ``M == 0`` short-circuit.
+_FWD_GRID_STATE = {
+    "M": 0,
+    "ngroups": 0,
+    "num_tiles": 0,
+    "num_row_programs": 0,
+    "rows_per_program": 0,
+    "grid": (0, 0),
+    "grid_stride": False,
+    "launched": False,
+    "calls": 0,
+    "grid_stride_calls": 0,
+}
+
+
+def reset_fwd_grid_state():
+    """Reset the launch-geometry record (does not change the cap)."""
+    _FWD_GRID_STATE.update(
+        M=0, ngroups=0, num_tiles=0, num_row_programs=0, rows_per_program=0,
+        grid=(0, 0), grid_stride=False, launched=False, calls=0,
+        grid_stride_calls=0,
+    )
+
+
+def get_fwd_grid_state():
+    """Snapshot of the last forward launch's geometry (test hook)."""
+    return dict(_FWD_GRID_STATE)
+
+
+def _record_fwd_grid(M, ngroups, row_programs, rows_per_program, launched):
+    grid_stride = bool(launched and int(row_programs) < int(M))
+    _FWD_GRID_STATE.update(
+        M=int(M),
+        ngroups=int(ngroups),
+        num_tiles=int(M) * int(ngroups),
+        num_row_programs=int(row_programs),
+        rows_per_program=int(rows_per_program),
+        grid=(int(row_programs), int(ngroups)),
+        grid_stride=grid_stride,
+        launched=bool(launched),
+        calls=_FWD_GRID_STATE["calls"] + 1,
+        grid_stride_calls=_FWD_GRID_STATE["grid_stride_calls"] + int(grid_stride),
+    )
+
 
 def rms_norm_ref(x, weight, bias, z=None, eps=1e-6, group_size=None, norm_before_gate=True, upcast=True):
     dtype = x.dtype
@@ -56,53 +174,68 @@ def _layer_norm_fwd_1pass_kernel(
     M,  # number of rows in X
     N,  # number of columns in X
     eps,  # epsilon to avoid division by zero
+    num_row_programs,  # rows launched (row grid-stride step)
     BLOCK_N: tl.constexpr,
     HAS_BIAS: tl.constexpr,
     HAS_Z: tl.constexpr,
     NORM_BEFORE_GATE: tl.constexpr,
     IS_RMS_NORM: tl.constexpr,
 ):
-    # Map the program id to the row of X and Y it should compute.
-    row = tl.program_id(0)
+    # Row grid-stride: this program handles rows ``pid``, ``pid +
+    # num_row_programs``, ... so the flattened coreDim
+    # (``num_row_programs * ngroups``) can stay under UINT16_MAX while every row
+    # is still visited exactly once.  When the grid is not compressed,
+    # ``num_row_programs == M`` and the loop runs a single iteration, which is
+    # the original one-row-per-program schedule.
+    # ``num_row_programs`` is passed explicitly rather than read from
+    # ``tl.num_programs(0)`` because Triton-Ascend may fold the logical grid
+    # onto the physical AI cores, making that value unreliable.
+    pid = tl.program_id(0)
     group = tl.program_id(1)
-    X += row * stride_x_row + group * N
-    Y += row * stride_y_row + group * N
+    X += group * N
+    Y += group * N
     if HAS_Z:
-        Z += row * stride_z_row + group * N
+        Z += group * N
     if not IS_RMS_NORM:
         Mean += group * M
     Rstd += group * M
     W += group * N
     if HAS_BIAS:
         B += group * N
-    # Compute mean and variance
     cols = tl.arange(0, BLOCK_N)
-    x = tl.load(X + cols, mask=cols < N, other=0.).to(tl.float32)
-    if HAS_Z and not NORM_BEFORE_GATE:
-        z = tl.load(Z + cols, mask=cols < N).to(tl.float32)
-        x *= z * tl.sigmoid(z)
-    if not IS_RMS_NORM:
-        mean = tl.sum(x, axis=0) / N
-        tl.store(Mean + row, mean)
-        xbar = tl.where(cols < N, x - mean, 0.)
-        var = tl.sum(xbar * xbar, axis=0) / N
-    else:
-        xbar = tl.where(cols < N, x, 0.)
-        var = tl.sum(xbar * xbar, axis=0) / N
-    rstd = 1 / tl.sqrt(var + eps)
-    tl.store(Rstd + row, rstd)
-    # Normalize and apply linear transformation
     mask = cols < N
+    # weight/bias are shared by every row of this program's group
     w = tl.load(W + cols, mask=mask).to(tl.float32)
     if HAS_BIAS:
         b = tl.load(B + cols, mask=mask).to(tl.float32)
-    x_hat = (x - mean) * rstd if not IS_RMS_NORM else x * rstd
-    y = x_hat * w + b if HAS_BIAS else x_hat * w
-    if HAS_Z and NORM_BEFORE_GATE:
-        z = tl.load(Z + cols, mask=mask).to(tl.float32)
-        y *= z * tl.sigmoid(z)
-    # Write output
-    tl.store(Y + cols, y, mask=mask)
+    # Rows owned by this program: pid, pid + num_row_programs, ...  A unit-step
+    # loop is used because some Triton backends do not accept a dynamic step.
+    num_rows = (M - pid + num_row_programs - 1) // num_row_programs
+    for i in range(0, num_rows):
+        row = pid + i * num_row_programs
+        # Compute mean and variance
+        x = tl.load(X + row * stride_x_row + cols, mask=cols < N, other=0.).to(tl.float32)
+        if HAS_Z and not NORM_BEFORE_GATE:
+            z = tl.load(Z + row * stride_z_row + cols, mask=cols < N).to(tl.float32)
+            x *= z * tl.sigmoid(z)
+        if not IS_RMS_NORM:
+            mean = tl.sum(x, axis=0) / N
+            tl.store(Mean + row, mean)
+            xbar = tl.where(cols < N, x - mean, 0.)
+            var = tl.sum(xbar * xbar, axis=0) / N
+        else:
+            xbar = tl.where(cols < N, x, 0.)
+            var = tl.sum(xbar * xbar, axis=0) / N
+        rstd = 1 / tl.sqrt(var + eps)
+        tl.store(Rstd + row, rstd)
+        # Normalize and apply linear transformation
+        x_hat = (x - mean) * rstd if not IS_RMS_NORM else x * rstd
+        y = x_hat * w + b if HAS_BIAS else x_hat * w
+        if HAS_Z and NORM_BEFORE_GATE:
+            z = tl.load(Z + row * stride_z_row + cols, mask=mask).to(tl.float32)
+            y *= z * tl.sigmoid(z)
+        # Write output
+        tl.store(Y + row * stride_y_row + cols, y, mask=mask)
 
 
 def _layer_norm_fwd(x, weight, bias, eps, z=None, out=None, group_size=None, norm_before_gate=True, is_rms_norm=False):
@@ -135,11 +268,22 @@ def _layer_norm_fwd(x, weight, bias, eps, z=None, out=None, group_size=None, nor
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
     # heuristics for number of warps
     num_warps = min(max(BLOCK_N // 256, 1), 8)
-    grid = (M, ngroups)
-    with torch.cuda.device(x.device.index):
+    if M == 0:
+        # Zero rows: the outputs (and mean/rstd) are already empty and there is
+        # no valid grid, so short-circuit instead of launching (zero-tile rule).
+        _record_fwd_grid(M, ngroups, 0, 0, launched=False)
+        return out, mean, rstd
+    if getattr(x.device, "type", None) == "cuda":
+        # CUDA grid.x is 2^31-1: keep the historical one-row-per-program launch.
+        row_programs, rows_per_program = M, 1
+    else:
+        row_programs, rows_per_program = _fwd_row_programs(M, ngroups)
+    grid = (row_programs, ngroups)
+    _record_fwd_grid(M, ngroups, row_programs, rows_per_program, launched=True)
+    with _device_ctx(x.device):
         _layer_norm_fwd_1pass_kernel[grid](x, out, weight, bias, z, mean, rstd,
                                            x.stride(0), out.stride(0), z.stride(0) if z is not None else 0,
-                                           M, group_size, eps,
+                                           M, group_size, eps, row_programs,
                                            BLOCK_N=BLOCK_N,
                                            NORM_BEFORE_GATE=norm_before_gate,
                                            IS_RMS_NORM=is_rms_norm,
@@ -306,7 +450,7 @@ def _layer_norm_bwd(dy, x, weight, bias, eps, mean, rstd, z=None, group_size=Non
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
     # heuristics for number of warps
     num_warps = min(max(BLOCK_N // 256, 1), 8)
-    sm_count = torch.cuda.get_device_properties(x.device).multi_processor_count
+    sm_count = _sm_count(x.device)
     # If group size is small (e.g., 64), we're only using 1 warp. So having just 108 programs
     # would limit the occupancy.
     nrow_groups = math.ceil(sm_count * math.ceil(4 / num_warps) / ngroups)
@@ -314,7 +458,7 @@ def _layer_norm_bwd(dy, x, weight, bias, eps, mean, rstd, z=None, group_size=Non
     _db = torch.empty((nrow_groups, N), dtype=torch.float32, device=bias.device) if bias is not None else None
     rows_per_program = math.ceil(M / nrow_groups)
     grid = (nrow_groups, ngroups)
-    with torch.cuda.device(x.device.index):
+    with _device_ctx(x.device):
         _layer_norm_bwd_kernel[grid](x, weight, bias, z, out if recompute_output else None,
                                      dy, dx, _dw, _db, dz, mean, rstd,
                                      x.stride(0),

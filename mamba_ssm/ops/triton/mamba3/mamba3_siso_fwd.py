@@ -8,12 +8,84 @@ from typing import Optional, Tuple
 import math
 
 import torch
-import torch.nn.functional as F
-from einops import rearrange, repeat
 
 import triton
 import triton.language as tl
-from mamba_ssm.ops.triton.mamba3.utils import cos_approx, sin_approx, tanh_approx, silu, sigmoid_approx
+from mamba_ssm.ops.triton.mamba3.utils import cos_approx, sin_approx, silu, sigmoid_approx
+from mamba_ssm.ops.triton.mamba3.npu_compat import (
+    alloc_device,
+    autotune_regs,
+    effective_chunk_size,
+    make_config,
+    precise_dqkv,
+    set_allocator_safely,
+    stage_choices,
+)
+
+# Ascend launches a 1D ``coreDim`` that must fit in UINT16_MAX.  The logical
+# grid is ``nheads * batch`` (varlen: ``nheads * num_sequences``) and grows with
+# the configuration, so it can exceed the limit for large batch / many sequences.
+# Above it we switch to a grid-stride launch: at most ``_GRID_STRIDE_LIMIT``
+# programs, each looping over several (head, batch) tiles.  Programs stay
+# independent (the only recurrence is over chunks *inside* a program), so this
+# is a pure scheduling change.  ``num_programs`` is passed explicitly instead of
+# using ``tl.num_programs(0)`` because Triton-Ascend may fold the logical grid
+# onto the physical AI cores, making that value unreliable.
+_MAX_COREDIM = 65535
+_GRID_STRIDE_LIMIT = _MAX_COREDIM
+
+
+def _grid_programs(num_tiles: int) -> int:
+    """Logical program count: all tiles when under the cap, else the cap."""
+    return min(int(num_tiles), int(_GRID_STRIDE_LIMIT))
+
+
+# Test-observable grid-stride signal.  Every ``mamba3_siso_fwd`` call records
+# its launch geometry here so tests can assert that the capped path was really
+# taken instead of merely inferring it from a successful launch:
+#   * ``num_tiles``      logical tiles, ``nheads*batch`` / ``nheads*num_sequences``;
+#   * ``num_programs``   launched grid extent (``<= _MAX_COREDIM``);
+#   * ``grid_stride``    ``True`` iff ``num_programs < num_tiles``, i.e. the
+#                        kernel's per-program tile loop runs more than once;
+#   * ``calls`` / ``grid_stride_calls``  wrapper-call counters.
+# PHASE=0 and PHASE=1 share the same grid, so one call updates this once.
+_GRID_STRIDE_STATE = {
+    "num_tiles": 0,
+    "num_programs": 0,
+    "grid_stride": False,
+    "calls": 0,
+    "grid_stride_calls": 0,
+}
+
+
+def set_grid_stride_limit(limit: Optional[int]) -> None:
+    """Test hook: lower the effective ``coreDim`` cap (``None`` restores 65535).
+
+    Production leaves this at ``_MAX_COREDIM``.  Lowering it forces the exact
+    capped-grid + inner-tile-loop path on a problem small enough for one card,
+    without changing the kernel code that the real overflow exercises.
+    """
+    global _GRID_STRIDE_LIMIT
+    if limit is None:
+        _GRID_STRIDE_LIMIT = _MAX_COREDIM
+        return
+    limit = int(limit)
+    if not 1 <= limit <= _MAX_COREDIM:
+        raise ValueError(f"grid-stride limit must be in [1, {_MAX_COREDIM}], got {limit}")
+    _GRID_STRIDE_LIMIT = limit
+
+
+def get_grid_stride_state() -> dict:
+    """Snapshot of the last wrapper call's launch geometry (test hook)."""
+    return dict(_GRID_STRIDE_STATE)
+
+
+def reset_grid_stride_state() -> None:
+    """Reset the test-observable counters (does not change the limit)."""
+    _GRID_STRIDE_STATE.update(
+        num_tiles=0, num_programs=0, grid_stride=False,
+        calls=0, grid_stride_calls=0,
+    )
 
 
 def _prune_mamba3_siso_fwd_configs(configs, named_args, **kwargs):
@@ -24,8 +96,22 @@ def _prune_mamba3_siso_fwd_configs(configs, named_args, **kwargs):
     recurrent kernel. This is a Triton codegen issue reproduced across Triton 3.5.1,
     3.6.0, and 3.7.0. Restrict to num_stages=1 on Blackwell to ensure correctness.
     Non-Blackwell architectures (e.g., Hopper/SM90) retain the full autotune space.
+
+    The decision is driven purely by the *device type* of the input, so it is well
+    defined on every backend: a CUDA device probes compute capability (Blackwell
+    pruning), while an Ascend ``npu`` device keeps the full config space (the
+    CUDA-codegen bug does not apply there).  Keeping the check device-driven also
+    makes the behaviour identical for the CUDA-mocked unit test regardless of the
+    backend that imported this module.
+
+    Ascend note: on NPU this hook is a *constant no-op* -- ``device_type``
+    is ``"npu"``, so it returns ``configs`` unchanged and prunes nothing.
     """
-    major, _ = torch.cuda.get_device_capability(named_args["Q"].device)
+    device = named_args["Q"].device
+    device_type = device.type if hasattr(device, "type") else str(device).split(":")[0]
+    if device_type != "cuda":
+        return configs
+    major, _ = torch.cuda.get_device_capability(device)
     if major in (10, 12):
         return [config for config in configs if config.num_stages == 1]
     return configs
@@ -33,14 +119,14 @@ def _prune_mamba3_siso_fwd_configs(configs, named_args, **kwargs):
 
 @triton.autotune(
     configs=[
-        triton.Config({}, num_stages=s, num_warps=w, maxnreg=r)
-        for s in [1, 2, 3]
+        make_config({}, s, w, r)
+        for s in stage_choices([1, 2, 3])
         for w in [2, 4, 8]
-        for r in [None, 128, 256]
+        for r in autotune_regs([None, 128, 256])
     ],
     key=[
         "CHUNK_SIZE", "HEADDIM_QK", "HEADDIM_V", "STORE_SSM_STATES_ADT_OUTV", "HAS_D",
-        "HAS_Z", "HAS_INITIAL_STATES", "RETURN_FINAL_STATES", "IS_VARLEN"],
+        "HAS_Z", "HAS_INITIAL_STATES", "RETURN_FINAL_STATES", "IS_VARLEN", "PHASE"],
     prune_configs_by={
         "early_config_prune": _prune_mamba3_siso_fwd_configs,
     },
@@ -86,8 +172,10 @@ def mamba3_siso_fwd_kernel(
     stride_final_k_state_seq, stride_final_k_state_head, stride_final_k_state_chunk,
     stride_final_k_state_qkdim,
     # Dimensions
-    seqlen, nheads_qk, headdim_qk, headdim_v, headdim_angles,
+    nheads, seqlen, nheads_qk, headdim_qk, headdim_v, headdim_angles, num_cblocks,
+    num_tiles, num_programs,
     CHUNK_SIZE: tl.constexpr,
+    BLOCK_C: tl.constexpr,
     HEADDIM_QK: tl.constexpr,
     HEADDIM_V: tl.constexpr,
     STORE_SSM_STATES_ADT_OUTV: tl.constexpr,
@@ -96,11 +184,15 @@ def mamba3_siso_fwd_kernel(
     HAS_D: tl.constexpr,
     HAS_Z: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    PHASE: tl.constexpr,
 ):
     """
     Mamba-3 forward kernel.
 
-    Grid: (nheads, batch) for batched, (nheads, 1, num_sequences) for varlen
+    Grid: flat ``(num_programs,)``.  The logical tiles are ``(nheads, batch)``
+    for batched and ``(nheads, num_sequences)`` for varlen; when that count
+    exceeds the Ascend ``coreDim`` limit each program loops over several
+    tiles (grid-stride).
 
     Inputs:
         Q, K:                       (batch, seqlen, nheads_qk, headdim_qk)
@@ -154,307 +246,352 @@ def mamba3_siso_fwd_kernel(
     2. Final K state has an additional chunk_size dimension since triton does not allow indexing within a chunk. We
     pick the correct index in the wrapper.
     """
-    pid_head = tl.program_id(0)
-    pid_batch = tl.program_id(1)
+    # Grid-stride over independent (head, batch/sequence) tiles.  With
+    # num_programs == num_tiles (the common case) each program handles exactly
+    # one tile and the mapping is identical to the former 2D/3D grid.  Above the
+    # Ascend ``coreDim`` cap the wrapper launches at most ``_MAX_COREDIM``
+    # programs and each one loops over the remaining tiles; tiles are fully
+    # independent (the only state recurrence is over chunks *inside* a
+    # program), so this is a pure scheduling change.
+    #
+    # The iteration count is per-program (``cdiv``) so the loop uses a constant
+    # step of 1: Triton's ``range`` does not accept a runtime step.
+    pid = tl.program_id(0)
+    for i in range(0, tl.cdiv(num_tiles - pid, num_programs)):
+        tile_idx = pid + i * num_programs
+        pid_head = tile_idx % nheads
 
-    if IS_VARLEN:
-        pid_seq = tl.program_id(2)
-        seq_idx = pid_seq
+        if IS_VARLEN:
+            pid_batch = 0
+            pid_seq = tile_idx // nheads
+            seq_idx = pid_seq
 
-        cu_seqlen_start = tl.load(Cu_Seqlens + pid_seq * stride_cu_seqlen).to(tl.int32)
-        cu_seqlen_end = tl.load(Cu_Seqlens + (pid_seq + 1) * stride_cu_seqlen).to(tl.int32)
-        total_seqlen = seqlen
-        seqlen = cu_seqlen_end - cu_seqlen_start
-        seq_offset = cu_seqlen_start
-        chunk_offset = pid_seq + cu_seqlen_start // CHUNK_SIZE
-    else:
-        seq_idx = pid_batch
-        seq_offset = 0
-        chunk_offset = 0
+            cu_seqlen_start = tl.load(Cu_Seqlens + pid_seq * stride_cu_seqlen).to(tl.int32)
+            cu_seqlen_end = tl.load(Cu_Seqlens + (pid_seq + 1) * stride_cu_seqlen).to(tl.int32)
+            seqlen = cu_seqlen_end - cu_seqlen_start
+            seq_offset = cu_seqlen_start
+            chunk_offset = pid_seq + cu_seqlen_start // CHUNK_SIZE
+        else:
+            pid_batch = tile_idx // nheads
+            seq_idx = pid_batch
+            seq_offset = 0
+            chunk_offset = 0
 
-    num_chunks = tl.cdiv(seqlen, CHUNK_SIZE)
+        num_chunks = tl.cdiv(seqlen, CHUNK_SIZE)
 
-    # Compute head index for Q/K (supports Grouped Query Attention)
-    nheads = tl.num_programs(0)
-    head_idx_qk = pid_head // (nheads // nheads_qk)
+        # Compute head index for Q/K (supports Grouped Query Attention).
+        # ``nheads`` is passed explicitly instead of using ``tl.num_programs(0)``:
+        # Triton-Ascend folds a logical grid onto the physical AI cores, so the
+        # program count observed inside the kernel is not guaranteed to be the
+        # logical grid extent.
+        head_idx_qk = pid_head // (nheads // nheads_qk)
 
-    # Setup input pointers
-    q_ptr = Q + pid_batch * stride_q_batch + head_idx_qk * stride_q_head + seq_offset * stride_q_seqlen
-    k_ptr = K + pid_batch * stride_k_batch + head_idx_qk * stride_k_head + seq_offset * stride_k_seqlen
-    v_ptr = V + pid_batch * stride_v_batch + pid_head * stride_v_head + seq_offset * stride_v_seqlen
-    adt_ptr = ADT + pid_batch * stride_adt_batch + pid_head * stride_adt_head + seq_offset * stride_adt_seqlen
-    dt_ptr = DT + pid_batch * stride_dt_batch + pid_head * stride_dt_head + seq_offset * stride_dt_seqlen
-    trap_ptr = Trap + pid_batch * stride_trap_batch + pid_head * stride_trap_head + seq_offset * stride_trap_seqlen
-    q_bias_ptr = Q_bias + pid_head * stride_q_bias_head
-    k_bias_ptr = K_bias + pid_head * stride_k_bias_head
-    angle_ptr = Angles + pid_batch * stride_angles_batch + pid_head * stride_angles_head + seq_offset * stride_angles_seqlen
+        # Setup input pointers
+        q_ptr = Q + pid_batch * stride_q_batch + head_idx_qk * stride_q_head + seq_offset * stride_q_seqlen
+        k_ptr = K + pid_batch * stride_k_batch + head_idx_qk * stride_k_head + seq_offset * stride_k_seqlen
+        v_ptr = V + pid_batch * stride_v_batch + pid_head * stride_v_head + seq_offset * stride_v_seqlen
+        adt_ptr = ADT + pid_batch * stride_adt_batch + pid_head * stride_adt_head + seq_offset * stride_adt_seqlen
+        dt_ptr = DT + pid_batch * stride_dt_batch + pid_head * stride_dt_head + seq_offset * stride_dt_seqlen
+        trap_ptr = Trap + pid_batch * stride_trap_batch + pid_head * stride_trap_head + seq_offset * stride_trap_seqlen
+        q_bias_ptr = Q_bias + pid_head * stride_q_bias_head
+        k_bias_ptr = K_bias + pid_head * stride_k_bias_head
+        angle_ptr = Angles + pid_batch * stride_angles_batch + pid_head * stride_angles_head + seq_offset * stride_angles_seqlen
 
-    if HAS_D:
-        D_ptr = D + pid_head * stride_d_head
-        D_val = tl.load(D_ptr).to(tl.float32)
-    if HAS_Z:
-        z_ptr = Z + pid_batch * stride_z_batch + pid_head * stride_z_head + seq_offset * stride_z_seqlen
-
-    # State pointers use seq_idx (unified for batched and varlen)
-    if HAS_INITIAL_STATES:
-        init_ssm_state_ptr = Initial_SSM_State + seq_idx * stride_init_ssm_state_seq + pid_head * stride_init_ssm_state_head
-        init_k_state_ptr = Initial_K_State + seq_idx * stride_init_k_state_seq + pid_head * stride_init_k_state_head
-        init_v_state_ptr = Initial_V_State + seq_idx * stride_init_v_state_seq + pid_head * stride_init_v_state_head
-
-    # Setup output pointers
-    o_ptr = Out + pid_batch * stride_o_batch + pid_head * stride_o_head + seq_offset * stride_o_seqlen
-    if STORE_SSM_STATES_ADT_OUTV:
-        out_v_ptr = Out_v + pid_batch * stride_o_v_batch + pid_head * stride_o_v_head + seq_offset * stride_o_v_seqlen
-        ssm_states_ptr = SSM_States + pid_batch * stride_ssm_states_batch + pid_head * stride_ssm_states_head + chunk_offset * HEADDIM_QK * stride_ssm_states_qkdim
-        da_cs_store_ptr = DA_CS_Store + pid_batch * stride_da_cs_store_batch + pid_head * stride_da_cs_store_head + seq_offset * stride_da_cs_store_seqlen
-        da_cs_sum_store_ptr = DA_CS_SUM_Store + pid_batch * stride_da_cs_sum_store_batch + pid_head * stride_da_cs_sum_store_head + chunk_offset * stride_da_cs_sum_store_seqlen
-
-    q_store_ptr = Q_store + pid_batch * stride_q_store_batch + pid_head * stride_q_store_head + seq_offset * stride_q_store_seqlen
-    k_store_ptr = K_store + pid_batch * stride_k_store_batch + pid_head * stride_k_store_head + seq_offset * stride_k_store_seqlen
-    qk_store_ptr = QK_store + pid_batch * stride_qk_store_batch + pid_head * stride_qk_store_head + seq_offset * stride_qk_store_seqlen
-    scale_store_ptr = Scale_store + pid_batch * stride_scale_store_batch + pid_head * stride_scale_store_head + seq_offset * stride_scale_store_seqlen
-    gamma_store_ptr = Gamma_store + pid_batch * stride_gamma_store_batch + pid_head * stride_gamma_store_head + seq_offset * stride_gamma_store_seqlen
-
-    if RETURN_FINAL_STATES:
-        final_ssm_state_ptr = Final_SSM_State + seq_idx * stride_final_ssm_state_seq + pid_head * stride_final_ssm_state_head
-        final_k_state_ptr = Final_K_State + seq_idx * stride_final_k_state_seq + pid_head * stride_final_k_state_head
-
-    # Create TMA tensor descriptors
-    q_desc = tl.make_tensor_descriptor(
-        q_ptr,
-        shape=[seqlen, headdim_qk],
-        strides=[stride_q_seqlen, stride_q_qkdim],
-        block_shape=[CHUNK_SIZE, HEADDIM_QK],
-    )
-    k_desc = tl.make_tensor_descriptor(
-        k_ptr,
-        shape=[seqlen, headdim_qk],
-        strides=[stride_k_seqlen, stride_k_qkdim],
-        block_shape=[CHUNK_SIZE, HEADDIM_QK],
-    )
-    v_desc = tl.make_tensor_descriptor(
-        v_ptr,
-        shape=[seqlen, headdim_v],
-        strides=[stride_v_seqlen, stride_v_vdim],
-        block_shape=[CHUNK_SIZE, HEADDIM_V],
-    )
-    if HAS_Z:
-        z_desc = tl.make_tensor_descriptor(
-            z_ptr,
-            shape=[seqlen, headdim_v],
-            strides=[stride_z_seqlen, stride_z_vdim],
-            block_shape=[CHUNK_SIZE, HEADDIM_V],
-        )
-
-    q_store_desc = tl.make_tensor_descriptor(
-        q_store_ptr,
-        shape=[seqlen, headdim_qk],
-        strides=[stride_q_store_seqlen, stride_q_store_qkdim],
-        block_shape=[CHUNK_SIZE, HEADDIM_QK],
-    )
-    k_store_desc = tl.make_tensor_descriptor(
-        k_store_ptr,
-        shape=[seqlen, headdim_qk],
-        strides=[stride_k_store_seqlen, stride_k_store_qkdim],
-        block_shape=[CHUNK_SIZE, HEADDIM_QK],
-    )
-    o_desc = tl.make_tensor_descriptor(
-        o_ptr,
-        shape=[seqlen, headdim_v],
-        strides=[stride_o_seqlen, stride_o_vdim],
-        block_shape=[CHUNK_SIZE, HEADDIM_V],
-    )
-    if STORE_SSM_STATES_ADT_OUTV:
-        ssm_states_desc = tl.make_tensor_descriptor(
-            ssm_states_ptr,
-            shape=[headdim_v, num_chunks * headdim_qk],
-            strides=[stride_ssm_states_vdim, stride_ssm_states_qkdim],
-            block_shape=[HEADDIM_V, HEADDIM_QK],
-        )
-
-    # Phase 1: Preprocessing - Apply bias, rotary embeddings, compute QK dots.
-    for chunk_idx in range(num_chunks):
-        chunk_start = chunk_idx * CHUNK_SIZE
-        offs_seqlen = chunk_start + tl.arange(0, CHUNK_SIZE)
-        offs_hd = tl.arange(0, HEADDIM_QK)
-        offs_hdr = tl.arange(0, HEADDIM_QK // 2)
-
-        # Load Q and K blocks via TMA
-        q_pre_block = q_desc.load([chunk_start, 0])
-        k_pre_block = k_desc.load([chunk_start, 0])
-
-        # Load rotary angles
-        angle_block = tl.load(
-            angle_ptr + offs_seqlen[:, None] * stride_angles_seqlen + offs_hdr[None, :] * stride_angles_qkdim,
-            mask=(offs_seqlen[:, None] < seqlen) & (offs_hdr[None, :] < headdim_angles), other=0.0
-        )
-
-        # Compute shifted gamma and scale
-        dt = tl.load(dt_ptr + offs_seqlen * stride_dt_seqlen, mask=offs_seqlen < seqlen, other=0.0).to(tl.float32)
-        dt_shifted = tl.load(
-            dt_ptr + (offs_seqlen + 1) * stride_dt_seqlen,
-            mask=offs_seqlen + 1 < seqlen, other=0.0).to(tl.float32)
-        trap = tl.load(trap_ptr + offs_seqlen * stride_trap_seqlen, mask=offs_seqlen < seqlen, other=0.0).to(tl.float32)
-        trap = sigmoid_approx(trap)
-        trap_shifted = tl.load(
-            trap_ptr + (offs_seqlen + 1) * stride_trap_seqlen,
-            mask=offs_seqlen + 1 < seqlen, other=0.0).to(tl.float32)
-        trap_shifted = sigmoid_approx(trap_shifted)
-
-        shifted_gamma = dt_shifted * (1 - trap_shifted)
-        gamma = dt * trap
-        scale = shifted_gamma + gamma
-
-        # Store scale and shifted gamma for backward pass
-        tl.store(gamma_store_ptr + offs_seqlen * stride_gamma_store_seqlen, gamma, mask=offs_seqlen < seqlen)
-        tl.store(scale_store_ptr + offs_seqlen * stride_scale_store_seqlen, scale, mask=offs_seqlen < seqlen)
-
-        # Add biases to Q and K
-        q_bias_block = tl.load(q_bias_ptr + offs_hd * stride_q_bias_qkdim, offs_hd < headdim_qk)
-        q_pre_block += q_bias_block[None, :]
-        k_bias_block = tl.load(k_bias_ptr + offs_hd * stride_k_bias_qkdim, offs_hd < headdim_qk)
-        k_pre_block += k_bias_block[None, :]
-
-        # Compute QK dot products for skip connection
-        store_qk_dot = tl.dot(
-            q_pre_block * k_pre_block,
-            tl.full([HEADDIM_QK, 1], 1, dtype=q_pre_block.dtype)
-        ).to(q_pre_block.dtype)
-        store_qk_dot = store_qk_dot.reshape(CHUNK_SIZE)
-        store_qk_dot *= gamma
-        tl.store(qk_store_ptr + offs_seqlen * stride_qk_store_seqlen, store_qk_dot, mask=offs_seqlen < seqlen)
-
-        # Compute rotary embedding cos/sin
-        cos_block = cos_approx(angle_block.to(tl.float32))
-        sin_block = sin_approx(angle_block.to(tl.float32))
-
-        # Apply rotary embeddings to K and scale
-        k0, k1 = tl.split(tl.reshape(k_pre_block, [CHUNK_SIZE, HEADDIM_QK // 2, 2]))
-        ko0 = k0 * cos_block - k1 * sin_block
-        ko1 = k0 * sin_block + k1 * cos_block
-        k_pre_block = tl.reshape(tl.join(ko0, ko1), [CHUNK_SIZE, HEADDIM_QK]).to(k_pre_block.dtype)
-
-        if chunk_idx == num_chunks - 1 and RETURN_FINAL_STATES:
-            tl.store(final_k_state_ptr + tl.arange(0, CHUNK_SIZE)[:, None] * stride_final_k_state_chunk
-                + offs_hd[None, :] * stride_final_k_state_qkdim,
-                k_pre_block,
-                mask=(offs_hd[None, :] < headdim_qk))
-
-        k_pre_block *= scale[:, None]
-        k_store_desc.store([chunk_start, 0], k_pre_block)
-
-        # Apply rotary embeddings to Q
-        q0, q1 = tl.split(tl.reshape(q_pre_block, [CHUNK_SIZE, HEADDIM_QK // 2, 2]))
-        qo0 = q0 * cos_block - q1 * sin_block
-        qo1 = q0 * sin_block + q1 * cos_block
-        q_pre_block = tl.reshape(tl.join(qo0, qo1), [CHUNK_SIZE, HEADDIM_QK]).to(q_pre_block.dtype)
-        q_store_desc.store([chunk_start, 0], q_pre_block)
-
-    # Phase 2: Main computation and output generation.
-    if HAS_INITIAL_STATES:
-        acc_ssm_states = tl.load(
-            init_ssm_state_ptr + tl.arange(0, HEADDIM_V)[:, None] * stride_init_ssm_state_vdim
-            + tl.arange(0, HEADDIM_QK)[None, :] * stride_init_ssm_state_qkdim,
-            mask= (tl.arange(0, HEADDIM_V)[:, None] < headdim_v) & (tl.arange(0, HEADDIM_QK)[None, :] < headdim_qk),
-            other=0.0).to(tl.float32)
-        input_k_state = tl.load(
-            init_k_state_ptr + tl.arange(0, HEADDIM_QK) * stride_init_k_state_qkdim,
-            mask=tl.arange(0, HEADDIM_QK) < headdim_qk, other=0.0).to(tl.float32)
-        input_v_state = tl.load(
-            init_v_state_ptr + tl.arange(0, HEADDIM_V) * stride_init_v_state_vdim,
-            mask=tl.arange(0, HEADDIM_V) < headdim_v, other=0.0).to(tl.float32)
-
-        dt_scalar = tl.load(dt_ptr).to(tl.float32)
-        trap_scalar = tl.load(trap_ptr).to(tl.float32)
-        trap_scalar = sigmoid_approx(trap_scalar)
-        # Step on the SSM states with input K/V states to account for trapezoidal discretization
-        acc_ssm_states += input_v_state[:, None] * input_k_state[None, :] * dt_scalar * (1 - trap_scalar)
-    else:
-        acc_ssm_states = tl.zeros([HEADDIM_V, HEADDIM_QK], dtype=tl.float32)
-
-    if HAS_D:
-        D_val = tl.load(D_ptr).to(tl.float32)
-    else:
-        D_val = 0.0
-
-    for chunk_idx in range(num_chunks):
-        chunk_start = chunk_idx * CHUNK_SIZE
-        offs_seqlen = chunk_start + tl.arange(0, CHUNK_SIZE)
-
-        # Load decay factors (log2 scale for exp2 computation)
-        adt_ptrs = adt_ptr + offs_seqlen * stride_adt_seqlen
-        da = tl.load(adt_ptrs, mask=offs_seqlen < seqlen, other=0.0) * 1.44269504089  # log2(e)
-
-        # Load preprocessed Q, K, V blocks
-        q_block = q_store_desc.load([chunk_start, 0])
-        k_block = k_store_desc.load([chunk_start, 0])
-        v_block = v_desc.load([chunk_start, 0])
+        if HAS_D:
+            D_ptr = D + pid_head * stride_d_head
+            D_val = tl.load(D_ptr).to(tl.float32)
         if HAS_Z:
-            z_block = z_desc.load([chunk_start, 0])
+            z_ptr = Z + pid_batch * stride_z_batch + pid_head * stride_z_head + seq_offset * stride_z_seqlen
 
-        # Compute cumulative decay for this chunk
-        da_cs = tl.cumsum(da)
-        da_cs_last = tl.sum(da)
-        da_cs_rev = da_cs_last - da_cs
+        # State pointers use seq_idx (unified for batched and varlen)
+        if HAS_INITIAL_STATES:
+            init_ssm_state_ptr = Initial_SSM_State + seq_idx * stride_init_ssm_state_seq + pid_head * stride_init_ssm_state_head
+            init_k_state_ptr = Initial_K_State + seq_idx * stride_init_k_state_seq + pid_head * stride_init_k_state_head
+            init_v_state_ptr = Initial_V_State + seq_idx * stride_init_v_state_seq + pid_head * stride_init_v_state_head
 
-        # Store decay info for backward pass
+        # Setup output pointers
+        o_ptr = Out + pid_batch * stride_o_batch + pid_head * stride_o_head + seq_offset * stride_o_seqlen
         if STORE_SSM_STATES_ADT_OUTV:
-            tl.store(da_cs_store_ptr + offs_seqlen * stride_da_cs_store_seqlen, da_cs, mask=offs_seqlen < seqlen)
-            tl.store(da_cs_sum_store_ptr + chunk_idx * stride_da_cs_sum_store_seqlen, da_cs_last)
+            out_v_ptr = Out_v + pid_batch * stride_o_v_batch + pid_head * stride_o_v_head + seq_offset * stride_o_v_seqlen
+            ssm_states_ptr = SSM_States + pid_batch * stride_ssm_states_batch + pid_head * stride_ssm_states_head + chunk_offset * HEADDIM_QK * stride_ssm_states_qkdim
+            da_cs_store_ptr = DA_CS_Store + pid_batch * stride_da_cs_store_batch + pid_head * stride_da_cs_store_head + seq_offset * stride_da_cs_store_seqlen
+            da_cs_sum_store_ptr = DA_CS_SUM_Store + pid_batch * stride_da_cs_sum_store_batch + pid_head * stride_da_cs_sum_store_head + chunk_offset * stride_da_cs_sum_store_seqlen
 
-        # Output contribution from previous state: Q @ SSM_States^T * exp(da_cs)
-        acc_o = tl.dot(q_block, tl.trans(acc_ssm_states).to(q_block.dtype))
-        acc_o *= tl.math.exp2(da_cs)[:, None]
+        q_store_ptr = Q_store + pid_batch * stride_q_store_batch + pid_head * stride_q_store_head + seq_offset * stride_q_store_seqlen
+        k_store_ptr = K_store + pid_batch * stride_k_store_batch + pid_head * stride_k_store_head + seq_offset * stride_k_store_seqlen
+        qk_store_ptr = QK_store + pid_batch * stride_qk_store_batch + pid_head * stride_qk_store_head + seq_offset * stride_qk_store_seqlen
+        scale_store_ptr = Scale_store + pid_batch * stride_scale_store_batch + pid_head * stride_scale_store_head + seq_offset * stride_scale_store_seqlen
+        gamma_store_ptr = Gamma_store + pid_batch * stride_gamma_store_batch + pid_head * stride_gamma_store_head + seq_offset * stride_gamma_store_seqlen
 
-        # Output contribution from current chunk: causal(Q @ K^T * exp(decay)) @ V
-        # NOTE: We compute the (i,i) component using QK dot to prevent non-causal numerical leakage
-        s_block = tl.dot(q_block, tl.trans(k_block))
-        s_block *= tl.math.exp2(tl.minimum((da_cs[:, None] - da_cs[None, :]), 0.0))
-        s_block = tl.where(
-            tl.arange(0, CHUNK_SIZE)[:, None] > tl.arange(0, CHUNK_SIZE)[None, :],
-            s_block,
-            0.0
-        )
-        acc_o += tl.dot(s_block.to(v_block.dtype), v_block)
+        if RETURN_FINAL_STATES:
+            final_ssm_state_ptr = Final_SSM_State + seq_idx * stride_final_ssm_state_seq + pid_head * stride_final_ssm_state_head
+            final_k_state_ptr = Final_K_State + seq_idx * stride_final_k_state_seq + pid_head * stride_final_k_state_head
 
-        # Add D-skip connection and subtract QK dot contribution
-        qk_dot = tl.load(qk_store_ptr + offs_seqlen * stride_qk_store_seqlen, mask=offs_seqlen < seqlen, other=0.0)
-        acc_o += (D_val + qk_dot)[:, None] * v_block
+        # NOTE (Ascend migration): upstream used TMA tensor descriptors here
+        # (``tl.make_tensor_descriptor``) for Q/K/V/Z, the store buffers and the
+        # SSM states.  Triton-Ascend does not support TMA, so every ``desc.load``/
+        # ``desc.store`` below is replaced with a plain strided pointer access and
+        # an explicit mask that reproduces TMA's out-of-bounds zero padding.
 
-        if STORE_SSM_STATES_ADT_OUTV:
-            tl.store(out_v_ptr + offs_seqlen[:, None] * stride_o_v_seqlen
-                + tl.arange(0, HEADDIM_V)[None, :] * stride_o_v_vdim, acc_o,
-                mask=(offs_seqlen[:, None] < seqlen) & (tl.arange(0, HEADDIM_V)[None, :] < headdim_v))
+        if PHASE == 0:
+            # ------------------------------------------------------------------
+            # Phase 1: preprocessing (bias + interleaved rotary + QK dot).
+            #
+            # Ascend UB mitigation:
+            #   * the chunk is processed in BLOCK_C row sub-tiles;
+            #   * Q/K are loaded/rotated/stored as even/odd headdim halves so no
+            #     bf16 tl.split/tl.join is needed (Triton-Ascend cannot lower those:
+            #     "cannot align ... axis");
+            #   * Q/K bias vectors are chunk-independent and hoisted.
+            # This phase is compiled as its own specialization (PHASE=0) so it does
+            # not share UB with Phase 2.
+            # ------------------------------------------------------------------
+            offs_hd = tl.arange(0, HEADDIM_QK)
+            offs_hdr = tl.arange(0, HEADDIM_QK // 2)
+            hd_mask = offs_hd < headdim_qk
+            hdr_mask = offs_hdr < headdim_angles
+            offs_e = 2 * offs_hdr
+            offs_o = 2 * offs_hdr + 1
+            e_mask = offs_e < headdim_qk
+            o_mask = offs_o < headdim_qk
+            q_bias_e = tl.load(q_bias_ptr + offs_e * stride_q_bias_qkdim, mask=e_mask, other=0.0)
+            q_bias_o = tl.load(q_bias_ptr + offs_o * stride_q_bias_qkdim, mask=o_mask, other=0.0)
+            k_bias_e = tl.load(k_bias_ptr + offs_e * stride_k_bias_qkdim, mask=e_mask, other=0.0)
+            k_bias_o = tl.load(k_bias_ptr + offs_o * stride_k_bias_qkdim, mask=o_mask, other=0.0)
 
-        # Apply Z-gating if present
-        if HAS_Z:
-            acc_o = acc_o * silu(z_block.to(tl.float32))
+            for chunk_idx in range(num_chunks):
+                chunk_start = chunk_idx * CHUNK_SIZE
+                for cb in range(0, num_cblocks):
+                    c0 = cb * BLOCK_C
+                    rows = chunk_start + c0 + tl.arange(0, BLOCK_C)
+                    rmask = rows < seqlen
 
-        # Store output
-        o_desc.store([chunk_start, 0], acc_o)
+                    # Q/K even/odd headdim halves (strided loads; no split/join)
+                    q_e = tl.load(q_ptr + rows[:, None] * stride_q_seqlen + offs_e[None, :] * stride_q_qkdim,
+                                  mask=rmask[:, None] & e_mask[None, :], other=0.0)
+                    q_o = tl.load(q_ptr + rows[:, None] * stride_q_seqlen + offs_o[None, :] * stride_q_qkdim,
+                                  mask=rmask[:, None] & o_mask[None, :], other=0.0)
+                    k_e = tl.load(k_ptr + rows[:, None] * stride_k_seqlen + offs_e[None, :] * stride_k_qkdim,
+                                  mask=rmask[:, None] & e_mask[None, :], other=0.0)
+                    k_o = tl.load(k_ptr + rows[:, None] * stride_k_seqlen + offs_o[None, :] * stride_k_qkdim,
+                                  mask=rmask[:, None] & o_mask[None, :], other=0.0)
 
-        if STORE_SSM_STATES_ADT_OUTV:
-            ssm_states_desc.store([0, chunk_idx * headdim_qk], acc_ssm_states.to(ssm_states_desc.dtype))
+                    # Load rotary angles
+                    angle_block = tl.load(
+                        angle_ptr + rows[:, None] * stride_angles_seqlen + offs_hdr[None, :] * stride_angles_qkdim,
+                        mask=rmask[:, None] & hdr_mask[None, :], other=0.0,
+                    )
 
-        # Update recurrent states
-        scale = tl.math.exp2(da_cs_rev)
-        v_block *= scale[:, None]
-        acc_ssm_states = acc_ssm_states * tl.math.exp2(da_cs_last) + tl.dot(
-            tl.trans(v_block).to(k_block.dtype), k_block
-        )
+                    # Compute shifted gamma and scale
+                    dt = tl.load(dt_ptr + rows * stride_dt_seqlen, mask=rmask, other=0.0).to(tl.float32)
+                    dt_shifted = tl.load(dt_ptr + (rows + 1) * stride_dt_seqlen,
+                                         mask=(rows + 1) < seqlen, other=0.0).to(tl.float32)
+                    trap = tl.load(trap_ptr + rows * stride_trap_seqlen, mask=rmask, other=0.0).to(tl.float32)
+                    trap = sigmoid_approx(trap)
+                    trap_shifted = tl.load(trap_ptr + (rows + 1) * stride_trap_seqlen,
+                                           mask=(rows + 1) < seqlen, other=0.0).to(tl.float32)
+                    trap_shifted = sigmoid_approx(trap_shifted)
+                    shifted_gamma = dt_shifted * (1 - trap_shifted)
+                    gamma = dt * trap
+                    scale = shifted_gamma + gamma
 
-    # Store final states if requested
-    if RETURN_FINAL_STATES:
-        tl.store(final_ssm_state_ptr + tl.arange(0, HEADDIM_V)[:, None] * stride_final_ssm_state_vdim
-            + tl.arange(0, HEADDIM_QK)[None, :] * stride_final_ssm_state_qkdim,
-            acc_ssm_states,
-            mask=(tl.arange(0, HEADDIM_V)[:, None] < headdim_v) & (tl.arange(0, HEADDIM_QK)[None, :] < headdim_qk))
+                    # Store scale and shifted gamma for backward pass
+                    tl.store(gamma_store_ptr + rows * stride_gamma_store_seqlen, gamma, mask=rmask)
+                    tl.store(scale_store_ptr + rows * stride_scale_store_seqlen, scale, mask=rmask)
 
-# Memory Allocator for TMA Descriptors
+                    # Add biases to Q and K
+                    q_e += q_bias_e[None, :]
+                    q_o += q_bias_o[None, :]
+                    k_e += k_bias_e[None, :]
+                    k_o += k_bias_o[None, :]
+
+                    # QK dot product for the skip connection (fp32 products + sum,
+                    # matching an exactly-accumulating bf16 ``tl.dot``)
+                    qk = (tl.sum(q_e.to(tl.float32) * k_e.to(tl.float32), axis=1)
+                          + tl.sum(q_o.to(tl.float32) * k_o.to(tl.float32), axis=1))
+                    store_qk_dot = qk.to(k_e.dtype) * gamma
+                    tl.store(qk_store_ptr + rows * stride_qk_store_seqlen, store_qk_dot, mask=rmask)
+
+                    # Interleaved rotary on the even/odd halves
+                    cos_b = cos_approx(angle_block.to(tl.float32))
+                    sin_b = sin_approx(angle_block.to(tl.float32))
+                    qe_rot = q_e * cos_b - q_o * sin_b
+                    qo_rot = q_e * sin_b + q_o * cos_b
+                    ke_rot = k_e * cos_b - k_o * sin_b
+                    ko_rot = k_e * sin_b + k_o * cos_b
+
+                    if chunk_idx == num_chunks - 1 and RETURN_FINAL_STATES:
+                        sel = c0 + tl.arange(0, BLOCK_C)
+                        tl.store(final_k_state_ptr + sel[:, None] * stride_final_k_state_chunk
+                                 + offs_e[None, :] * stride_final_k_state_qkdim,
+                                 ke_rot, mask=e_mask[None, :])
+                        tl.store(final_k_state_ptr + sel[:, None] * stride_final_k_state_chunk
+                                 + offs_o[None, :] * stride_final_k_state_qkdim,
+                                 ko_rot, mask=o_mask[None, :])
+
+                    # Scale K and store
+                    tl.store(k_store_ptr + rows[:, None] * stride_k_store_seqlen + offs_e[None, :] * stride_k_store_qkdim,
+                             (ke_rot * scale[:, None]), mask=rmask[:, None] & e_mask[None, :])
+                    tl.store(k_store_ptr + rows[:, None] * stride_k_store_seqlen + offs_o[None, :] * stride_k_store_qkdim,
+                             (ko_rot * scale[:, None]), mask=rmask[:, None] & o_mask[None, :])
+
+                    # Store rotated Q
+                    tl.store(q_store_ptr + rows[:, None] * stride_q_store_seqlen + offs_e[None, :] * stride_q_store_qkdim,
+                             qe_rot, mask=rmask[:, None] & e_mask[None, :])
+                    tl.store(q_store_ptr + rows[:, None] * stride_q_store_seqlen + offs_o[None, :] * stride_q_store_qkdim,
+                             qo_rot, mask=rmask[:, None] & o_mask[None, :])
+
+        if PHASE == 1:
+            # Phase 2: Main computation and output generation.
+            if HAS_INITIAL_STATES:
+                acc_ssm_states = tl.load(
+                    init_ssm_state_ptr + tl.arange(0, HEADDIM_V)[:, None] * stride_init_ssm_state_vdim
+                    + tl.arange(0, HEADDIM_QK)[None, :] * stride_init_ssm_state_qkdim,
+                    mask= (tl.arange(0, HEADDIM_V)[:, None] < headdim_v) & (tl.arange(0, HEADDIM_QK)[None, :] < headdim_qk),
+                    other=0.0).to(tl.float32)
+                input_k_state = tl.load(
+                    init_k_state_ptr + tl.arange(0, HEADDIM_QK) * stride_init_k_state_qkdim,
+                    mask=tl.arange(0, HEADDIM_QK) < headdim_qk, other=0.0).to(tl.float32)
+                input_v_state = tl.load(
+                    init_v_state_ptr + tl.arange(0, HEADDIM_V) * stride_init_v_state_vdim,
+                    mask=tl.arange(0, HEADDIM_V) < headdim_v, other=0.0).to(tl.float32)
+
+                dt_scalar = tl.load(dt_ptr).to(tl.float32)
+                trap_scalar = tl.load(trap_ptr).to(tl.float32)
+                trap_scalar = sigmoid_approx(trap_scalar)
+                # Step on the SSM states with input K/V states to account for trapezoidal discretization
+                acc_ssm_states += input_v_state[:, None] * input_k_state[None, :] * dt_scalar * (1 - trap_scalar)
+            else:
+                acc_ssm_states = tl.zeros([HEADDIM_V, HEADDIM_QK], dtype=tl.float32)
+
+            if HAS_D:
+                D_val = tl.load(D_ptr).to(tl.float32)
+            else:
+                D_val = 0.0
+
+            offs_hd = tl.arange(0, HEADDIM_QK)
+            hd_mask = offs_hd < headdim_qk
+            offs_hdv = tl.arange(0, HEADDIM_V)
+            hdv_mask = offs_hdv < headdim_v
+
+            for chunk_idx in range(num_chunks):
+                chunk_start = chunk_idx * CHUNK_SIZE
+                offs_seqlen = chunk_start + tl.arange(0, CHUNK_SIZE)
+                seq2 = offs_seqlen < seqlen
+
+                # Load decay factors (log2 scale for exp2 computation)
+                da = tl.load(adt_ptr + offs_seqlen * stride_adt_seqlen, mask=seq2, other=0.0) * 1.44269504089  # log2(e)
+
+                # Cumulative decay for this chunk (columns + recurrent state use it).
+                da_cs = tl.cumsum(da)
+                da_cs_last = tl.sum(da)
+                da_cs_rev = da_cs_last - da_cs
+
+                # Store decay info for backward pass
+                if STORE_SSM_STATES_ADT_OUTV:
+                    tl.store(da_cs_store_ptr + offs_seqlen * stride_da_cs_store_seqlen, da_cs, mask=seq2)
+                    tl.store(da_cs_sum_store_ptr + chunk_idx * stride_da_cs_sum_store_seqlen, da_cs_last)
+
+                # K and V of this chunk (all columns/rows are needed for attention and
+                # for the recurrent-state update).
+                k_block = tl.load(
+                    k_store_ptr + offs_seqlen[:, None] * stride_k_store_seqlen + offs_hd[None, :] * stride_k_store_qkdim,
+                    mask=seq2[:, None] & hd_mask[None, :], other=0.0,
+                )
+                k_t = tl.trans(k_block)  # (HEADDIM_QK, CHUNK_SIZE)
+                v_block = tl.load(
+                    v_ptr + offs_seqlen[:, None] * stride_v_seqlen + offs_hdv[None, :] * stride_v_vdim,
+                    mask=seq2[:, None] & hdv_mask[None, :], other=0.0,
+                )
+
+                # Row sub-blocks of the output.  UB mitigation (Ascend): never
+                # materialise the full CHUNK_SIZE x CHUNK_SIZE gate matrix nor a full
+                # fp32 CHUNK_SIZE x V accumulator -- each block only holds BLOCK_C rows,
+                # so every intermediate is O(BLOCK_C x ...).
+                for cb in range(0, num_cblocks):
+                    c0 = cb * BLOCK_C
+                    rows = chunk_start + c0 + tl.arange(0, BLOCK_C)
+                    rmask = rows < seqlen
+
+                    # Rows-only cumulative decay = prefix before this sub-block + the
+                    # in-block cumsum (avoids materialising / slicing the full da_cs).
+                    base = tl.sum(tl.where(tl.arange(0, CHUNK_SIZE) < c0, da, 0.0))
+                    da_row = tl.load(adt_ptr + rows * stride_adt_seqlen, mask=rmask, other=0.0) * 1.44269504089
+                    da_row_cs = base + tl.cumsum(da_row)
+
+                    q_sub = tl.load(
+                        q_store_ptr + rows[:, None] * stride_q_store_seqlen + offs_hd[None, :] * stride_q_store_qkdim,
+                        mask=rmask[:, None] & hd_mask[None, :], other=0.0,
+                    )
+                    v_sub = tl.load(
+                        v_ptr + rows[:, None] * stride_v_seqlen + offs_hdv[None, :] * stride_v_vdim,
+                        mask=rmask[:, None] & hdv_mask[None, :], other=0.0,
+                    )
+
+                    # Contribution from the running state: Q @ SSM_States^T * exp(da_cs)
+                    acc_o = tl.dot(q_sub, tl.trans(acc_ssm_states).to(q_sub.dtype))
+                    acc_o *= tl.math.exp2(da_row_cs)[:, None]
+
+                    # Causal intra-chunk term: (Q @ K^T * exp(decay)) @ V, restricted to
+                    # this block's rows -> (BLOCK_C x CHUNK_SIZE) gate instead of
+                    # (CHUNK_SIZE x CHUNK_SIZE).
+                    s_block = tl.dot(q_sub, k_t)
+                    s_block *= tl.math.exp2(tl.minimum(da_row_cs[:, None] - da_cs[None, :], 0.0))
+                    s_block = tl.where(rows[:, None] > offs_seqlen[None, :], s_block, 0.0)
+                    acc_o += tl.dot(s_block.to(v_sub.dtype), v_block)
+
+                    # Add D-skip connection and the QK dot contribution
+                    qk_dot = tl.load(qk_store_ptr + rows * stride_qk_store_seqlen, mask=rmask, other=0.0)
+                    acc_o += (D_val + qk_dot)[:, None] * v_sub
+
+                    if STORE_SSM_STATES_ADT_OUTV:
+                        tl.store(out_v_ptr + rows[:, None] * stride_o_v_seqlen
+                            + offs_hdv[None, :] * stride_o_v_vdim, acc_o,
+                            mask=rmask[:, None] & hdv_mask[None, :])
+
+                    # Apply Z-gating if present
+                    if HAS_Z:
+                        z_sub = tl.load(
+                            z_ptr + rows[:, None] * stride_z_seqlen + offs_hdv[None, :] * stride_z_vdim,
+                            mask=rmask[:, None] & hdv_mask[None, :], other=0.0,
+                        )
+                        acc_o = acc_o * silu(z_sub.to(tl.float32))
+
+                    # Store output
+                    tl.store(
+                        o_ptr + rows[:, None] * stride_o_seqlen + offs_hdv[None, :] * stride_o_vdim,
+                        acc_o,
+                        mask=rmask[:, None] & hdv_mask[None, :],
+                    )
+
+                if STORE_SSM_STATES_ADT_OUTV:
+                    ssm_v = offs_hdv[:, None]
+                    ssm_k = chunk_idx * headdim_qk + offs_hd[None, :]
+                    tl.store(
+                        ssm_states_ptr + ssm_v * stride_ssm_states_vdim + ssm_k * stride_ssm_states_qkdim,
+                        acc_ssm_states.to(SSM_States.dtype.element_ty),
+                        mask=(ssm_v < headdim_v) & (ssm_k < num_chunks * headdim_qk),
+                    )
+
+                # Update recurrent states
+                scale = tl.math.exp2(da_cs_rev)
+                v_block *= scale[:, None]
+                acc_ssm_states = acc_ssm_states * tl.math.exp2(da_cs_last) + tl.dot(
+                    tl.trans(v_block).to(k_block.dtype), k_block
+                )
+
+            # Store final states if requested
+            if RETURN_FINAL_STATES:
+                tl.store(final_ssm_state_ptr + tl.arange(0, HEADDIM_V)[:, None] * stride_final_ssm_state_vdim
+                    + tl.arange(0, HEADDIM_QK)[None, :] * stride_final_ssm_state_qkdim,
+                    acc_ssm_states,
+                    mask=(tl.arange(0, HEADDIM_V)[:, None] < headdim_v) & (tl.arange(0, HEADDIM_QK)[None, :] < headdim_qk))
+
+# Memory allocator for Triton runtime scratch (device agnostic: cuda/npu).
 def _alloc_fn(size: int, alignment: int, stream: Optional[int]):
-    """Custom allocator for TMA descriptor global memory allocation."""
-    return torch.empty(size, device="cuda", dtype=torch.int8)
-triton.set_allocator(_alloc_fn)
+    """Custom allocator for Triton runtime scratch memory."""
+    return torch.empty(size, device=alloc_device(), dtype=torch.int8)
+set_allocator_safely(_alloc_fn)
 
 def mamba3_siso_fwd(
     Q: torch.Tensor,
@@ -535,6 +672,12 @@ def mamba3_siso_fwd(
     is_varlen = cu_seqlens is not None
     assert seqlen > 0, "Sequence length must be greater than 0"
 
+    # Ascend UB policy: clamp the chunk size so the per-program O(CHUNK_SIZE^2)
+    # gate matrices + O(CHUNK_SIZE*HEADDIM) tiles + persistent recurrent state
+    # fit the 192 KB Unified Buffer.  Chunking only reorders the same sums, so
+    # the result is unchanged.
+    chunk_size = effective_chunk_size(chunk_size, seqlen)
+
     # Determine number of sequences
     if is_varlen:
         assert batch == 1, "Varlen mode requires batch=1"
@@ -542,6 +685,25 @@ def mamba3_siso_fwd(
     else:
         num_sequences = batch
         cu_seqlens = None
+
+    # Normalise memory layout BEFORE validating shapes: the kernel consumes
+    # packed contiguous tensors, and a non-contiguous caller view (e.g. a
+    # transposed Q) must be materialised first so that validation and the kernel
+    # operate on the same tensor.  ``.contiguous()`` is a no-op when the input is
+    # already packed, so the CUDA path is unaffected.
+    Q = Q.contiguous() if not Q.is_contiguous() else Q
+    K = K.contiguous() if not K.is_contiguous() else K
+    V = V.contiguous() if not V.is_contiguous() else V
+    ADT = ADT.contiguous() if not ADT.is_contiguous() else ADT
+    DT = DT.contiguous() if not DT.is_contiguous() else DT
+    Trap = Trap.contiguous() if not Trap.is_contiguous() else Trap
+    Q_bias = Q_bias.contiguous() if not Q_bias.is_contiguous() else Q_bias
+    K_bias = K_bias.contiguous() if not K_bias.is_contiguous() else K_bias
+    Angles = Angles.contiguous() if not Angles.is_contiguous() else Angles
+    if D is not None:
+        D = D.contiguous() if not D.is_contiguous() else D
+    if Z is not None:
+        Z = Z.contiguous() if not Z.is_contiguous() else Z
 
     # Validate shapes
     assert Q.shape == K.shape, f"Q and K shape mismatch: {Q.shape} vs {K.shape}"
@@ -569,28 +731,11 @@ def mamba3_siso_fwd(
             f"Initial_States[1] shape mismatch: expected {(num_sequences, nheads, headdim_qk)}, got {Init_K_State.shape}"
         assert Init_V_State.shape == (num_sequences, nheads, headdim_v), \
             f"Initial_States[2] shape mismatch: expected {(num_sequences, nheads, headdim_v)}, got {Init_V_State.shape}"
-    else:
-        Init_SSM_State, Init_K_State, Init_V_State = None, None, None
-
-    # Ensure contiguous
-    Q = Q.contiguous() if not Q.is_contiguous() else Q
-    K = K.contiguous() if not K.is_contiguous() else K
-    V = V.contiguous() if not V.is_contiguous() else V
-    ADT = ADT.contiguous() if not ADT.is_contiguous() else ADT
-    DT = DT.contiguous() if not DT.is_contiguous() else DT
-    Trap = Trap.contiguous() if not Trap.is_contiguous() else Trap
-    Q_bias = Q_bias.contiguous() if not Q_bias.is_contiguous() else Q_bias
-    K_bias = K_bias.contiguous() if not K_bias.is_contiguous() else K_bias
-    Angles = Angles.contiguous() if not Angles.is_contiguous() else Angles
-
-    if D is not None:
-        D = D.contiguous() if not D.is_contiguous() else D
-    if Z is not None:
-        Z = Z.contiguous() if not Z.is_contiguous() else Z
-    if Initial_States is not None:
         Init_SSM_State = Init_SSM_State.contiguous() if not Init_SSM_State.is_contiguous() else Init_SSM_State
         Init_K_State = Init_K_State.contiguous() if not Init_K_State.is_contiguous() else Init_K_State
         Init_V_State = Init_V_State.contiguous() if not Init_V_State.is_contiguous() else Init_V_State
+    else:
+        Init_SSM_State, Init_K_State, Init_V_State = None, None, None
 
     # Calculate nchunks
     if is_varlen:
@@ -601,7 +746,13 @@ def mamba3_siso_fwd(
     # Allocate output tensors
     Out = torch.empty((batch, seqlen, nheads, headdim_v), device=device, dtype=V.dtype)
     if store_states_adt_outv:
-        SSM_States = torch.zeros((batch, nheads, headdim_v, nchunks * headdim_qk), device=device, dtype=torch.bfloat16)
+        # PLUT-50: the backward's dQ_mid/dADT inter-chunk terms read these
+        # per-chunk states; a bf16 round-trip here caps them below the CANN fp32
+        # matched_ratio gate even after the backward's own re-quantisation is
+        # removed.  Keep them fp32 on the precise path (see
+        # ``npu_compat.precise_dqkv``); bf16 otherwise.
+        ssm_states_dtype = torch.float32 if precise_dqkv() else torch.bfloat16
+        SSM_States = torch.zeros((batch, nheads, headdim_v, nchunks * headdim_qk), device=device, dtype=ssm_states_dtype)
         DA_CS_Store = torch.empty((batch, nheads, seqlen), device=device, dtype=torch.float32)
         DA_CS_SUM_Store = torch.zeros((batch, nheads, nchunks), device=device, dtype=torch.float32)
         Out_v = torch.empty((batch, seqlen, nheads, headdim_v), device=device, dtype=V.dtype)
@@ -623,88 +774,118 @@ def mamba3_siso_fwd(
     HEADDIM_V = triton.next_power_of_2(headdim_v)
     HEADDIM_QK = triton.next_power_of_2(headdim_qk)
 
-    # Grid setup
-    if is_varlen:
-        grid = (nheads, batch, num_sequences) # batch = 1
-    else:
-        grid = (nheads, batch)
+    # Ascend UB policy: process the chunk dimension in BLOCK_C row sub-tiles so
+    # every fp32/bf16 temporary inside the kernel is O(BLOCK_C x HEADDIM) /
+    # O(BLOCK_C x CHUNK_SIZE) instead of O(CHUNK_SIZE x ...).  This is the real
+    # lever against `ub overflow` for this kernel -- capping chunk_size alone has
+    # no effect when chunk_size already equals CHUNK_SIZE.
+    BLOCK_C = min(16, chunk_size)
+    # Runtime trip count for the in-chunk sub-block loops.  Passing this as a
+    # runtime value (instead of using the constexpr CHUNK_SIZE as the loop bound)
+    # keeps those loops rolled, so the UB allocator reserves the sub-block body's
+    # buffers once instead of once per unrolled copy.
+    num_cblocks = chunk_size // BLOCK_C
 
-    mamba3_siso_fwd_kernel[grid](
-        # Inputs
-        Q, K, V, ADT, DT, Trap, Q_bias, K_bias, Angles, D, Z,
-        Init_SSM_State, Init_K_State, Init_V_State, cu_seqlens,
-        # Outputs
-        Out, Out_v, SSM_States, DA_CS_Store, DA_CS_SUM_Store,
-        Q_store, K_store, QK_store, Scale_store, Gamma_store,
-        Final_SSM_State, Final_K_State,
-        # Input strides
-        Q.stride(0), Q.stride(1), Q.stride(2), Q.stride(3),
-        K.stride(0), K.stride(1), K.stride(2), K.stride(3),
-        V.stride(0), V.stride(1), V.stride(2), V.stride(3),
-        ADT.stride(0), ADT.stride(1), ADT.stride(2),
-        DT.stride(0), DT.stride(1), DT.stride(2),
-        Trap.stride(0), Trap.stride(1), Trap.stride(2),
-        Q_bias.stride(0), Q_bias.stride(1),
-        K_bias.stride(0), K_bias.stride(1),
-        Angles.stride(0), Angles.stride(1), Angles.stride(2), Angles.stride(3),
-        D.stride(0) if D is not None else 0,
-        Z.stride(0) if Z is not None else 0,
-        Z.stride(1) if Z is not None else 0,
-        Z.stride(2) if Z is not None else 0,
-        Z.stride(3) if Z is not None else 0,
-        Init_SSM_State.stride(0) if Init_SSM_State is not None else 0,
-        Init_SSM_State.stride(1) if Init_SSM_State is not None else 0,
-        Init_SSM_State.stride(2) if Init_SSM_State is not None else 0,
-        Init_SSM_State.stride(3) if Init_SSM_State is not None else 0,
-        Init_K_State.stride(0) if Init_K_State is not None else 0,
-        Init_K_State.stride(1) if Init_K_State is not None else 0,
-        Init_K_State.stride(2) if Init_K_State is not None else 0,
-        Init_V_State.stride(0) if Init_V_State is not None else 0,
-        Init_V_State.stride(1) if Init_V_State is not None else 0,
-        Init_V_State.stride(2) if Init_V_State is not None else 0,
-        cu_seqlens.stride(0) if cu_seqlens is not None else 0,
-        # Output strides
-        Out.stride(0), Out.stride(1), Out.stride(2), Out.stride(3),
-        Out_v.stride(0) if Out_v is not None else 0,
-        Out_v.stride(1) if Out_v is not None else 0,
-        Out_v.stride(2) if Out_v is not None else 0,
-        Out_v.stride(3) if Out_v is not None else 0,
-        SSM_States.stride(0) if SSM_States is not None else 0,
-        SSM_States.stride(1) if SSM_States is not None else 0,
-        SSM_States.stride(2) if SSM_States is not None else 0,
-        SSM_States.stride(3) if SSM_States is not None else 0,
-        DA_CS_Store.stride(0) if DA_CS_Store is not None else 0,
-        DA_CS_Store.stride(1) if DA_CS_Store is not None else 0,
-        DA_CS_Store.stride(2) if DA_CS_Store is not None else 0,
-        DA_CS_SUM_Store.stride(0) if DA_CS_SUM_Store is not None else 0,
-        DA_CS_SUM_Store.stride(1) if DA_CS_SUM_Store is not None else 0,
-        DA_CS_SUM_Store.stride(2) if DA_CS_SUM_Store is not None else 0,
-        Q_store.stride(0), Q_store.stride(1), Q_store.stride(2), Q_store.stride(3),
-        K_store.stride(0), K_store.stride(1), K_store.stride(2), K_store.stride(3),
-        QK_store.stride(0), QK_store.stride(1), QK_store.stride(2),
-        Scale_store.stride(0), Scale_store.stride(1), Scale_store.stride(2),
-        Gamma_store.stride(0), Gamma_store.stride(1), Gamma_store.stride(2),
-        Final_SSM_State.stride(0) if Final_SSM_State is not None else 0,
-        Final_SSM_State.stride(1) if Final_SSM_State is not None else 0,
-        Final_SSM_State.stride(2) if Final_SSM_State is not None else 0,
-        Final_SSM_State.stride(3) if Final_SSM_State is not None else 0,
-        Final_K_State.stride(0) if Final_K_State is not None else 0,
-        Final_K_State.stride(1) if Final_K_State is not None else 0,
-        Final_K_State.stride(2) if Final_K_State is not None else 0,
-        Final_K_State.stride(3) if Final_K_State is not None else 0,
-        # Dimensions
-        seqlen, nheads_qk, headdim_qk, headdim_v, headdim_angles,
-        # Compile-time constants
-        chunk_size,
-        HEADDIM_QK,
-        HEADDIM_V,
-        STORE_SSM_STATES_ADT_OUTV=store_states_adt_outv,
-        HAS_INITIAL_STATES=Initial_States is not None,
-        RETURN_FINAL_STATES=return_final_states,
-        HAS_D=D is not None,
-        HAS_Z=Z is not None,
-        IS_VARLEN=is_varlen,
-    )
+    # Grid setup: one flat program per (head, batch) / (head, sequence) tile,
+    # capped at the Ascend coreDim limit (UINT16_MAX).  Above the cap each
+    # program grid-strides over several tiles (see kernel); PHASE=0 and PHASE=1
+    # share this same grid.  ``num_tiles`` is the logical count the kernel walks.
+    num_tiles = nheads * (num_sequences if is_varlen else batch)
+    num_programs = _grid_programs(num_tiles)
+    grid = (num_programs,)
+    _GRID_STRIDE_STATE["num_tiles"] = num_tiles
+    _GRID_STRIDE_STATE["num_programs"] = num_programs
+    _GRID_STRIDE_STATE["grid_stride"] = num_programs < num_tiles
+    _GRID_STRIDE_STATE["calls"] += 1
+    if num_programs < num_tiles:
+        _GRID_STRIDE_STATE["grid_stride_calls"] += 1
+
+    # Launch Phase 1 (PHASE=0) then Phase 2 (PHASE=1) as two separate compiled
+    # specializations so the two phases never share the Unified Buffer budget.
+    for _phase in (0, 1):
+        # Empty tile set (batch == 0 / no sequences): nothing to launch and
+        # ``cdiv(num_tiles - pid, num_programs)`` would divide by zero.
+        if num_tiles == 0:
+            break
+        mamba3_siso_fwd_kernel[grid](
+            # Inputs
+            Q, K, V, ADT, DT, Trap, Q_bias, K_bias, Angles, D, Z,
+            Init_SSM_State, Init_K_State, Init_V_State, cu_seqlens,
+            # Outputs
+            Out, Out_v, SSM_States, DA_CS_Store, DA_CS_SUM_Store,
+            Q_store, K_store, QK_store, Scale_store, Gamma_store,
+            Final_SSM_State, Final_K_State,
+            # Input strides
+            Q.stride(0), Q.stride(1), Q.stride(2), Q.stride(3),
+            K.stride(0), K.stride(1), K.stride(2), K.stride(3),
+            V.stride(0), V.stride(1), V.stride(2), V.stride(3),
+            ADT.stride(0), ADT.stride(1), ADT.stride(2),
+            DT.stride(0), DT.stride(1), DT.stride(2),
+            Trap.stride(0), Trap.stride(1), Trap.stride(2),
+            Q_bias.stride(0), Q_bias.stride(1),
+            K_bias.stride(0), K_bias.stride(1),
+            Angles.stride(0), Angles.stride(1), Angles.stride(2), Angles.stride(3),
+            D.stride(0) if D is not None else 0,
+            Z.stride(0) if Z is not None else 0,
+            Z.stride(1) if Z is not None else 0,
+            Z.stride(2) if Z is not None else 0,
+            Z.stride(3) if Z is not None else 0,
+            Init_SSM_State.stride(0) if Init_SSM_State is not None else 0,
+            Init_SSM_State.stride(1) if Init_SSM_State is not None else 0,
+            Init_SSM_State.stride(2) if Init_SSM_State is not None else 0,
+            Init_SSM_State.stride(3) if Init_SSM_State is not None else 0,
+            Init_K_State.stride(0) if Init_K_State is not None else 0,
+            Init_K_State.stride(1) if Init_K_State is not None else 0,
+            Init_K_State.stride(2) if Init_K_State is not None else 0,
+            Init_V_State.stride(0) if Init_V_State is not None else 0,
+            Init_V_State.stride(1) if Init_V_State is not None else 0,
+            Init_V_State.stride(2) if Init_V_State is not None else 0,
+            cu_seqlens.stride(0) if cu_seqlens is not None else 0,
+            # Output strides
+            Out.stride(0), Out.stride(1), Out.stride(2), Out.stride(3),
+            Out_v.stride(0) if Out_v is not None else 0,
+            Out_v.stride(1) if Out_v is not None else 0,
+            Out_v.stride(2) if Out_v is not None else 0,
+            Out_v.stride(3) if Out_v is not None else 0,
+            SSM_States.stride(0) if SSM_States is not None else 0,
+            SSM_States.stride(1) if SSM_States is not None else 0,
+            SSM_States.stride(2) if SSM_States is not None else 0,
+            SSM_States.stride(3) if SSM_States is not None else 0,
+            DA_CS_Store.stride(0) if DA_CS_Store is not None else 0,
+            DA_CS_Store.stride(1) if DA_CS_Store is not None else 0,
+            DA_CS_Store.stride(2) if DA_CS_Store is not None else 0,
+            DA_CS_SUM_Store.stride(0) if DA_CS_SUM_Store is not None else 0,
+            DA_CS_SUM_Store.stride(1) if DA_CS_SUM_Store is not None else 0,
+            DA_CS_SUM_Store.stride(2) if DA_CS_SUM_Store is not None else 0,
+            Q_store.stride(0), Q_store.stride(1), Q_store.stride(2), Q_store.stride(3),
+            K_store.stride(0), K_store.stride(1), K_store.stride(2), K_store.stride(3),
+            QK_store.stride(0), QK_store.stride(1), QK_store.stride(2),
+            Scale_store.stride(0), Scale_store.stride(1), Scale_store.stride(2),
+            Gamma_store.stride(0), Gamma_store.stride(1), Gamma_store.stride(2),
+            Final_SSM_State.stride(0) if Final_SSM_State is not None else 0,
+            Final_SSM_State.stride(1) if Final_SSM_State is not None else 0,
+            Final_SSM_State.stride(2) if Final_SSM_State is not None else 0,
+            Final_SSM_State.stride(3) if Final_SSM_State is not None else 0,
+            Final_K_State.stride(0) if Final_K_State is not None else 0,
+            Final_K_State.stride(1) if Final_K_State is not None else 0,
+            Final_K_State.stride(2) if Final_K_State is not None else 0,
+            Final_K_State.stride(3) if Final_K_State is not None else 0,
+            # Dimensions
+            nheads, seqlen, nheads_qk, headdim_qk, headdim_v, headdim_angles, num_cblocks,
+            num_tiles, num_programs,
+            # Compile-time constants
+            chunk_size,
+            BLOCK_C,
+            HEADDIM_QK,
+            HEADDIM_V,
+            STORE_SSM_STATES_ADT_OUTV=store_states_adt_outv,
+            HAS_INITIAL_STATES=Initial_States is not None,
+            RETURN_FINAL_STATES=return_final_states,
+            HAS_D=D is not None,
+            HAS_Z=Z is not None,
+            IS_VARLEN=is_varlen,
+            PHASE=_phase,
+        )
 
     Final_States = None
     if return_final_states:

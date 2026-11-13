@@ -10,24 +10,21 @@ from typing import Optional, Tuple
 
 import torch
 from torch import Tensor
-import triton
 
 # Import kernels
 from mamba_ssm.ops.triton.mamba3.mamba3_siso_fwd import mamba3_siso_fwd
 from mamba_ssm.ops.triton.mamba3.mamba3_siso_bwd import compute_dzdo, compute_dqkv, compute_dqktheta, compute_ddt_dtrap_dinput_states
 from mamba_ssm.ops.triton.mamba3.angle_dt import angle_dt_fwd, angle_dt_bwd
+from mamba_ssm.ops.triton.mamba3.npu_compat import alloc_device, effective_chunk_size, set_allocator_safely
 
 
 def _triton_alloc_fn(size: int, alignment: int, stream: Optional[int]):
-    """Allocator for Triton runtime memory (TMA descriptors, scratch)."""
-    return torch.empty(size, device="cuda", dtype=torch.int8)
+    """Allocator for Triton runtime memory (scratch; device agnostic)."""
+    return torch.empty(size, device=alloc_device(), dtype=torch.int8)
 
 
 # Set allocator immediately at import time.
-try:
-    triton.set_allocator(_triton_alloc_fn)
-except Exception:
-    pass  # Allocator may already be set
+set_allocator_safely(_triton_alloc_fn)
 
 
 @dataclass(frozen=True)
@@ -74,10 +71,7 @@ class _Mamba3Function(torch.autograd.Function):
     ) -> Tensor | Tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
         """Forward pass: call Triton kernel and save tensors for backward."""
         
-        try:
-            triton.set_allocator(_triton_alloc_fn)
-        except Exception:
-            pass
+        set_allocator_safely(_triton_alloc_fn)
         
         needs_backward = any(ctx.needs_input_grad)
         has_varlen = cu_seqlens is not None
@@ -160,10 +154,7 @@ class _Mamba3Function(torch.autograd.Function):
     ) -> tuple:
         """Backward pass: compute gradients using Triton backward kernels."""
         
-        try:
-            triton.set_allocator(_triton_alloc_fn)
-        except Exception:
-            pass
+        set_allocator_safely(_triton_alloc_fn)
         
         if len(ctx.saved_tensors) == 0:
             raise RuntimeError(
@@ -387,14 +378,27 @@ def mamba3_siso_combined(
     all_states_absent = (Input_SSM_State is None) and (Input_K_State is None) and (Input_V_State is None) and (Input_Angle_State is None)
     assert all_states_present or all_states_absent, "Input states must be provided together or all be None."
 
+    # Ascend UB policy: clamp the chunk size so the forward and backward chunked
+    # kernels' peak on-chip footprint stays inside the 192 KB Unified Buffer.
+    # The same clamped value is used for forward, angles and backward, so the
+    # per-chunk state layout stays consistent; chunking is numerically invariant.
+    chunk_size = effective_chunk_size(chunk_size, seqlen)
+
     # Typecast all derived tensors to bf16.
     # ADT, DT should be in fp32 for stability
     # Q_bias, K_bias, D should be in fp32 as they are model parameters
+    # Angles: kept in fp32 -- it is only consumed by the angle cumsum
+    # (``angle_dt_fwd`` / ``angle_dt_bwd``), whose kernels upcast to fp32 and
+    # apply tanh elementwise.  Casting it to bf16 would only lose precision
+    # relative to the fp32 reference without any matmul-perf benefit.
     Q = Q.to(torch.bfloat16)
     K = K.to(torch.bfloat16)
     V = V.to(torch.bfloat16)
-    Trap = Trap.to(torch.bfloat16)
-    Angles = Angles.to(torch.bfloat16)
+    # Trap is consumed only through sigmoid() (fp32) in the forward and as the
+    # sigmoid input/derivative in the backward dDT/dTrap path; keep it fp32 so
+    # the decay gradients match the fp32 reference (a bf16 Trap was the largest
+    # remaining systematic error in dDT).
+    Trap = Trap.to(torch.float32)
     if Z is not None:
         Z = Z.to(torch.bfloat16)
 

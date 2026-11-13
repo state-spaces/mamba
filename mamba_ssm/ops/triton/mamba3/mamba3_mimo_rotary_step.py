@@ -2,6 +2,7 @@
 # We need a pretty recent version of triton to support tuples. 3.3 definitely will work,
 # idk which is the minimum version.
 
+import contextlib
 import math
 from typing import Optional, Tuple
 
@@ -26,16 +27,16 @@ def rotary_qk_inference_kernel(
     BIAS_K,
     nheads,
     headdim,
-    stride_out_q,           # (batch, mimo_dim, nheads, headdim)
-    stride_out_k,           # (batch, mimo_dim, nheads, headdim)
-    stride_out_angle_state, # (batch, nheads, rotary_dim // 2)
-    stride_q,               # (batch, mimo_dim, nheads, headdim)
-    stride_k,               # (batch, mimo_dim, nheads, headdim)
-    stride_angle_state,     # (batch, nheads, rotary_dim // 2)
-    stride_angle_proj,      # (batch, nheads, rotary_dim // 2)
-    stride_dt,              # (batch, nheads)
-    stride_bias_q,          # (mimo_dim, nheads, headdim)
-    stride_bias_k,          # (mimo_dim, nheads, headdim)
+    stride_out_q0, stride_out_q1, stride_out_q2, stride_out_q3,  # (batch, mimo_dim, nheads, headdim)
+    stride_out_k0, stride_out_k1, stride_out_k2, stride_out_k3,  # (batch, mimo_dim, nheads, headdim)
+    stride_out_angle_state0, stride_out_angle_state1, stride_out_angle_state2,  # (batch, nheads, rotary_dim // 2)
+    stride_q0, stride_q1, stride_q2, stride_q3,          # (batch, mimo_dim, nheads, headdim)
+    stride_k0, stride_k1, stride_k2, stride_k3,          # (batch, mimo_dim, nheads, headdim)
+    stride_angle_state0, stride_angle_state1, stride_angle_state2,  # (batch, nheads, rotary_dim // 2)
+    stride_angle_proj0, stride_angle_proj1, stride_angle_proj2,     # (batch, nheads, rotary_dim // 2)
+    stride_dt0, stride_dt1,                              # (batch, nheads)
+    stride_bias_q0, stride_bias_q1, stride_bias_q2,      # (mimo_dim, nheads, headdim)
+    stride_bias_k0, stride_bias_k1, stride_bias_k2,      # (mimo_dim, nheads, headdim)
     # Meta-parameters
     ROTARY_DIM: tl.constexpr,
     CONJUGATE: tl.constexpr,
@@ -45,6 +46,20 @@ def rotary_qk_inference_kernel(
     BLOCK_D: tl.constexpr, # headdim, no chunking
     ROTATE_PAIRWISE: tl.constexpr, # If true, rotate every pair of dimensions together. Otherwise, rotate the first half and second half separately (like in the original RoPE paper)
 ):
+    # Strides are passed as individual scalars, not as tuples: triton-ascend 的 launcher
+    # 不支持 tuple 参数（编译期 `list index out of range`）。下面的元组只是 trace 期把
+    # 标量重新按原来的 stride 元组形状打包，供 kernel 主体按 `stride_x[i]` 取值。
+    stride_out_q = (stride_out_q0, stride_out_q1, stride_out_q2, stride_out_q3)
+    stride_out_k = (stride_out_k0, stride_out_k1, stride_out_k2, stride_out_k3)
+    stride_out_angle_state = (stride_out_angle_state0, stride_out_angle_state1, stride_out_angle_state2)
+    stride_q = (stride_q0, stride_q1, stride_q2, stride_q3)
+    stride_k = (stride_k0, stride_k1, stride_k2, stride_k3)
+    stride_angle_state = (stride_angle_state0, stride_angle_state1, stride_angle_state2)
+    stride_angle_proj = (stride_angle_proj0, stride_angle_proj1, stride_angle_proj2)
+    stride_dt = (stride_dt0, stride_dt1)
+    stride_bias_q = (stride_bias_q0, stride_bias_q1, stride_bias_q2)
+    stride_bias_k = (stride_bias_k0, stride_bias_k1, stride_bias_k2)
+
     pid_nheads = tl.program_id(axis=0) # heads
     pid_batch = tl.program_id(axis=1)
 
@@ -200,8 +215,21 @@ def apply_rotary_qk_inference_fwd(
     output_angle_state = torch.empty_like(angle_state) if not inplace else angle_state
 
     grid = lambda META: (nheads, batch)  # noqa
-    with torch.cuda.device(q.device.index):
-        torch.library.wrap_triton(rotary_qk_inference_kernel)[grid](
+    # CUDA 上用 torch.cuda.device 绑定当前设备；CPU/CANN(torch_npu) 构建里 torch 没有
+    # CUDA 支持（`torch.cuda.device(0)` 会抛 "PyTorch was compiled without CUDA support"），
+    # 此时用 nullcontext —— triton-ascend 后端按张量所在设备下发，不需要 cuda 设备上下文。
+    device_ctx = (
+        torch.cuda.device(q.device.index) if q.device.type == "cuda" else contextlib.nullcontext()
+    )
+    # CUDA 上保留 torch.library.wrap_triton（供 torch.compile / autograd 捕获）；
+    # triton-ascend 的 Ascend driver 与 wrap_triton 的重新下发路径不兼容
+    # （实测 `TypeError: launch expects 61 arguments, got 38`），非 CUDA 后端直接启动。
+    if q.device.type == "cuda" and hasattr(torch.library, "wrap_triton"):
+        launch = torch.library.wrap_triton(rotary_qk_inference_kernel)
+    else:
+        launch = rotary_qk_inference_kernel
+    with device_ctx:
+        launch[grid](
             output_q,  # data ptrs
             output_k,
             output_angle_state,
@@ -214,16 +242,16 @@ def apply_rotary_qk_inference_fwd(
             bias_k,
             nheads,
             headdim,
-            output_q.stride(),  # output strides tuples
-            output_k.stride(),
-            output_angle_state.stride(),
-            q.stride(),  # input strides tuples
-            k.stride(),
-            angle_state.stride(),
-            angle_proj.stride(),
-            dt.stride(),
-            bias_q.stride() if bias_q is not None else (0, 0, 0),
-            bias_k.stride() if bias_k is not None else (0, 0, 0),
+            *output_q.stride(),  # output strides（逐维展开为标量）
+            *output_k.stride(),
+            *output_angle_state.stride(),
+            *q.stride(),  # input strides
+            *k.stride(),
+            *angle_state.stride(),
+            *angle_proj.stride(),
+            *dt.stride(),
+            *(bias_q.stride() if bias_q is not None else (0, 0, 0)),
+            *(bias_k.stride() if bias_k is not None else (0, 0, 0)),
             rotary_dim,
             conjugate,
             bias_q is not None,
