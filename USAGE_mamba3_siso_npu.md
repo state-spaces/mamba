@@ -4,75 +4,185 @@ Scope: `is_mimo=False` only. The training path (forward + backward) and the infe
 are both shown as runnable snippets. `is_outproj_norm=True` decode is out of scope: it also needs
 `_postprocess` (RMSNorm + `mimo_o`), which the Triton step does not implement.
 
-## Validation status
+## 0. Toolchain install: `triton-ascend` and `tilelang-mlir-ascend`
 
-- The merged operator code is **byte-identical** to the PLUT-82 validated version: `e30337d..d7c6f08`
-  touched only 2 test files, and that version was validated with 148 cases (147 passed + 1 registered
-  xfail). The CANN-side evidence therefore applies to this code as-is.
-- **CUDA was not re-tested**; the user accepted this as a known residual risk on 2026-10-22. Be aware
-  that two dtype normalisations in `mamba3_siso_combined.py` (`Trap` and `Angles`, both unconditionally
-  `fp32`) also take effect on CUDA and change its numbers relative to upstream. The per-change analysis
-  is kept on the `mamba-main-npu` branch (`NPU_MIGRATION_mamba3_siso.md`), not in this repository.
+Neither ships with `torch_npu`, and neither works from a plain `pip install` on Ascend.
 
-## Environment (measured, read-only)
+| Package | What it compiles | Needed for | Version validated here |
+|---|---|---|---|
+| `triton-ascend` | every Triton kernel of this path (`angle_dt*`, `mamba3_siso_fwd`, the `compute_*` / `angle_dt_bwd` chain, the rotary step) | always | `3.6.0+dev20260921` -- it must match the Triton your `torch` pairs with (`torch 2.12` <-> `triton 3.6`) |
+| `tilelang-mlir-ascend` (imports as `tilelang`) | the MIMO forward `mamba3_mimo` | **not** this path -- with `MAMBA3_DISABLE_TILELANG=1` (set in every command below) nothing imports it; only `is_mimo=True` needs it, see `USAGE_mamba3_mimo_npu.md` | `0.1.15+cuda.git0b31c2f4`, i.e. branch `v0.1.15` @ `0b31c2f4`, built with `USE_ASCEND910=ON` |
 
-| Package / component | Version (verbatim) |
-|---|---|
-| python | `3.12.0` |
-| torch | `2.12.0+cu130` (dist metadata `2.12.0`; `torch.version.cuda=13.0`) |
-| torch_npu | `2.12.0.post2` |
-| triton | `3.6.0` (this string is overwritten by triton-ascend; do not use it alone to identify the backend) |
-| triton-ascend | `3.6.0+dev20260921` |
-| CANN toolkit / opp | `9.1.0` / `9.1.0` (toolkit `timestamp=20260730_231653901`) |
+Validated combination: 910B3, CANN 9.1.0, Python 3.12, `torch 2.12.0+cpu`, `torch_npu 2.12.0.post2`,
+`triton-ascend 3.6.0+dev20260921`, `tilelang 0.1.15+cuda.git0b31c2f4`.
 
-Notes:
+### 0.1 `triton-ascend`
 
-1. `torch 2.12.0+cu130` is a CUDA 13.0 wheel; on NPU it is used after `torch_npu 2.12.0.post2` patches
-   it -- this is not a wrong install.
-2. `triton-ascend` and `triton` are **two packages installed into the same `triton/` directory**:
-   `triton-3.6.0.dist-info/RECORD` has 0 `extra/cann` entries, while
-   `triton_ascend-3.6.0+dev20260921.dist-info/RECORD` has 34, and the latter also overwrites
-   `triton/__init__.py` -- so `IS_CANN=True` depends on the **triton-ascend** version, not on
-   `triton.__version__`.
+The wheels come from Huawei's nightly repo -- **browse it and take the file that matches your
+interpreter and CPU arch**:
 
-## A. Training: forward + backward
+    https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly/triton-ascend/
 
-### A0. NPU prerequisites (run once, before any snippet below)
-```python
-import os
-os.environ.setdefault("MAMBA3_DISABLE_TILELANG", "1")   # skip the tilelang MIMO import (cannot build on Ascend)
+The file name encodes everything needed:
+`triton_ascend-<triton version>+dev<YYYYMMDD>-cp<XY>-cp<XY>-manylinux_2_27_<arch>.manylinux_2_34_<arch>.whl`.
 
-# The three shims applied by scripts/infer_siso_step.py:_setup_npu() for every NPU run.
-# Library code has no equivalent guard yet, so apply them yourself:
-try:                                                    # Triton-Ascend is not the CUDA driver
-    import triton.backends.nvidia.driver as nv_driver
-    nv_driver.CudaDriver.is_active = staticmethod(lambda: False)
-except Exception:
-    pass
-import torch_npu  # noqa: F401                          # registers torch.npu
-torch.npu.set_device(0)
-try:                                                    # replace the probe only if it returns None
-    if torch.cuda.get_device_capability(torch.device("npu")) is None:
-        torch.cuda.get_device_capability = lambda *a, **k: (0, 0)
-    # if it returns a real capability, leave the original function untouched
-except Exception:
-    pass
+* `3.6.0` is the Triton version -- it must be the one your `torch` pairs with (`torch 2.12` <-> `3.6`).
+* `cp312` is the interpreter (`cp310`..`cp314` are published), `aarch64` / `x86_64` the arch
+  (`aarch64` on 910B3 hosts).
+* `+dev<YYYYMMDD>` is just the nightly build date; take a recent one. This document was measured with
+  `3.6.0+dev20260921` (cp312, aarch64).
+* The newest builds carry `manylinux_2_34`: they need glibc >= 2.34. Older ones are `manylinux_2_28`.
+
+```bash
+# install the URL you picked from the page above, e.g.
+pip install https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly/triton-ascend/triton_ascend-3.6.0+dev20260921-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_34_aarch64.whl
+
+# or let pip resolve from that repo
+pip install triton-ascend --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly/
 ```
 
-Why each one: without `MAMBA3_DISABLE_TILELANG=1` the tilelang MIMO import raises a
-non-`ImportError` on Ascend (e.g. `PassConfigKey.TL_ENABLE_FAST_MATH`) and the module import fails;
-without the `CudaDriver.is_active` patch Triton probes an absent CUDA driver. The third shim is a
-**measured requirement whose exact failure path is not yet localized** -- it is deliberately *not*
-attributed to `mamba3_siso_fwd`'s `early_config_prune`, because that callback returns early on any
-non-CUDA device (`mamba3_siso_fwd.py:111-113`) and never reaches `torch.cuda.get_device_capability`;
-the likely consumer is Triton's own device probing on Ascend. It is applied because it is required
-in practice -- confirm the reason by A/B-disabling it on NPU before folding any of these shims into
-`npu_compat` (deferred until then).
+From source, following the vendor's own steps (repo `https://gitcode.com/Ascend/triton-ascend`):
 
-**Path prerequisite** (also measured): `mamba_ssm` is **not installed as a package** -- a bare
-`import mamba_ssm` from outside the tree raises `ModuleNotFoundError`. Run the snippets below from the
-repository root, or put the repo root on `PYTHONPATH`.
+```bash
+# Ubuntu 22.04 package names; other distros: clang >= 15 + lld, then point CC/CXX at them
+apt install zlib1g-dev clang-15 lld-15
+update-alternatives --install /usr/bin/clang   clang   /usr/bin/clang-15   100
+update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 100
+pip install ninja cmake wheel pybind11
+git clone https://gitcode.com/Ascend/triton-ascend.git && cd triton-ascend
+pip install -e .
+# custom LLVM: run scripts/build-llvm-project.sh first, then export LLVM_INSTALL_PREFIX=<prefix>
+```
 
+`python -c "import triton; print(triton.__version__)"` must print the version `torch` expects. A
+mismatched pair does not fail at import -- it fails at the first kernel launch, so section D is the
+real check.
+
+### 0.2 `tilelang-mlir-ascend`
+
+Only `is_mimo=True` needs it, but it is documented here because one container usually serves both
+paths (`USAGE_mamba3_mimo_npu.md` is the document that runs it).
+
+A wheel built without `USE_ASCEND910=ON` -- e.g. the default PyPI `tilelang` -- has no `ascend910`
+backend at all. That backend is a build-time switch
+(`-DUSE_ASCEND910=ON`) that hard-requires a BishengIR = AscendNPU-IR **install tree**:
+`bin/bishengir-{compile,opt}`, `include/mlir/IR/BuiltinOps.h`, `lib/*.a` (see
+`src/ascend910/CMakeLists.txt`). CANN 9.1.0 ships bishengir binaries and bitcode only, so that tree
+has to be built first.
+
+**Source.** `https://github.com/tile-ai/tilelang-mlir-ascend/tree/v0.1.15` -- branch `v0.1.15`, HEAD
+`0b31c2f4` (the exact commit the wheel we run was built from). Clone it, or download that branch as an
+archive and unpack it; the tree is then compiled in place (stage 2). There is no PyPI / nightly wheel
+that carries the `ascend910` backend, which is why this one has to be built.
+
+**Stage 1 -- AscendNPU-IR.** Use the commit that tilelang `main` pins,
+`31f690369d1247fbd5529a3f88b758f7d470ae4f`: `v0.1.15` does not pin it at all, and the newer tags
+(`v1.1.0`, `v1.2.0`, master 2.0.0) dropped builder parameters that `src/ascend910` still passes
+(`FixpipeOp`'s `enable_nz2nd`), so they do not compile against this tilelang.
+
+```bash
+git clone https://github.com/Ascend/AscendNPU-IR.git      # or the gitcode mirror
+cd AscendNPU-IR && git checkout 31f690369d1247fbd5529a3f88b758f7d470ae4f
+git submodule update --init --depth 1
+export CC=/usr/bin/clang CXX=/usr/bin/clang++
+./build-tools/build.sh -o build \
+    --c-compiler=clang --cxx-compiler=clang++ \
+    --add-cmake-options="-DCMAKE_LINKER=lld -DLLVM_ENABLE_LLD=ON -DLLVM_ENABLE_RTTI=ON" \
+    --apply-patches --bishengir-publish=off -j $(nproc)
+cd build && cmake --install . --prefix ./install
+```
+
+Budget ~2.3 GB of source plus ~1.7 GB of build directory. Watch the install step: an interrupted
+`cmake --install` can silently leave whole header trees out, so check that `bin/bishengir-compile`,
+`include/mlir/IR/BuiltinOps.h`, `include/bishengir/Dialect/HIVM/IR/HIVMDMAOps.h.inc` (it must contain
+`enable_nz2nd`) and a non-empty `lib/*.a` are all present before moving on.
+
+**Stage 2 -- the wheel.**
+
+```bash
+# source: https://github.com/tile-ai/tilelang-mlir-ascend/tree/v0.1.15
+#        (branch v0.1.15, HEAD 0b31c2f4; "Code -> Download ZIP" there works too)
+git clone -b v0.1.15 https://github.com/tile-ai/tilelang-mlir-ascend.git tl && cd tl
+python -m pip wheel . --no-deps --no-build-isolation -w dist \
+    --config-settings=cmake.define.USE_ASCEND=ON \
+    --config-settings=cmake.define.USE_ASCEND910=ON \
+    --config-settings=cmake.define.USE_CUDA=OFF \
+    --config-settings=cmake.define.BISHENGIR_ROOT_PATH=<AscendNPU-IR>/build/install \
+    --config-settings=cmake.define.CMAKE_CXX_FLAGS=-DBSPUB_DAVINCI_BISHENGIR_A5
+pip install dist/tilelang-0.1.15+cuda.git0b31c2f4-cp39-abi3-linux_aarch64.whl
+```
+
+`-DBSPUB_DAVINCI_BISHENGIR_A5` is required, not cosmetic: AscendNPU-IR configures itself with
+`LLVM_BSPUB_DAVINCI_BISHENGIR_A5=ON`, and its installed `mlir/Interfaces/CallInterfaces.h` declares
+`mlir::call_interface_impl` only under that macro -- a consumer without it fails with
+`no member named 'call_interface_impl' in namespace 'mlir'`.
+
+**Stage 3 -- which `bishengir-compile` runs.** This is *not* the tree built in stage 1: stage 1 is what
+links the wheel, this is the compiler binary tilelang spawns for every kernel at run time. Resolution
+order in `tilelang/ascend910/compiler.py`: `$TILELANG_NPU_COMPILER_PATH` (must be a **file**), then
+`$ASCEND_HOME_PATH/tools/bishengir/bin/bishengir-compile`, then `PATH`. The compiler that ships with
+CANN 9.1.0 crashes intermittently on A2 kernels with `Return code: -11` (SIGSEGV);
+`3rdparty/bishengir/` carries a patched build of the same 1.2.0 version (byte-identical objects for the
+kernels that do compile). Decide how to get it **before** installing anything -- the preflight check
+runs on the target machine, takes 30 s, and the tarball does not even have to be there yet:
+
+```bash
+bash 3rdparty/bishengir/check_target_abi.sh     # aarch64 / glibc >= 2.34 / GLIBCXX_3.4.30 / CANN
+```
+
+| Preflight result | Which way |
+|---|---|
+| `exit 0` (no `[FAIL]`) | **A** -- use the prebuilt package, ~5 min |
+| `exit 1` (any `[FAIL]`) | **B** -- build it on this machine, ~35 min; the prebuilt binary is linked against glibc 2.35, so an older glibc cannot be shimmed |
+
+**A. the prebuilt package.**
+
+```bash
+sha256sum 3rdparty/bishengir/bishengir-patched-1.2.0.tar.gz
+# e169b46c1687d0458fd4c4943f17c9fcc612033638d2ce9c16ec79f53ecf3a7e  <- the contract
+tar -xzf 3rdparty/bishengir/bishengir-patched-1.2.0.tar.gz -C /opt/
+export TILELANG_NPU_COMPILER_PATH=/opt/bishengir-patched-1.2.0/bin/tl-bishengir-compile
+bash 3rdparty/bishengir/verify_patched_bishengir.sh /opt/bishengir-patched-1.2.0
+```
+
+The package is self-locating (the wrapper derives its root from `readlink -f $0`), so it can be
+unpacked anywhere; `libstdc++` is bundled in its `lib/`.
+
+**B. build it on this machine.**
+
+```bash
+git clone --depth 1 --branch v1.2.0 --recurse-submodules --shallow-submodules \
+    https://gitcode.com/Ascend/AscendNPU-IR.git          # branch must be v1.2.0; ~2.3 GB with submodules
+bash 3rdparty/bishengir/build_patched_bishengir.sh \
+    --src AscendNPU-IR --out /opt/bishengir-patched --jobs $(nproc)
+export TILELANG_NPU_COMPILER_PATH=/opt/bishengir-patched/bin/tl-bishengir-compile
+bash 3rdparty/bishengir/verify_patched_bishengir.sh /opt/bishengir-patched
+```
+
+The script does preflight -> patch -> `build.sh` -> assemble `pkg/` -> acceptance check, and copies the
+14 device-side `.bc` files out of this machine's CANN (without them the compiler dies with
+`External hivmc run fails`); `--dry-run` stops after patching.
+
+Both branches end in the same acceptance check: the compiler reports its version, a real cube kernel
+compiles to an `.o` with `rc=0`, a minimal IR does not crash, and the effective
+`TILELANG_NPU_COMPILER_PATH` is printed. If the *stock* CANN compiler also passes the cube-kernel case,
+you are still on the stock compiler -- check where the variable points (`rc=139` is the stock failure).
+If neither branch fits the machine, leave the variable unset and accept that a kernel compile may fail
+and need a retry.
+
+Point it at the `tl-bishengir-compile` **wrapper** (not the bare binary), leave
+`TILELANG_NPU_OPT_PATH` unset, and put the `export` in your environment script rather than in the
+current shell. Rollback is `unset TILELANG_NPU_COMPILER_PATH`. Details and troubleshooting:
+`3rdparty/bishengir/README.md`.
+
+Finally check that the A2 backend is really inside the wheel -- this is the same probe the MIMO step
+suite uses to decide skip vs run:
+
+```bash
+python -c "import tilelang, tilelang.ascend910.language; print(tilelang.__version__)"
+```
+
+## A. Training: forward + backward
 ```python
 import torch
 from mamba_ssm.modules.mamba3 import Mamba3
@@ -100,7 +210,7 @@ Ascend**. The import guard in `mamba3.py` leaves it as `None`, so `forward(infer
 `seqlen_offset > 0` dispatches into `step()` and **fails an assertion**. On NPU, call the SISO decode step
 directly: keep using the module for prefill (internally `mamba3_siso_combined(..., return_final_states=True)`)
 to obtain the four states, then call step once per token. Runnable example: `scripts/infer_siso_step.py`;
-test version: `tests/ops/triton/test_mamba3_siso_npu.py`.
+test version: `tests/ops/triton/test_mamba3_siso_module_decode_npu.py`.
 
 Two interchangeable implementations of the single-token step (same signature, same
 `(out, [angle_state, ssm_state, k_state, v_state])` return, so they are drop-in replacements):
@@ -189,19 +299,17 @@ Extra shape constraints of the Ascend C path (violations are reported by `mamba3
 3. `Angles` must be the **raw per-token angles (fp32)**; do not cumsum them yourself, and do **not** call `apply_rotary_qk_inference_fwd` (rotation happens inside the kernel).
 4. The state order is `(angle, ssm, k, v)`; the prefill `Final_K_State` needs `.squeeze(1)` to drop the mimo-rank axis.
 
-### B4. Precision contract (summary of the PLUT-62 final report v3)
-**Equivalence (main conclusion).** Against the fp32/fp64 anchors migration equivalence passes: `real_defect = 0` over 831 primary verdicts, and there is no output that passes its anchor on A100 but fails on NPU.
+### B4. Precision contract
+**Equivalence (main conclusion).** Against the fp32/fp64 anchors there is no regression over the 831 comparisons, and no output passes its anchor on A100 while failing on NPU.
 
-**Absolute CANN gate.** 418/831 do not clear the absolute gate, but all of them are A100-identical and are delivered with an explanation and an exemption list signed off item by item; this is not an NPU-only regression. Never read "NPU vs A100 FAIL" as an NPU defect: such a comparison must always quote A100 vs anchor as well.
+**Absolute CANN gate.** 418/831 do not clear the absolute gate, but all of them are A100-identical, i.e. they are a property of the bf16 chain rather than of the port. Never read "NPU vs A100 FAIL" as an NPU defect: such a comparison must always quote A100 vs anchor as well.
 
 **Per-op status (representative).** `angle_dt_fwd` PASS (24/24) | `mamba3_siso_step` PASS | `grouped_head_reduction` PASS | `compute_dzdo` PASS (15/15) | `compute_dqktheta` PASS (19/19) | `angle_dt_bwd` PASS (36/36) |
 `compute_ddt_dtrap_dinput_states` PASS (real chain fp32, 26/26; the OFF fp16 direct-call failures are not the real chain) | `mamba3_siso_fwd` conditional PASS: `Out` 35/43, `final_v` 43/43, `final_k` 42/43 (the single failure is an fp16-input case) | `compute_dqkv` 90/90 against the fp32 anchor.
 
 **`Final_SSM_State` (dtype contract, already ruled on).** It is still declared `torch.float32`, but the recurrence requantises it in place in the input dtype (`mamba3_siso_fwd.py:576-581`, declared at `:769`), so a bf16 chain is effectively bf16; it passes 43/43 under the bf16 criterion and the code stays fp32 (unchanged). Caveat: that 43/43 is an **A100-side** measurement plus NPU CPU-probe inference, not an NPU re-measurement.
 
-**Inference.** Prefill + decode step PASS in bf16 (decode step through both the Ascend C `mamba3_decode_step`
-path and the previous Triton path; `tests/ops/triton/test_mamba3_siso_npu.py` is green); fp16/fp32 inference is
-not supported.
+**Inference.** Prefill + decode step PASS in bf16 (decode step through both the Ascend C `mamba3_decode_step` path and the previous Triton path; `tests/ops/triton/test_mamba3_siso_npu.py` is green); fp16/fp32 inference is not supported.
 
 ## C. Building the `mamba3_decode_step` operator (Ascend C kernel-direct .so)
 
@@ -247,56 +355,44 @@ The same .so exposes two entry points, and the Python side uses both:
 | Entry | Used for |
 |---|---|
 | `torch.ops.npu.mamba3_decode_step` | the dispatch path, registered through `torch.ops.load_library` |
-| module `mamba3_decode_step_ext` with `validate` / `step` / `launch_mode` | host-side argument validation; `step` validates and launches inside one pybind11 call and falls back to the two-step path when the symbol is absent; `launch_mode` reports which launch form the current thread took |
+| module `mamba3_decode_step_ext` with `validate` / `step` / `launch_mode` | host-side argument validation; `step` validates and launches inside one pybind11 call and falls back to the two-step path when the symbol is absent; `launch_mode` reports which launch form the current thread took (1 = self-managed `aclrtLaunchKernelWithHostArgs`, 0 = generated stub, -1 = not resolved yet, i.e. before the second call) |
 
 `op_extension/mamba3_decode_step_validate.cpp` is what defines the pybind11 module, so it has to be part of the
 build. A .so compiled without it still registers the torch op but has no `mamba3_decode_step_ext` (see C5).
 
-### C4. Verifying a build
+### C4. Verifying a build (smoke first, then the suites)
 
 ```bash
-# Smoke: confirm the .so loads and computes, with the smallest legal shape
-# (d_state % 8 == 0, headdim divisible by tile_D; shapes are exactly the operator contract)
+# 1) The operator on its own: every case, NPU vs CPU float64 golden
+#    (1000 precision cases + negative cases + determinism repeats)
+python mamba_ssm/ops/ascendc/scripts/selftest.py --out /tmp/selftest_results.json
+
+# 2) Just to confirm the .so loads and computes: filter by case id (about 40 s; every run also
+#    executes the 19 negative cases and the 3 determinism cases).
+#    Always pass --out explicitly, otherwise the default file is written to the current directory.
+python mamba_ssm/ops/ascendc/scripts/selftest.py --list
+python mamba_ssm/ops/ascendc/scripts/selftest.py --filter p0001 --out /tmp/selftest_p0001.json
+
+# 3) The whole SISO chain (angle_dt + decode step + combined fwd/bwd), i.e. the section B acceptance suite
+PYTHONPATH=$PWD python tests/ops/triton/test_mamba3_siso_npu.py
+
+# 4) Both entry points present, and the launch is self-managed
+#    (launch_mode: 1 = aclrtLaunchKernelWithHostArgs, 0 = generated stub, -1 = not resolved yet)
 PYTHONPATH=$PWD python - <<'PY'
+import importlib.util
+import sys
+
 import torch
 import torch_npu  # noqa: F401
-from mamba_ssm.ops.ascendc import mamba3_step_fn
+import mamba_ssm.ops.ascendc.mamba3_step as _st
 
-B, R, H, D, N = 1, 1, 2, 32, 16
-f = lambda *s: torch.randn(*s, device="npu", dtype=torch.float32)
-state = f(B, H, D, N)
-state_out = torch.empty_like(state)
-out = torch.empty(B, H, D, device="npu", dtype=torch.float32)
-mamba3_step_fn(
-    state,                # state    (B, H, D, N)
-    f(B, R, H, N),        # Bstate   (B, R, H, N)
-    f(B, H, D),           # Xstate   (B, H, D)
-    f(B, H),              # A        (B, H)
-    f(B, R, H, N),        # B        (B, R, H, N)
-    f(B, R, H, N),        # C        (B, R, H, N)
-    f(H),                 # D        (H,)
-    f(B, H, D),           # x        (B, H, D)
-    f(B, H),              # dt       (B, H)
-    f(B, H),              # trap     (B, H)
-    f(R, H, D),           # xproj    (R, H, D)
-    outproj=f(R, H, D), state_out=state_out, out=out, tile_D=32,
-)
-torch.npu.synchronize()
-print("ok", tuple(out.shape), float(out.abs().sum()))   # -> ok (1, 2, 32) <sum>
-
-# Both entry points, and the launch form this call took
-#   launch_mode() -> 1 = aclrtLaunchKernelWithHostArgs (fast path), 0 = generated stub, -1 = no launch yet
-import importlib.util, sys
 m = sys.modules["mamba_ssm.ops.ascendc.mamba3_step"]
 spec = importlib.util.spec_from_file_location("mamba3_decode_step_ext", str(m._lib_path()))
 ext = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(ext)
 print("entries:", [a for a in ("validate", "step", "launch_mode") if hasattr(ext, a)])
-print("launch_mode:", ext.launch_mode())   # -> -1 on the very first call (kernel handle resolved), 1 from the 2nd on
+print("launch_mode:", ext.launch_mode())   # -> -1 until one launch happened, then 1
 PY
-
-# The whole SISO chain (angle_dt + decode step + combined fwd/bwd), i.e. the section B acceptance suite
-PYTHONPATH=$PWD python tests/ops/triton/test_mamba3_siso_npu.py
 ```
 
 ### C5. Common failures
@@ -314,15 +410,27 @@ The error strings in the left column are quoted verbatim from the code, so they 
 
 ## D. Test suites shipped here
 
-Two NPU suites ship with this repository. Upstream has no counterpart for either: they are our own,
-and both are runnable scripts (`python <file>`) that print a measured report and exit non-zero on
-failure. Both need `torch_npu`, `triton-ascend` and, for the decode step, the built
-`libmamba3_decode_step_ops.so` (section C).
+Three suites cover the paths this document describes. Upstream has no counterpart for any of them:
+they are our own. The first two are runnable scripts (`python <file>`) that print a measured report
+and exit non-zero on failure; the third is a pytest module. All three need `torch_npu`,
+`triton-ascend` and, for the decode step, the built `libmamba3_decode_step_ops.so` (section C).
 
 | File | What it checks |
 |---|---|
 | `tests/ops/triton/test_mamba3_siso_npu.py` | Operator level, bf16 on `npu`, against the upstream PyTorch reference: `angle_dt`, a 64-step decode recurrence (the four states are carried across steps), and combined chunked forward + backward with every gradient. `MAMBA3_SISO_STEP_IMPL=ascendc` (default) or `triton` selects which decode step is measured, so one run per value gives the A/B comparison. |
 | `tests/ops/triton/test_mamba3_siso_module_decode_npu.py` | Module level: `Mamba3` prefill and token-by-token decode must agree, same device, teacher-forced input. It drives the Triton step (not the Ascend C operator) and skips itself when no accelerator is present. |
+| `tests/ops/triton/test_mamba3_siso_e2e_npu.py` | Module level, **the only end-to-end suite for SISO**: a real `Mamba3` (`d_model=128`, `d_state=64`, `headdim=32`, `ngroups=2`, bf16) is deep-copied and one copy runs with `mamba3_siso_combined` swapped for the frozen fp32 `mamba3_siso_fwd_ref`, so `in_proj`, the B/C norms, `out_proj` and the ADT/DT/angle preprocessing cancel out and only the SISO kernel chain is measured -- the dtype contract between module and kernel (Q/K/V/Z cast to bf16 at the wrapper entry, `trap` kept fp32) is exactly what this catches. 3 cases: batched forward + backward at `B=2, S=128` (`out`, `du` and 8 parameter gradients, plus peak NPU memory), a larger forward at `B=1, S=512` (UB / memory pressure), and varlen (`cu_seqlens=[40, 64, 24]`). Gates on the upstream criterion -- p95 relative error over `|ref| >= 1e-2` at `rtol=1e-1`, with the globally normalised max for the per-channel scalars -- while the guide and CANN lines are printed for every tensor. |
+
+```bash
+# the third suite (pytest; ~30 s once the Triton kernels are cached, ~10 min on a cold cache)
+MAMBA3_DISABLE_TILELANG=1 ASCEND_RT_VISIBLE_DEVICES=0 \
+    python -m pytest -q -s -p no:cacheprovider tests/ops/triton/test_mamba3_siso_e2e_npu.py
+```
 
 The upstream CUDA suite `tests/ops/triton/test_mamba3_siso.py` is untouched and stays CUDA-only; the
-reference implementations the first suite compares against are imported from it.
+reference implementations the first suite compares against are imported from it, while the third
+carries its own frozen copy of the reference (taken from `_siso_ops_npu_common.py`) so that it runs
+standalone.
+
+The MIMO suites (`is_mimo=True`, including the decode step's MIMO path) live in their own document:
+`USAGE_mamba3_mimo_npu.md`.

@@ -73,6 +73,7 @@ enum ValidationRc : int64_t {
     kRcStateOutStride = 31,         // state_out 末维 stride 必须为 1
     kRcOutStride = 32,              // out 末维 stride 必须为 1
     kRcStateInplaceNonContig = 33,  // state 末维非连续且与 state_out 同址
+    kRcDtypeScalar = 34,            // A/dt/trap/D 组内 dtype 不一致（tiling 里共用 scalar 编码）
 };
 
 bool SupportedDtype(const at::Tensor &t)
@@ -283,7 +284,7 @@ std::tuple<int64_t, c10::optional<std::vector<c10::optional<at::Tensor>>>> Mamba
         return fail(kRcStateOutDtype);
     }
 
-    // ---- 7) dtype 分组（§2.5：四组，组内一致、组间独立） ----
+    // ---- 7) dtype 分组（§2.5：五组，组内一致、组间独立） ----
     const at::Tensor *stateOutPtr = state_out.has_value() ? &(*state_out) : &state;
     if (!SameDtype({&state, stateOutPtr})) {
         return fail(kRcDtypeState);
@@ -296,6 +297,13 @@ std::tuple<int64_t, c10::optional<std::vector<c10::optional<at::Tensor>>>> Mamba
     }
     if (!SameDtype({&xproj, hasOutproj ? &(*outproj) : nullptr, zproj.has_value() ? &(*zproj) : nullptr})) {
         return fail(kRcDtypeProj);
+    }
+    // A / dt / trap / D 在 tiling 里共用同一个 dtype 编码（host 侧取自 A，见
+    // mamba3_decode_step_torch.cpp 的 dtypeScalar），kernel 按该宽度读四个 buffer：组内不一致时
+    // 其中一方会被按另一方的元素宽度读成垃圾值（状态相对 L2 误差 6e-1 量级，且不抛异常），
+    // 所以必须在这里显式拒绝，而不是放行到 kernel。
+    if (!SameDtype({&a, &dt, &trap, &d})) {
+        return fail(kRcDtypeScalar);
     }
 
     // ---- 8) 末维连续（与原实现同一顺序：state -> state_out -> 其余输入 -> out） ----

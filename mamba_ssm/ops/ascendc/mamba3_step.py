@@ -47,6 +47,10 @@ __all__ = ["mamba3_step_fn", "SUPPORTED_DTYPES", "SUPPORTED_TILE_D"]
 SUPPORTED_DTYPES = (torch.float16, torch.bfloat16, torch.float32)
 SUPPORTED_TILE_D = (32, 64, 128)
 
+# A / dt / trap / D 四项在 tiling 里共用同一个 dtype 编码（host 侧取自 A），kernel 按该宽度读
+# 这四个 buffer，所以它们必须同 dtype；kernel 内部一律按 fp32 计算，故入口把半精度归一到 fp32。
+_HALF_DTYPES = (torch.float16, torch.bfloat16)
+
 _OP_NAME = "mamba3_decode_step"
 _LIB_ENV = "MAMBA3_DECODE_STEP_LIB"
 _EXT_MODULE = "mamba3_decode_step_ext"
@@ -256,6 +260,8 @@ def _mamba3_step_fn_python(
     _check_dtype_group("B/Bstate/C", (B, Bstate, C))
     _check_dtype_group("x/Xstate/z/out", tuple(t for t in (x, Xstate, z, out) if t is not None))
     _check_dtype_group("xproj/outproj/zproj", tuple(t for t in (xproj, outproj, zproj) if t is not None))
+    # 第五组：四项在 tiling 里共用一个 scalar dtype 编码，混搭会被 kernel 按另一宽度读成垃圾值。
+    _check_dtype_group("A/dt/trap/D", (A, dt, trap, D))
 
     # ---- 最后一维连续（kernel 按 stride 读取外层维度） ----
     state_in = _as_innermost_contiguous("state", state)
@@ -319,6 +325,17 @@ def mamba3_step_fn(
         raise ValueError(f"{_OP_NAME}: out 必须由调用方预分配（不支持内部创建输出）")
     if (z is None) != (zproj is None):
         raise ValueError(f"{_OP_NAME}: z 与 zproj 必须同时为 None 或同时存在")
+
+    # ---- 标量侧四项归一到 fp32（kernel 内部计算 dtype） ----
+    # 模块路径给的是 fp32 的 A 配 bf16 的 dt/trap（两者都由 bf16 激活算出），而四项在 tiling 里
+    # 共用一个 dtype 编码且取自 A：原样下发时 kernel 会按 fp32 的宽度读两个 bf16 buffer，读出垃圾值
+    # 且不报错。这里统一到 fp32，调用方（含 Mamba3.step）无需自己 upcast；非 Tensor 实参不在此
+    # 处理，交给下面的原逐项实现复现改动前的原始异常。
+    _scalars = (A, dt, trap, D)
+    if all(isinstance(t, torch.Tensor) for t in _scalars) and any(
+            t.dtype in _HALF_DTYPES for t in _scalars):
+        A, dt, trap, D = tuple(
+            t.to(torch.float32) if t.dtype in _HALF_DTYPES else t for t in _scalars)
 
     # ---- 快速路径：张量侧全部判据（§2.4/§2.5）下沉 C++，**每次调用真跑一遍** ----
     # 非 torch.Tensor 的实参由 pybind11 抛 TypeError（零成本 try：不改解释器状态），
