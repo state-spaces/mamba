@@ -416,7 +416,9 @@ def mamba3_siso_bwd_kernel_dqkv(
         # Compute Decay Scaling Factors
         # ============================================================
         # Reverse cumsum: how much decay from position i to end of chunk
-        da_cs_rev = da_cs_chunk_sum - da_cs
+        # Independently reduced FP32 totals and prefixes can differ by roundoff.
+        # Nonpositive ADT requires the remaining decay exponent to stay <= 0.
+        da_cs_rev = tl.minimum(da_cs_chunk_sum - da_cs, 0.0)
         exp_da_cs_rev = tl.math.exp2(da_cs_rev)  # For scaling inter-chunk contributions
         exp_da_cs = tl.math.exp2(da_cs)          # For scaling intra-chunk contributions
 
