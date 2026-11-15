@@ -395,7 +395,9 @@ def mamba3_siso_fwd_kernel(
         # Compute cumulative decay for this chunk
         da_cs = tl.cumsum(da)
         da_cs_last = tl.sum(da)
-        da_cs_rev = da_cs_last - da_cs
+        # Independently reduced FP32 totals and prefixes can differ by roundoff.
+        # Nonpositive ADT requires the remaining decay exponent to stay <= 0.
+        da_cs_rev = tl.minimum(da_cs_last - da_cs, 0.0)
 
         # Store decay info for backward pass
         if STORE_SSM_STATES_ADT_OUTV:
