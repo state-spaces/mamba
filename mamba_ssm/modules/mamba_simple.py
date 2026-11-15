@@ -259,7 +259,9 @@ class Mamba(nn.Module):
             batch_size, self.d_model * self.expand, self.d_conv, device=device, dtype=conv_dtype
         )
         ssm_dtype = self.dt_proj.weight.dtype if dtype is None else dtype
-        # ssm_dtype = torch.float32
+        # Keep the recurrent state in at least fp32, like the selective scan does internally:
+        # in bf16/fp16, state * exp(dt * A) rounds back to state for slowly decaying channels.
+        ssm_dtype = torch.promote_types(ssm_dtype, torch.float32)
         ssm_state = torch.zeros(
             batch_size, self.d_model * self.expand, self.d_state, device=device, dtype=ssm_dtype
         )
@@ -281,8 +283,7 @@ class Mamba(nn.Module):
                 self.d_model * self.expand,
                 self.d_state,
                 device=self.dt_proj.weight.device,
-                dtype=self.dt_proj.weight.dtype,
-                # dtype=torch.float32,
+                dtype=torch.promote_types(self.dt_proj.weight.dtype, torch.float32),
             )
             inference_params.key_value_memory_dict[self.layer_idx] = (conv_state, ssm_state)
         else:
