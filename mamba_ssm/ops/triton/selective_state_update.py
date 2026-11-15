@@ -37,8 +37,10 @@ def _selective_scan_update_kernel(
     stride_D_head, stride_D_dim,
     stride_z_batch, stride_z_head, stride_z_dim,
     stride_out_batch, stride_out_head, stride_out_dim,
+    stride_state_batch_indices,
     # Meta-parameters
     DT_SOFTPLUS: tl.constexpr,
+    DISABLE_STATE_UPDATE: tl.constexpr,
     TIE_HDIM: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
     HAS_DT_BIAS: tl.constexpr,
@@ -56,7 +58,7 @@ def _selective_scan_update_kernel(
     out_ptrs = out_ptr + offs_m * stride_out_dim
 
     if HAS_STATE_BATCH_INDICES:
-        state_batch_indices_ptr += pid_b
+        state_batch_indices_ptr += pid_b * stride_state_batch_indices
         state_batch_idx = tl.load(state_batch_indices_ptr)
         # Skip padding tokens
         if state_batch_idx < 0:
@@ -123,7 +125,8 @@ def _selective_scan_update_kernel(
     else:
         dB = B * dt  # vector of size (dstate,)
     state = state * dA + dB * x[:, None]
-    tl.store(state_ptrs, state, mask=(offs_m[:, None] < dim) & (offs_n[None, :] < dstate))
+    if not DISABLE_STATE_UPDATE:
+        tl.store(state_ptrs, state, mask=(offs_m[:, None] < dim) & (offs_n[None, :] < dstate))
     out = tl.sum(state * C[None, :], axis=1)
     if HAS_D:
         out += x * D
@@ -133,7 +136,7 @@ def _selective_scan_update_kernel(
 
 
 def selective_state_update(state, x, dt, A, B, C, D=None, z=None, dt_bias=None, dt_softplus=False,
-                           state_batch_indices=None):
+                           state_batch_indices=None, disable_state_update=False):
     """
     Argument:
         state: (batch, dim, dstate) or (batch, nheads, dim, dstate)
@@ -145,6 +148,9 @@ def selective_state_update(state, x, dt, A, B, C, D=None, z=None, dt_bias=None, 
         D: (dim,) or (nheads, dim)
         z: (batch, dim) or (batch, nheads, dim)
         dt_bias: (dim,) or (nheads, dim)
+        state_batch_indices: optional (batch,) cache slot indices. Negative slots are padding.
+        disable_state_update: compute the output without writing back to state. Multiple
+            candidate tokens can then read the same cache slot.
     Return:
         out: (batch, dim) or (batch, nheads, dim)
     """
@@ -211,7 +217,9 @@ def selective_state_update(state, x, dt, A, B, C, D=None, z=None, dt_bias=None, 
             *(D.stride(0), D.stride(1)) if D is not None else 0,
             z_strides[0], z_strides[1], z_strides[2],
             out.stride(0), out.stride(1), out.stride(2),
+            state_batch_indices.stride(0) if state_batch_indices is not None else 0,
             dt_softplus,
+            disable_state_update,
             tie_hdim,
             BLOCK_SIZE_M,
             num_warps=num_warps,
