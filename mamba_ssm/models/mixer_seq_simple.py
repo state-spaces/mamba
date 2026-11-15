@@ -266,6 +266,7 @@ class MambaLMHeadModel(nn.Module, GenerationMixin):
                 _init_weights,
                 n_layer=n_layer,
                 **(initializer_cfg if initializer_cfg is not None else {}),
+                n_residuals_per_layer=1 if d_intermediate == 0 else 2,  # 2 if we have MLP
             )
         )
         self.tie_weights()
