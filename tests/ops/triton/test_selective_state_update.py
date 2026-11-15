@@ -11,6 +11,42 @@ from einops import rearrange, repeat
 from mamba_ssm.ops.triton.selective_state_update import selective_state_update, selective_state_update_ref
 
 
+@pytest.mark.parametrize("has_heads", [False, True])
+@pytest.mark.parametrize("disable_state_update", [False, True])
+def test_indexed_state_writeback(has_heads, disable_state_update):
+    torch.manual_seed(0)
+    batch, dim, dstate = 4, 17, 16
+    heads = (2,) if has_heads else ()
+    state = torch.randn(5, *heads, dim, dstate, device="cuda")
+    initial = state.clone()
+    # Each column of the table holds the parent slots for a decode step.
+    slots = torch.tensor([[0, 1], [0, 3], [0, -1], [0, 1 if disable_state_update else 2]],
+                         device="cuda", dtype=torch.int32)[:, 1]
+    kwargs = dict(
+        x=torch.randn(batch, *heads, dim, device="cuda"),
+        dt=torch.randn(batch, *heads, dim, device="cuda"),
+        A=-torch.rand(*heads, dim, dstate, device="cuda"),
+        B=torch.randn(batch, dstate, device="cuda"),
+        C=torch.randn(batch, dstate, device="cuda"),
+        D=torch.randn(*heads, dim, device="cuda"),
+        dt_bias=torch.randn(*heads, dim, device="cuda"),
+        dt_softplus=True,
+    )
+    private_states = initial.index_select(0, slots.clamp_min(0))
+    expected = selective_state_update_ref(private_states, **kwargs)
+    valid = slots >= 0
+    expected[~valid] = 0
+    if disable_state_update:
+        kwargs["disable_state_update"] = True
+    actual = selective_state_update(state, **kwargs, state_batch_indices=slots)
+    torch.testing.assert_close(actual, expected, rtol=3e-4, atol=1e-4)
+    if disable_state_update:
+        assert torch.equal(state, initial)
+    else:
+        initial[slots[valid].long()] = private_states[valid]
+        torch.testing.assert_close(state, initial, rtol=3e-4, atol=1e-4)
+
+
 @pytest.mark.parametrize("itype", [torch.float32, torch.float16, torch.bfloat16])
 # @pytest.mark.parametrize('itype', [torch.float16])
 @pytest.mark.parametrize("has_z", [False, True])
