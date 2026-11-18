@@ -234,11 +234,26 @@ def _chunk_state_fwd_kernel(
     chunk_size_limit = min(chunk_size, seqlen - pid_c * chunk_size)
     if HAS_SEQ_IDX:
         seq_idx_last = tl.load(seq_idx_ptr + (chunk_size_limit - 1) * stride_seq_idx_seqlen)
+        # seq_idx is non-decreasing within a chunk, so the whole chunk belongs to
+        # one sequence iff its first and last positions agree. Most chunks are
+        # like this; only one straddling a sequence boundary needs the sanitize
+        # below, so skip it for every other chunk.
+        chunk_has_boundary = tl.load(seq_idx_ptr) != seq_idx_last
 
     acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     for k in range(0, chunk_size_limit, BLOCK_SIZE_K):
         x = tl.load(x_ptrs, mask=(offs_m[:, None] < hdim) & (offs_k[None, :] < chunk_size_limit - k), other=0.0)
         b = tl.load(b_ptrs, mask=(offs_k[:, None] < chunk_size_limit - k) & (offs_n[None, :] < dstate), other=0.0).to(tl.float32)
+        if HAS_SEQ_IDX and chunk_has_boundary:
+            # A non-finite x or B from one sequence must not reach the dot product
+            # below: for another sequence in this chunk, scale masks its own
+            # contribution to 0, but 0 * inf (or 0 * nan) is still nan, which
+            # tl.dot then sums into every output of this chunk, not just the
+            # sequence the non-finite value belongs to. `v - v` is 0 for every
+            # finite v and nan for +-inf/nan, so this replaces only the
+            # non-finite elements, the same idiom as `x == x` for nan alone.
+            x = tl.where((x - x) == 0.0, x, 0.0)
+            b = tl.where((b - b) == 0.0, b, 0.0)
         dA_cs_k = tl.load(dA_cumsum_ptrs, mask=offs_k < chunk_size_limit - k, other=0.0).to(tl.float32)
         if HAS_SEQ_IDX:
             seq_idx_k = tl.load(seq_idx_ptrs, mask=offs_k < chunk_size_limit - k, other=-1)

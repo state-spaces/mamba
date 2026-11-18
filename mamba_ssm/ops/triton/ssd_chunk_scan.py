@@ -97,6 +97,11 @@ def _chunk_scan_fwd_kernel(
     if HAS_SEQ_IDX:
         seq_idx_prev = tl.load(seq_idx_ptr - stride_seq_idx_seqlen, mask=pid_c >= 1, other=0)
         seq_idx_m = tl.load(seq_idx_ptr + offs_m * stride_seq_idx_seqlen, mask=offs_m < chunk_size_limit, other=-1)
+        # seq_idx is non-decreasing within a chunk, so the whole chunk belongs to
+        # one sequence iff its first and last positions agree. Most chunks are
+        # like this; only one straddling a sequence boundary needs the x
+        # sanitize below, so skip it for every other chunk.
+        chunk_has_boundary = tl.load(seq_idx_ptr) != tl.load(seq_idx_ptr + (chunk_size_limit - 1) * stride_seq_idx_seqlen)
     acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
 
     # Without the if (pid_c > -1), with Triton 2.1.0, I get
@@ -114,6 +119,12 @@ def _chunk_scan_fwd_kernel(
         if BLOCK_SIZE_DSTATE <= 128:
             C = tl.load(C_ptrs, mask=(offs_m[:, None] < chunk_size_limit) & (offs_k_dstate[None, :] < dstate), other=0.0)
             prev_states = tl.load(prev_states_ptrs, mask=(offs_k_dstate[:, None] < dstate) & (offs_n[None, :] < hdim), other=0.0)
+            if HAS_SEQ_IDX:
+                # prev_states can carry another sequence's non-finite state across
+                # a chunk boundary (its own chunk legitimately went non-finite);
+                # scale_m is 0 for those rows, but 0 * nan is still nan, and that
+                # would leak through tl.dot into acc below regardless of scale_m.
+                prev_states = tl.where((prev_states - prev_states) == 0.0, prev_states, 0.0)
             prev_states = prev_states.to(C_ptr.dtype.element_ty)
             acc = tl.dot(C, prev_states) * scale_m[:, None]
         else:
@@ -121,6 +132,9 @@ def _chunk_scan_fwd_kernel(
                 C = tl.load(C_ptrs, mask=(offs_m[:, None] < chunk_size_limit) & (offs_k_dstate[None, :] < dstate - k), other=0.0)
                 # C = (C * scale_m[:, None]).to(C_ptr.dtype.element_ty)
                 prev_states = tl.load(prev_states_ptrs, mask=(offs_k_dstate[:, None] < dstate - k) & (offs_n[None, :] < hdim), other=0.0)
+                if HAS_SEQ_IDX:
+                    # See the comment on the other prev_states sanitize above.
+                    prev_states = tl.where((prev_states - prev_states) == 0.0, prev_states, 0.0)
                 prev_states = prev_states.to(C_ptr.dtype.element_ty)
                 acc += tl.dot(C, prev_states)
                 C_ptrs += BLOCK_SIZE_K
@@ -147,6 +161,12 @@ def _chunk_scan_fwd_kernel(
             cb = tl.where(mask, cb, 0.0)
         cb = cb.to(x_ptr.dtype.element_ty)
         x = tl.load(x_ptrs, mask=(offs_k[:, None] < chunk_size_limit - k) & (offs_n[None, :] < hdim), other=0.0)
+        if HAS_SEQ_IDX and chunk_has_boundary:
+            # cb[m, k] is already exactly 0 for seq_idx[m] != seq_idx[k] (comment
+            # above), but x does not carry an m axis, so a non-finite x here would
+            # still turn into nan at 0 * inf (or 0 * nan) for every m row that
+            # reads this k, not just the row(s) whose own sequence contains it.
+            x = tl.where((x - x) == 0.0, x, 0.0)
         acc += tl.dot(cb, x)
         cb_ptrs += BLOCK_SIZE_K * stride_cb_csize_k
         x_ptrs += BLOCK_SIZE_K * stride_x_seqlen
