@@ -73,11 +73,21 @@ def _state_passing_fwd_kernel(
         new_states = tl.load(states_ptrs, mask=offs_m < dim, other=0.0).to(tl.float32)
         dA_cs = tl.load(dA_cs_ptr).to(tl.float32)
         scale = tl.exp(dA_cs)
+        scale_mask = True
         if HAS_SEQ_IDX:
             seq_idx_new = tl.load(seq_idx_ptr + (min((c + 1) * chunk_size, seqlen) - 1) * stride_seq_idx_seqlen)
-            scale = tl.where(seq_idx_new == seq_idx, scale, 0.0)
+            scale_mask = seq_idx_new == seq_idx
             seq_idx = seq_idx_new
-        states = scale * states + new_states
+        # Select the carried term itself (not just the scale) at a sequence
+        # boundary: `states` here can be non-finite (a chunk entirely owned by a
+        # sequence with its own non-finite input legitimately produces a
+        # non-finite state), and multiplying that by a scale that merely
+        # evaluates to 0 here (`scale * states`) is still `0 * nan = nan`, which
+        # would leak into the next sequence's otherwise-finite `new_states`.
+        # `tl.where` discards the unselected branch's value instead of combining
+        # it arithmetically, so the reset case is an exact, clean `new_states`.
+        carried = tl.where(scale_mask, scale * states, 0.0)
+        states = carried + new_states
         if c < nchunks - 1:
             tl.store(out_ptrs, states, mask=offs_m < dim)
         else:
