@@ -648,28 +648,41 @@ def compute_dacs_segsum_triton_varlen(
     da_cs_rev = torch.empty_like(da)
     segsum = torch.zeros(B, H, nchunks, chunk_size, chunk_size, device=da.device, dtype=da.dtype)
 
-    seq_lens = cu_seqlens[1:] - cu_seqlens[:-1]
-    chunks_per_seq = (seq_lens // chunk_size) + 1
-
     # Build mapping tensors: both have length nchunks_global.
     # Inactive (padding) slots are given a sentinel local-chunk index that
     # places chunk_start >= seq_end, making the kernel mask all-False.
-    state_seq_mapping  = torch.zeros(nchunks, dtype=torch.int32, device=da.device)
-    state_chunk_in_seq = torch.zeros(nchunks, dtype=torch.int32, device=da.device)
-    default_seq_len = int(seq_lens[0].item()) if num_sequences > 0 else 0
-    default_inactive_local_chunk = (default_seq_len + chunk_size - 1) // chunk_size
-    state_chunk_in_seq.fill_(default_inactive_local_chunk)
-
-    for i in range(num_sequences):
-        start = int(cu_seqlens[i].item())
-        n = int(chunks_per_seq[i].item())
-        chunk_start = (start // chunk_size) + i
-        chunk_end = chunk_start + n
-        assert chunk_end <= nchunks, (
-            f"Chunk mapping overflow for seq {i}: [{chunk_start}, {chunk_end}) vs nchunks={nchunks}"
-        )
-        state_seq_mapping[chunk_start:chunk_end] = i
-        state_chunk_in_seq[chunk_start:chunk_end] = torch.arange(n, dtype=torch.int32, device=da.device)
+    #
+    # Fully vectorized on device — NO GPU<->CPU sync. (The previous
+    # per-sequence cu_seqlens[i].item() loop issued 2*num_sequences+1 syncs
+    # and 2*num_sequences slice-fill kernels per call; per layer per packed
+    # prefill this dominated TTFT under serving.)
+    #
+    # Sequence i owns the global chunk slots
+    #     [cu[i]//C + i,  cu[i]//C + i + len_i//C + 1)
+    # These starts are strictly increasing (floor(a+b) >= floor(a)+floor(b)),
+    # so the owner of slot g is searchsorted(starts, g, right) - 1, and
+    # slots at/after that owner's end are inactive padding. The end of the
+    # last range is always <= nchunks by the same floor inequality, so the
+    # old per-sequence overflow assert could never fire and is dropped.
+    seq_lens = cu_seqlens[1:] - cu_seqlens[:-1]
+    seq_idx = torch.arange(
+        num_sequences, dtype=cu_seqlens.dtype, device=da.device
+    )
+    range_starts = cu_seqlens[:-1] // chunk_size + seq_idx
+    range_ends = range_starts + seq_lens // chunk_size + 1
+    g = torch.arange(nchunks, dtype=cu_seqlens.dtype, device=da.device)
+    owner = torch.searchsorted(range_starts, g, right=True) - 1
+    active = g < range_ends[owner]
+    # Sentinel for inactive slots: ceil(len_0 / C), matching the original.
+    default_inactive_local_chunk = (
+        (seq_lens[0] + chunk_size - 1) // chunk_size
+    )
+    state_seq_mapping = torch.where(
+        active, owner, torch.zeros_like(owner)
+    ).to(torch.int32)
+    state_chunk_in_seq = torch.where(
+        active, g - range_starts[owner], default_inactive_local_chunk
+    ).to(torch.int32)
 
     grid = (B, H, nchunks)
     dacs_segsum_kernel_varlen[grid](
@@ -1252,7 +1265,7 @@ def bwd_dtrap_ddt_kernel_varlen(
     tl.store(dtrap_ptrs, dtrap_out, mask=mask_seq)
 
 
-def _build_varlen_chunk_mapping(cu_seqlens: torch.Tensor, chunk_size: int):
+def _build_varlen_chunk_mapping(cu_seqlens: torch.Tensor, chunk_size: int, seqlen: int):
     """Build the three varlen indexing primitives consumed by every varlen kernel.
 
     Because sequences have different lengths, chunks do not cross sequence
@@ -1285,26 +1298,28 @@ def _build_varlen_chunk_mapping(cu_seqlens: torch.Tensor, chunk_size: int):
         offset is large enough that chunk_start = cu_seqlens[0] + offset *
         chunk_size >= cu_seqlens[1], placing every element beyond seq_end and
         making the kernel's mask all-False (a no-op).
+
+    Fully on device (no GPU->CPU sync), with the slot layout of
+    compute_dacs_segsum_triton_varlen: sequence i owns the slots
+    [cu[i]//C + i, cu[i]//C + i + len_i//C + 1), strictly increasing, so the
+    owner of slot g is searchsorted(starts, g, right) - 1. ``seqlen`` is the
+    packed length S of the tensors (as in the forward), not read from
+    cu_seqlens. The previous per-sequence .item() loop cost 2*NS+2 syncs per
+    call, twice per backward.
     """
     num_sequences = int(cu_seqlens.numel()) - 1
+    nchunks_global = (seqlen // chunk_size) + num_sequences
     seq_lens = cu_seqlens[1:] - cu_seqlens[:-1]
-    chunks_per_seq = (seq_lens // chunk_size) + 1  # same convention as compute_dacs_segsum_triton
-    S = int(cu_seqlens[-1].item())
-    nchunks_global = (S // chunk_size) + num_sequences
-
-    state_seq_mapping  = torch.zeros(nchunks_global, dtype=torch.int32, device=cu_seqlens.device)
-    state_chunk_in_seq = torch.zeros(nchunks_global, dtype=torch.int32, device=cu_seqlens.device)
-    # Fill with out-of-range sentinel so inactive slots are masked out.
-    default_seq_len = int(seq_lens[0].item()) if num_sequences > 0 else 0
-    state_chunk_in_seq.fill_((default_seq_len + chunk_size - 1) // chunk_size)
-
-    for i in range(num_sequences):
-        start = int(cu_seqlens[i].item())
-        n     = int(chunks_per_seq[i].item())
-        chunk_start = (start // chunk_size) + i
-        state_seq_mapping [chunk_start:chunk_start + n] = i
-        state_chunk_in_seq[chunk_start:chunk_start + n] = torch.arange(n, dtype=torch.int32,
-                                                                         device=cu_seqlens.device)
+    seq_idx = torch.arange(num_sequences, dtype=cu_seqlens.dtype, device=cu_seqlens.device)
+    range_starts = cu_seqlens[:-1] // chunk_size + seq_idx
+    range_ends = range_starts + seq_lens // chunk_size + 1
+    g = torch.arange(nchunks_global, dtype=cu_seqlens.dtype, device=cu_seqlens.device)
+    owner = torch.searchsorted(range_starts, g, right=True) - 1
+    active = g < range_ends[owner]
+    # Inactive slots: sequence 0 with the out-of-range sentinel ceil(len_0 / C).
+    sentinel = (seq_lens[0] + chunk_size - 1) // chunk_size
+    state_seq_mapping = torch.where(active, owner, torch.zeros_like(owner)).to(torch.int32)
+    state_chunk_in_seq = torch.where(active, g - range_starts[owner], sentinel).to(torch.int32)
     return nchunks_global, state_seq_mapping, state_chunk_in_seq
 
 
@@ -1328,7 +1343,7 @@ def bwd_dadt_fused_triton_varlen(
     """
     B, H, S = ddA_cs.shape
     nchunks_global, state_seq_mapping, state_chunk_in_seq = _build_varlen_chunk_mapping(
-        cu_seqlens, chunk_size
+        cu_seqlens, chunk_size, S
     )
     assert dSSdA.shape == (B, H, nchunks_global, chunk_size, chunk_size), \
         f"dSSdA shape mismatch: got {dSSdA.shape}, expected {(B, H, nchunks_global, chunk_size, chunk_size)}"
@@ -1382,7 +1397,7 @@ def bwd_dtrap_ddt_triton_varlen(
     """
     B, H, S = dt.shape
     nchunks_global, state_seq_mapping, state_chunk_in_seq = _build_varlen_chunk_mapping(
-        cu_seqlens, chunk_size
+        cu_seqlens, chunk_size, S
     )
     ddt   = torch.zeros_like(dt)
     dtrap = torch.zeros_like(trap)

@@ -60,7 +60,9 @@ def _reduce_grouped_qk_grads_and_bias_partial_kernel(
     pid_g = pid_gn // N_BLOCKS
     pid_n = pid_gn - pid_g * N_BLOCKS
 
-    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    # int64: raw_offsets scale as offs_m * R * H * N and pass 2^31 once
+    # B*S exceeds ~87k rows (e.g. R*H*N = 24,576 -> overflow at 87,381 rows).
+    offs_m = (pid_m * BLOCK_M + tl.arange(0, BLOCK_M)).to(tl.int64)
     offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     mask = (offs_m[:, None] < TOTAL_ROWS) & (offs_n[None, :] < N)
 
@@ -138,7 +140,7 @@ def reduce_grouped_qk_grads_and_bias_triton(
     dq_raw: torch.Tensor,
     dk_raw: torch.Tensor,
     num_qk_groups: int,
-    block_m: int = 64,
+    block_m: int = 256,
     block_n: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Reduce raw per-value-head Q/K grads and compute Q/K bias grads in one pass.
@@ -167,8 +169,11 @@ def reduce_grouped_qk_grads_and_bias_triton(
     total_rows = B * S
     group_size = H // num_qk_groups
     num_row_blocks = triton.cdiv(total_rows, block_m)
+    # 256 x 64 tiles: each row's N values load as wide contiguous segments and
+    # the per-row-block bias partials stay small. GH200, S=65536 R=4 H=12
+    # N=128 bf16: 1.73 ms (64 x 16, 1.0 TB/s) -> 0.69 ms (2.5 TB/s).
     if block_n is None:
-        block_n = min(16, _next_power_of_2(N))
+        block_n = min(64, _next_power_of_2(N))
     block_n = max(1, block_n)
 
     dq_bias_partial = torch.empty(

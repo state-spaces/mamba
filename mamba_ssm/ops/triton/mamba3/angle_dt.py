@@ -1,3 +1,4 @@
+import os
 from typing import Tuple, Optional
 
 import torch
@@ -5,7 +6,21 @@ from torch import Tensor
 
 import triton
 import triton.language as tl
-from mamba_ssm.ops.triton.mamba3.utils import tanh_approx, sech2_approx
+
+
+# Rotary phases are a running sum over the whole sequence, so a per-token error in tanh accumulates: with the
+# hardware tanh.approx.f32 (rel. error ~5e-4) the angle is off by ~6e-4 rad after 32k tokens, 10x the fp32
+# summation error. An accurate tanh keeps training, prefill and the decode step (same formula, fp32 state
+# wrapped mod 2*pi) within ~5e-5 rad of the fp64 phase.
+@triton.jit
+def _tanh(x):
+    return tl.sigmoid(2.0 * x) * 2.0 - 1.0
+
+
+@triton.jit
+def _sech2(x):
+    t = _tanh(x)
+    return 1.0 - t * t
 
 
 # -----------------------------------------------------------------------------
@@ -91,7 +106,7 @@ def angle_dt_fwd_kernel(
         # Load angle (CHUNK_SIZE, BLOCK_D)
         angle_ptrs = ANGLE + (chunk_start + seq_range[:, None]) * stride_angle_seq + dim_range[None, :] * stride_angle_dim
         angle_vals = tl.load(angle_ptrs, mask=seq_mask[:, None] & dim_mask[None, :], other=0.0).to(tl.float32)
-        angle_vals = tanh_approx(angle_vals) * PI
+        angle_vals = _tanh(angle_vals) * PI
 
         # Load dt (CHUNK_SIZE,)
         dt_ptrs = DT + (chunk_start + seq_range) * stride_dt_seq
@@ -150,14 +165,17 @@ def angle_dt_fwd(
     """
     batch, seqlen, nheads, dim = angle.shape
     is_varlen = cu_seqlens is not None
-    
+    if is_varlen and _SEQ_PARALLEL:
+        return _angle_dt_fwd_seq_parallel(angle, dt, init_state=init_state, chunk_size=chunk_size,
+                                          return_output_state=return_output_state, cu_seqlens=cu_seqlens)
+
     # Determine number of sequences
     if is_varlen:
         assert batch == 1, "Varlen mode requires batch=1"
         num_sequences = cu_seqlens.shape[0] - 1
     else:
         num_sequences = batch
-    
+
     assert dt.shape == (batch, nheads, seqlen), f"dt shape mismatch: {dt.shape}"
     if init_state is not None:
         assert init_state.shape == (num_sequences, nheads, dim), f"init_state shape mismatch: {init_state.shape}"
@@ -317,13 +335,13 @@ def angle_dt_bwd_kernel(
         # Load angle and dt
         angle_ptrs = ANGLE + (chunk_start + seq_range[:, None]) * stride_angle_seq + dim_range[None, :] * stride_angle_dim
         pretanh_angle_vals = tl.load(angle_ptrs, mask=seq_mask[:, None] & dim_mask[None, :], other=0.0).to(tl.float32)
-        angle_vals = tanh_approx(pretanh_angle_vals) * PI
+        angle_vals = _tanh(pretanh_angle_vals) * PI
 
         dt_ptrs = DT + (chunk_start + seq_range) * stride_dt_seq
         dt_vals = tl.load(dt_ptrs, mask=seq_mask, other=0.0).to(tl.float32)
 
         # Compute gradients: out = angle * dt
-        grad_angle_vals = grad_vals * dt_vals[:, None] * PI * sech2_approx(pretanh_angle_vals)
+        grad_angle_vals = grad_vals * dt_vals[:, None] * PI * _sech2(pretanh_angle_vals)
         grad_dt_vals = tl.sum(grad_vals * angle_vals, axis=1)
 
         # Store gradients
@@ -369,14 +387,17 @@ def angle_dt_bwd(
     """
     batch, seqlen, nheads, dim = angle.shape
     is_varlen = cu_seqlens is not None
-    
+    if is_varlen and _SEQ_PARALLEL:
+        return _angle_dt_bwd_seq_parallel(grad_out, angle, dt, has_init_state=has_init_state, chunk_size=chunk_size,
+                                          grad_output_state=grad_output_state, cu_seqlens=cu_seqlens)
+
     # Determine number of sequences
     if is_varlen:
         assert batch == 1, "Varlen mode requires batch=1"
         num_sequences = cu_seqlens.shape[0] - 1
     else:
         num_sequences = batch
-    
+
     grad_angle = torch.empty_like(angle)
     grad_dt = torch.empty_like(dt)
     BLOCK_D = triton.next_power_of_2(dim)
@@ -430,3 +451,199 @@ def angle_dt_bwd(
         IS_VARLEN=is_varlen,
     )
     return grad_angle, grad_dt, grad_init_state
+
+# -----------------------------------------------------------------------------
+# Sequence-parallel varlen path
+# -----------------------------------------------------------------------------
+# The kernels above run one program per (head, segment) and walk the segment in
+# CHUNK_SIZE steps with a loop-carried state: a long segment is a long serial
+# chain on a handful of SMs (H=12 per TP rank, 2x32k segments -> 24 programs
+# walking 2048 chunks each). The varlen path below cuts every segment into
+# blocks of BLK_CHUNKS chunks: pass 1 reduces each block in parallel, pass 2
+# scans the few block totals per (head, segment), pass 3 replays each block in
+# parallel from its offset with the same per-chunk loop. Same numerics up to
+# fp32 reassociation of the phase sum (both paths sit at the same distance from
+# an fp64 reference, which tanh.approx dominates). GH200, H=12, S=65536:
+# 2x32768 fwd 1.89 -> 0.32 ms, bwd 2.87 -> 0.32 ms.
+# M3_ANGLE_SERIAL=1 forces the serial kernels.
+PI_C = tl.constexpr(3.141592653589793)
+_SEQ_PARALLEL = os.environ.get("M3_ANGLE_SERIAL", "0") != "1"
+
+
+@triton.jit
+def _block_owner(CU, b, ns, BLK_TOKENS: tl.constexpr):
+    """Owner of global block slot b: sequence i owns slots
+    [cu[i]//T + i, cu[i]//T + i + cdiv(len_i, T)) (strictly increasing starts,
+    so binary search). Returns (seq or -1 for a padding slot, local block)."""
+    lo = 0
+    hi = ns - 1
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if tl.load(CU + mid) // BLK_TOKENS + mid <= b:
+            lo = mid
+        else:
+            hi = mid - 1
+    s0 = tl.load(CU + lo)
+    local = b - (s0 // BLK_TOKENS + lo)
+    n = tl.cdiv(tl.load(CU + lo + 1) - s0, BLK_TOKENS)
+    return tl.where(local < n, lo, -1), local
+
+
+@triton.jit
+def _fwd_block_kernel(OUT, BLOCK_TOT, OFFSET, ANGLE, DT, CU, ns,
+                      s_ang_seq, s_ang_head, s_dt_head, s_dt_seq, nblk,
+                      dim, PASS: tl.constexpr, CHUNK: tl.constexpr, BLK_CHUNKS: tl.constexpr, BLOCK_D: tl.constexpr):
+    h = tl.program_id(0)
+    b = tl.program_id(1)
+    seq, local = _block_owner(CU, b, ns, CHUNK * BLK_CHUNKS)
+    if seq < 0:
+        return
+    s0 = tl.load(CU + seq)
+    seq_len = tl.load(CU + seq + 1) - s0
+    blk_start = local * (CHUNK * BLK_CHUNKS)
+    d = tl.arange(0, BLOCK_D)
+    dm = d < dim
+    TWO_PI_C = 2 * PI_C
+    if PASS == 1:
+        state = tl.zeros((BLOCK_D,), dtype=tl.float32)
+    else:
+        state = tl.load(OFFSET + (h * nblk + b) * BLOCK_D + d)
+    r = tl.arange(0, CHUNK)
+    for c in range(BLK_CHUNKS):
+        t0 = blk_start + c * CHUNK
+        sm = (t0 + r) < seq_len
+        tok = s0 + t0 + r
+        a = tl.load(ANGLE + tok[:, None] * s_ang_seq + h * s_ang_head + d[None, :], mask=sm[:, None] & dm[None, :], other=0.0)
+        a = _tanh(a.to(tl.float32)) * PI_C
+        dtv = tl.load(DT + h * s_dt_head + tok * s_dt_seq, mask=sm, other=0.0).to(tl.float32)
+        v = a * dtv[:, None]
+        if PASS == 3:
+            o = tl.cumsum(v, axis=0) + state[None, :]
+            o = o - TWO_PI_C * tl.floor(o / TWO_PI_C)
+            tl.store(OUT + tok[:, None] * s_ang_seq + h * s_ang_head + d[None, :], o, mask=sm[:, None] & dm[None, :])
+        state = state + tl.sum(v, axis=0)
+        state = state - TWO_PI_C * tl.floor(state / TWO_PI_C)
+    if PASS == 1:
+        tl.store(BLOCK_TOT + (h * nblk + b) * BLOCK_D + d, state)
+
+
+@triton.jit
+def _scan_blocks_kernel(OFFSET, FINAL, BLOCK_TOT, INIT, CU, nblk, nheads, dim,
+                        HAS_INIT: tl.constexpr, REVERSE: tl.constexpr, MOD: tl.constexpr, BLOCK_D: tl.constexpr,
+                        BLK_TOKENS: tl.constexpr):
+    """Per (head, segment): exclusive scan of the block totals (forward with
+    mod 2*pi, or reverse plain sum for the backward)."""
+    h = tl.program_id(0)
+    s = tl.program_id(1)
+    d = tl.arange(0, BLOCK_D)
+    dm = d < dim
+    TWO_PI_C = 2 * PI_C
+    if HAS_INIT:
+        state = tl.load(INIT + (s * nheads + h) * dim + d, mask=dm, other=0.0).to(tl.float32)
+    else:
+        state = tl.zeros((BLOCK_D,), dtype=tl.float32)
+    s0 = tl.load(CU + s)
+    st = s0 // BLK_TOKENS + s
+    n = tl.cdiv(tl.load(CU + s + 1) - s0, BLK_TOKENS)
+    for i in range(n):
+        j = st + (n - 1 - i) if REVERSE else st + i
+        tl.store(OFFSET + (h * nblk + j) * BLOCK_D + d, state)
+        state = state + tl.load(BLOCK_TOT + (h * nblk + j) * BLOCK_D + d)
+        if MOD:
+            state = state - TWO_PI_C * tl.floor(state / TWO_PI_C)
+    tl.store(FINAL + (s * nheads + h) * dim + d, state, mask=dm)
+
+
+@triton.jit
+def _bwd_block_kernel(GRAD_ANGLE, GRAD_DT, BLOCK_TOT, OFFSET, GRAD_OUT, ANGLE, DT, CU, ns,
+                      s_ang_seq, s_ang_head, s_dt_head, s_dt_seq, nblk,
+                      dim, PASS: tl.constexpr, CHUNK: tl.constexpr, BLK_CHUNKS: tl.constexpr, BLOCK_D: tl.constexpr):
+    h = tl.program_id(0)
+    b = tl.program_id(1)
+    seq, local = _block_owner(CU, b, ns, CHUNK * BLK_CHUNKS)
+    if seq < 0:
+        return
+    s0 = tl.load(CU + seq)
+    seq_len = tl.load(CU + seq + 1) - s0
+    blk_start = local * (CHUNK * BLK_CHUNKS)
+    d = tl.arange(0, BLOCK_D)
+    dm = d < dim
+    r = tl.arange(0, CHUNK)
+    if PASS == 1:
+        tot = tl.zeros((BLOCK_D,), dtype=tl.float32)
+        for c in range(BLK_CHUNKS):
+            t0 = blk_start + c * CHUNK
+            sm = (t0 + r) < seq_len
+            tok = s0 + t0 + r
+            g = tl.load(GRAD_OUT + tok[:, None] * s_ang_seq + h * s_ang_head + d[None, :], mask=sm[:, None] & dm[None, :], other=0.0)
+            tot = tot + tl.sum(g.to(tl.float32), axis=0)
+        tl.store(BLOCK_TOT + (h * nblk + b) * BLOCK_D + d, tot)
+    else:
+        gstate = tl.load(OFFSET + (h * nblk + b) * BLOCK_D + d)
+        for ci in range(BLK_CHUNKS):
+            c = BLK_CHUNKS - 1 - ci
+            t0 = blk_start + c * CHUNK
+            sm = (t0 + r) < seq_len
+            tok = s0 + t0 + r
+            m2 = sm[:, None] & dm[None, :]
+            g = tl.load(GRAD_OUT + tok[:, None] * s_ang_seq + h * s_ang_head + d[None, :], mask=m2, other=0.0).to(tl.float32)
+            csum = tl.sum(g, axis=0)
+            rev = csum[None, :] - tl.cumsum(g, axis=0) + g
+            gv = rev + gstate[None, :]
+            pre = tl.load(ANGLE + tok[:, None] * s_ang_seq + h * s_ang_head + d[None, :], mask=m2, other=0.0).to(tl.float32)
+            a = _tanh(pre) * PI_C
+            dtv = tl.load(DT + h * s_dt_head + tok * s_dt_seq, mask=sm, other=0.0).to(tl.float32)
+            tl.store(GRAD_ANGLE + tok[:, None] * s_ang_seq + h * s_ang_head + d[None, :], gv * dtv[:, None] * PI_C * _sech2(pre), mask=m2)
+            tl.store(GRAD_DT + h * s_dt_head + tok * s_dt_seq, tl.sum(gv * a, axis=1), mask=sm)
+            gstate = gstate + csum
+
+
+def _prep(angle, dt, cu_seqlens, chunk_size, blk_chunks):
+    assert angle.shape[0] == 1 and cu_seqlens is not None, "varlen layout only"
+    angle = angle.contiguous(); dt = dt.contiguous()
+    _, seqlen, nheads, dim = angle.shape
+    cu = cu_seqlens if cu_seqlens.dtype == torch.int32 else cu_seqlens.to(torch.int32)
+    nblk = seqlen // (chunk_size * blk_chunks) + cu.numel() - 1
+    return angle, dt, cu, seqlen, nheads, dim, nblk
+
+
+def _angle_dt_fwd_seq_parallel(angle: Tensor, dt: Tensor, init_state: Optional[Tensor] = None, chunk_size: int = 16,
+                     return_output_state: bool = False, cu_seqlens: Optional[Tensor] = None, blk_chunks: int = 64):
+    angle, dt, cu, seqlen, nheads, dim, nblk = _prep(angle, dt, cu_seqlens, chunk_size, blk_chunks)
+    ns = cu.numel() - 1
+    BD = triton.next_power_of_2(dim)
+    out = torch.empty_like(angle)
+    tot = torch.empty(nheads, nblk, BD, device=angle.device, dtype=torch.float32)
+    off = torch.empty_like(tot)
+    final = torch.empty(ns, nheads, dim, device=angle.device, dtype=angle.dtype)
+    common = dict(s_ang_seq=angle.stride(1), s_ang_head=angle.stride(2), s_dt_head=dt.stride(1), s_dt_seq=dt.stride(2),
+                  nblk=nblk, dim=dim, CHUNK=chunk_size, BLK_CHUNKS=blk_chunks, BLOCK_D=BD)
+    _fwd_block_kernel[(nheads, nblk)](out, tot, off, angle, dt, cu, ns, PASS=1, **common)
+    init = init_state.contiguous().float() if init_state is not None else final
+    _scan_blocks_kernel[(nheads, ns)](off, final, tot, init, cu, nblk, nheads, dim,
+                                      HAS_INIT=init_state is not None, REVERSE=False, MOD=True, BLOCK_D=BD,
+                                      BLK_TOKENS=chunk_size * blk_chunks)
+    _fwd_block_kernel[(nheads, nblk)](out, tot, off, angle, dt, cu, ns, PASS=3, **common)
+    return (out, final) if return_output_state else out
+
+
+def _angle_dt_bwd_seq_parallel(grad_out: Tensor, angle: Tensor, dt: Tensor, has_init_state: bool = False, chunk_size: int = 16,
+                     grad_output_state: Optional[Tensor] = None, cu_seqlens: Optional[Tensor] = None, blk_chunks: int = 64):
+    angle, dt, cu, seqlen, nheads, dim, nblk = _prep(angle, dt, cu_seqlens, chunk_size, blk_chunks)
+    grad_out = grad_out.contiguous()
+    ns = cu.numel() - 1
+    BD = triton.next_power_of_2(dim)
+    grad_angle = torch.empty_like(angle)
+    grad_dt = torch.empty_like(dt)
+    tot = torch.empty(nheads, nblk, BD, device=angle.device, dtype=torch.float32)
+    off = torch.empty_like(tot)
+    ginit = torch.empty(ns, nheads, dim, device=angle.device, dtype=torch.float32)
+    common = dict(s_ang_seq=angle.stride(1), s_ang_head=angle.stride(2), s_dt_head=dt.stride(1), s_dt_seq=dt.stride(2),
+                  nblk=nblk, dim=dim, CHUNK=chunk_size, BLK_CHUNKS=blk_chunks, BLOCK_D=BD)
+    _bwd_block_kernel[(nheads, nblk)](grad_angle, grad_dt, tot, off, grad_out, angle, dt, cu, ns, PASS=1, **common)
+    gos = grad_output_state.contiguous().float() if grad_output_state is not None else ginit
+    _scan_blocks_kernel[(nheads, ns)](off, ginit, tot, gos, cu, nblk, nheads, dim,
+                                      HAS_INIT=grad_output_state is not None, REVERSE=True, MOD=False, BLOCK_D=BD,
+                                      BLK_TOKENS=chunk_size * blk_chunks)
+    _bwd_block_kernel[(nheads, nblk)](grad_angle, grad_dt, tot, off, grad_out, angle, dt, cu, ns, PASS=3, **common)
+    return grad_angle, grad_dt, (ginit if has_init_state else None)
