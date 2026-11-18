@@ -21,7 +21,8 @@ Two layers of adaptation live here:
 
    Only collapses backed by a measured ``ub overflow`` (or a hard compile
    failure) are kept; an axis with no such evidence keeps its upstream extent.
-   See ``NPU_MIGRATION_mamba3_siso.md`` §14 for the per-axis ledger.
+   Each collapse below is annotated in place with the sizes it was measured
+   against, so the evidence travels with the code.
 
 Public operator signatures and return structures are never changed by this
 module; only blocking / config selection differs between backends.
@@ -245,9 +246,8 @@ def stage_choices(choices: List[int]) -> List[int]:
     multi-buffering) on the *hypothesis* that pipeline stages multiply the
     per-tile UB footprint.  That hypothesis has no measurement behind it: every
     ``ub overflow`` actually observed on this backend (fwd 1581312 / angle_dt
-    bwd 2129920 / bwd dqkv 1974528 bits, ``NPU_MIGRATION_mamba3_siso.md`` §6.1,
-    §9.1, §13) was driven by the tile / ``CHUNK_SIZE`` / ``BLOCK_D`` size, never
-    by ``num_stages``.
+    bwd 2129920 / bwd dqkv 1974528 bits) was driven by the tile /
+    ``CHUNK_SIZE`` / ``BLOCK_D`` size, never by ``num_stages``.
 
     Under the "default == upstream candidate space; collapse only with evidence"
     rule the axis is therefore restored to the full upstream extent.  ``choices``

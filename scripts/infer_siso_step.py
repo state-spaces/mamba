@@ -869,7 +869,7 @@ def main(argv=None) -> int:
         m3mod.RMSNormGated = _RMSNormGatedTorch
         step_fn = _step_ref_single
     else:
-        from mamba_ssm.ops.triton.mamba3.mamba3_siso_step import mamba3_siso_step
+        from mamba_ssm.ops.triton_ascend.mamba3.mamba3_siso_step import mamba3_siso_step
         step_fn = mamba3_siso_step
 
     print(f"[cfg] device={device} dtype={args.dtype} seed={args.seed} "

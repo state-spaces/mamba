@@ -10,11 +10,13 @@ between the CUDA tilelang kernels and the A2 kernels by changing one import:
     # Ascend A2
     from mamba_ssm.ops.tilelang_ascend.mamba3.mamba3_mimo import mamba3_mimo
 
-The triton helpers (``angle_dt_fwd`` / ``angle_dt_bwd`` /
-``compute_dacs_segsum_triton*``) are **not** reimplemented here: they are imported
-from ``mamba_ssm.ops.triton.mamba3`` exactly as the upstream wrapper does, and
-run on the NPU through ``triton-ascend``.  That keeps the discretisation maths
-bit-identical between the two back ends and avoids a second source of truth.
+The triton helpers are **not** reimplemented here: ``compute_dacs_segsum_triton*``
+is the unmodified upstream module (``mamba_ssm.ops.triton.mamba3``), while
+``angle_dt_fwd`` / ``angle_dt_bwd`` come from the NPU port
+(``mamba_ssm.ops.triton_ascend.mamba3``); both run on the NPU through
+``triton-ascend``.  That keeps the discretisation maths bit-identical between the
+two back ends and avoids a second source of truth.  See
+``mamba_ssm/ops/triton_ascend/README.md`` for the CUDA/Ascend split.
 
 What differs from upstream (and only this):
 
@@ -36,12 +38,12 @@ from typing import Optional, Tuple, Union
 import torch
 from torch import Tensor
 
-# --- triton preprocessing, shared verbatim with the CUDA tilelang operator ----
+# --- triton preprocessing: segsum from upstream, angle_dt from the NPU port ---
 from mamba_ssm.ops.triton.mamba3.mamba3_mimo_utils import (
     compute_dacs_segsum_triton,
     compute_dacs_segsum_triton_varlen,
 )
-from mamba_ssm.ops.triton.mamba3.angle_dt import angle_dt_bwd, angle_dt_fwd
+from mamba_ssm.ops.triton_ascend.mamba3.angle_dt import angle_dt_bwd, angle_dt_fwd
 
 # --- A2 tilelang kernels ----------------------------------------------------
 from mamba_ssm.ops.tilelang_ascend.mamba3.mamba3_mimo_bwd import mamba_mimo_backward

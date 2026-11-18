@@ -187,7 +187,7 @@ python -c "import tilelang, tilelang.ascend910.language; print(tilelang.__versio
 |---|---|---|
 | `Mamba3.forward`, MIMO branch | `mamba_ssm.ops.tilelang_ascend.mamba3.mamba3_mimo` (TileLang, A2) | Drop-in mirror of the CUDA `mamba3_mimo`: same arguments including `return_state`, `fuse_pregate_headwise_rms_norm`, `outproj_norm_weight`. Also exports `mamba3_mimo_fwd` / `mamba3_mimo_bwd` used by the op-level tests. |
 | `Mamba3.step()` | `mamba_ssm.ops.ascendc.mamba3_step.mamba3_step_fn` (Ascend C, kernel-direct `mamba3_decode_step`) | The **same** operator as SISO, with `R = mimo_rank`. `Mamba3.step` calls it for both variants, so one rebinding covers both. |
-| step's rotary / angle state | `mamba_ssm.ops.triton.mamba3.mamba3_mimo_rotary_step.apply_rotary_qk_inference_fwd` | `rotate_pairwise = not is_mimo` (`mamba3.py:392`): SISO rotates adjacent pairs, MIMO uses the blockwise/halved rotation. `angle = angle_state + tanh(angle_proj) * dt * pi`, `tanh(2sigmoid(2x) - 1)` inside the kernel. |
+| step's rotary / angle state | `mamba_ssm.ops.triton_ascend.mamba3.mamba3_mimo_rotary_step.apply_rotary_qk_inference_fwd` (`mamba_ssm.ops.backend` re-exports it for `Mamba3.step`) | `rotate_pairwise = not is_mimo` (`mamba3.py:392`): SISO rotates adjacent pairs, MIMO uses the blockwise/halved rotation. `angle = angle_state + tanh(angle_proj) * dt * pi`, `tanh(2sigmoid(2x) - 1)` inside the kernel. |
 
 ## B. Module wiring: the default route is still the CUDA kernel
 

@@ -122,7 +122,7 @@ from einops import rearrange
 from _siso_ops_npu_common import DEVICE, MODULE_SKIP
 
 import mamba_ssm.modules.mamba3 as m3mod
-from mamba_ssm.ops.triton.mamba3 import mamba3_siso_step as step_mod
+from mamba_ssm.ops.triton_ascend.mamba3 import mamba3_siso_step as step_mod
 
 pytestmark = MODULE_SKIP
 

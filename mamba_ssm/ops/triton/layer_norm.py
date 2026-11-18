@@ -11,9 +11,6 @@ import warnings
 
 import torch
 import torch.nn.functional as F
-# Shared with ``layernorm_gated.py``; ``npu_compat`` imports no mamba_ssm code,
-# so this one-way edge keeps the generic layer-norm op free of a cycle.
-from mamba_ssm.ops.triton.mamba3.npu_compat import _device_ctx, _sm_count
 from mamba_ssm.utils.torch import custom_bwd, custom_fwd
 
 import triton
@@ -370,7 +367,7 @@ def _layer_norm_fwd(
     BLOCK_N = min(MAX_FUSED_SIZE, triton.next_power_of_2(N))
     if N > BLOCK_N:
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
-    with _device_ctx(x.device):
+    with torch.cuda.device(x.device.index):
         _layer_norm_fwd_1pass_kernel[(M,)](
             x,
             y,
@@ -660,7 +657,7 @@ def _layer_norm_bwd(
     BLOCK_N = min(MAX_FUSED_SIZE, triton.next_power_of_2(N))
     if N > BLOCK_N:
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
-    sm_count = _sm_count(x.device)
+    sm_count = torch.cuda.get_device_properties(x.device).multi_processor_count
     _dw = torch.empty((sm_count, N), dtype=torch.float32, device=weight.device)
     _db = (
         torch.empty((sm_count, N), dtype=torch.float32, device=bias.device)
@@ -671,7 +668,7 @@ def _layer_norm_bwd(
     _db1 = torch.empty_like(_db) if bias1 is not None else None
     rows_per_program = math.ceil(M / sm_count)
     grid = (sm_count,)
-    with _device_ctx(x.device):
+    with torch.cuda.device(x.device.index):
         _layer_norm_bwd_kernel[grid](
             x,
             weight,

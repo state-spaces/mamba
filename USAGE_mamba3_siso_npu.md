@@ -218,7 +218,7 @@ Two interchangeable implementations of the single-token step (same signature, sa
 | Implementation | Import path | Notes |
 |---|---|---|
 | **Ascend C (default on NPU)** | `mamba_ssm.ops.ascendc.mamba3_siso_step` | The step itself runs the NPU kernel-direct operator `mamba3_decode_step` (i.e. `mamba3_step_fn`); rotary / angle-state reuse the Triton `apply_rotary_qk_inference_fwd`. Build `build/libmamba3_decode_step_ops.so` first (see section C) |
-| Triton (previous implementation, kept) | `mamba_ssm.ops.triton.mamba3.mamba3_siso_step` | Pure Triton, unchanged; useful as an A/B reference |
+| Triton (NPU port) | `mamba_ssm.ops.triton_ascend.mamba3.mamba3_siso_step` | The Triton-Ascend implementation; the only Triton step that runs on NPU. `mamba_ssm.ops.triton.mamba3.mamba3_siso_step` is now the pristine upstream CUDA kernel (see `mamba_ssm/ops/triton_ascend/README.md`) |
 
 `tests/ops/triton/test_mamba3_siso_npu.py` uses Ascend C by default; set `MAMBA3_SISO_STEP_IMPL=triton` to switch back.
 
@@ -248,7 +248,7 @@ import torch.nn.functional as F
 from einops import rearrange
 from mamba_ssm.modules.mamba3 import heavy_tail_activation
 from mamba_ssm.ops.ascendc.mamba3_siso_step import mamba3_siso_step   # default on NPU (Ascend C)
-# from mamba_ssm.ops.triton.mamba3.mamba3_siso_step import mamba3_siso_step   # previous Triton path, interchangeable
+# from mamba_ssm.ops.triton_ascend.mamba3.mamba3_siso_step import mamba3_siso_step   # Triton (NPU port), interchangeable
 
 NSPLIT = [
     model.d_inner, model.d_inner,

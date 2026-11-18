@@ -13,7 +13,7 @@
 * ``mamba3_step_fn``（mamba3_decode_step）——与
   ``mamba_ssm.ops.cute.mamba3.mamba3_step_fn`` 同名同签名，调用方只替换导入即可；
 * ``mamba3_siso_step``——SISO decode 的单 token 递推，与
-  ``mamba_ssm.ops.triton.mamba3.mamba3_siso_step.mamba3_siso_step`` 同名同签名，
+  ``mamba_ssm.ops.triton_ascend.mamba3.mamba3_siso_step.mamba3_siso_step`` 同名同签名，
   内部由 ``mamba3_step_fn``（R=1）承接状态递推。
 """
 

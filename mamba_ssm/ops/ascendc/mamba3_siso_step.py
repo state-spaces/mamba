@@ -8,7 +8,7 @@
 
 """mamba3_siso_step 的 Ascend C 版实现（SISO decode 的单 token 递推）。
 
-源实现（被替换的 Triton 版本）：``mamba_ssm.ops.triton.mamba3.mamba3_siso_step.mamba3_siso_step``。
+源实现（被替换的 Triton 版本）：``mamba_ssm.ops.triton_ascend.mamba3.mamba3_siso_step.mamba3_siso_step``。
 本模块**同名、同签名、同返回结构**（``(Out, [Angle_State, SSM_State, K_State, V_State])``），
 调用方只替换导入即可运行::
 
@@ -54,7 +54,7 @@
 数值口径（与 CANN 上 Triton 版 ``PRECISE_FP32`` 路径逐项对齐）：
 
 * Q/K 先 upcast 到 fp32 再做 bias 相加与旋转，旋转结果保持 fp32 送进 ``mamba3_step_fn``
-  （源 kernel 在 CANN 上正是保留 fp32，见 ``NPU_MIGRATION_mamba3_siso.md`` §12.3：
+  （源 kernel 在 CANN 上正是保留 fp32：
   bf16 舍入会在 GQA 的相消点上放大成单点离群）；
 * ``state``/``x``/``Xstate``/``z``/``out`` 走 fp32 计算，只在 ``Out`` 落盘时收窄到 ``V.dtype``
   （源 kernel 同样是 fp32 计算 + store 时收窄）；
@@ -115,7 +115,7 @@ def _ones_proj(heads: int, headdim_v: int, device: torch.device) -> torch.Tensor
 
 def _rotary_fwd():
     """惰性取 MIMO decode 用的 Triton rotary 算子（避免 import 期硬依赖 triton）。"""
-    from mamba_ssm.ops.triton.mamba3.mamba3_mimo_rotary_step import apply_rotary_qk_inference_fwd
+    from mamba_ssm.ops.triton_ascend.mamba3.mamba3_mimo_rotary_step import apply_rotary_qk_inference_fwd
 
     return apply_rotary_qk_inference_fwd
 

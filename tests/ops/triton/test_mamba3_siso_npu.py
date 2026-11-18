@@ -59,14 +59,14 @@ from test_mamba3_siso import (  # noqa: E402
 # Step implementation: Ascend C operator by default, Triton on request.
 SISO_STEP_IMPL = os.environ.get("MAMBA3_SISO_STEP_IMPL", "ascendc").strip().lower()
 if SISO_STEP_IMPL == "triton":
-    from mamba_ssm.ops.triton.mamba3.mamba3_siso_step import mamba3_siso_step  # noqa: E402
+    from mamba_ssm.ops.triton_ascend.mamba3.mamba3_siso_step import mamba3_siso_step  # noqa: E402
 elif SISO_STEP_IMPL == "ascendc":
     from mamba_ssm.ops.ascendc.mamba3_siso_step import mamba3_siso_step  # noqa: E402
 else:
     raise SystemExit(
         f"unknown MAMBA3_SISO_STEP_IMPL={SISO_STEP_IMPL!r} (expected 'ascendc' or 'triton')"
     )
-from mamba_ssm.ops.triton.mamba3.mamba3_siso_combined import mamba3_siso_combined  # noqa: E402
+from mamba_ssm.ops.triton_ascend.mamba3.mamba3_siso_combined import mamba3_siso_combined  # noqa: E402
 
 DEVICE = "npu"
 DTYPE = torch.bfloat16
@@ -88,7 +88,7 @@ def test_angle_dt(seqlen: int = 200, chunk_size: int = 64, rtol: float = 1e-2) -
     The output is ``mod 2*pi``, so equality is checked through ``sin``/``cos``
     (periodic equivalence) rather than directly.
     """
-    from mamba_ssm.ops.triton.mamba3.angle_dt import angle_dt_fwd
+    from mamba_ssm.ops.triton_ascend.mamba3.angle_dt import angle_dt_fwd
 
     torch.random.manual_seed(0)
     batch, nheads, dim = 2, 4, 8

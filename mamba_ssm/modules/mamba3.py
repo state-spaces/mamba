@@ -10,7 +10,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from mamba_ssm.ops.triton.layernorm_gated import RMSNorm as RMSNormGated
+# Backend dispatch: on CUDA this resolves to ``mamba_ssm.ops.triton`` (the
+# upstream implementation), on Ascend NPU to ``mamba_ssm.ops.triton_ascend``.
+# This module is the only place in the model code that picks a backend; see
+# ``mamba_ssm/ops/backend.py`` for the resolution order and the
+# ``MAMBA3_TRITON_BACKEND`` override.
+from mamba_ssm.ops.backend import RMSNormGated
 
 # TileLang's MIMO path cannot be built/imported on Ascend NPU (it fails with
 # non-ImportError errors such as ``PassConfigKey.TL_ENABLE_FAST_MATH``).  Setting
@@ -43,9 +48,9 @@ else:
         )
         mamba3_mimo_combined = None
 
-from mamba_ssm.ops.triton.mamba3.mamba3_siso_combined import mamba3_siso_combined
+from mamba_ssm.ops.backend import mamba3_siso_combined
 
-from mamba_ssm.ops.triton.mamba3.mamba3_mimo_rotary_step import apply_rotary_qk_inference_fwd
+from mamba_ssm.ops.backend import apply_rotary_qk_inference_fwd
 
 try:
     from mamba_ssm.ops.cute.mamba3.mamba3_step_fn import mamba3_step_fn
