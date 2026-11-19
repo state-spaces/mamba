@@ -167,3 +167,72 @@ def test_mamba_chunk_scan_lone_request_nonfinite_input_stays_nonfinite():
         "a lone request's own non-finite input must not be silently sanitized "
         "into finite-but-wrong output"
     )
+
+
+@pytest.mark.parametrize("target", ["x", "B"])
+@pytest.mark.parametrize("nonfinite_value", [float("inf"), float("nan")], ids=["inf", "nan"])
+@pytest.mark.parametrize(
+    "lens,poisoned",
+    [
+        pytest.param([5, 30], 0, id="two_same_chunk-first"),
+        pytest.param([5, 30], 1, id="two_same_chunk-second"),
+        pytest.param([16, 30], 0, id="chunk_boundary-first"),
+        pytest.param([16, 30], 1, id="chunk_boundary-second"),
+        pytest.param([3, 4, 9, 30], 0, id="three_in_chunk-first"),
+        pytest.param([3, 4, 9, 30], 1, id="three_in_chunk-middle"),
+        pytest.param([3, 4, 9, 30], 2, id="three_in_chunk-last"),
+        pytest.param([3, 4, 9, 30], 3, id="three_in_chunk-after"),
+    ],
+)
+def test_mamba_chunk_scan_nonfinite_stays_with_its_own_request(lens, poisoned, nonfinite_value, target):
+    """A request's own non-finite input must still reach its own output and final
+    state, while every other request in the packed batch matches its standalone run.
+
+    Isolating requests by dropping non-finite values from a shared chunk would hide a
+    request's own `nan` from itself (finite, wrong output instead of `nan`).
+    """
+    device = "cuda"
+    n_heads, d_head, d_state, chunk_size = 2, 4, 8, 16
+    starts = [0]
+    for n in lens:
+        starts.append(starts[-1] + n)
+    seqlen = starts[-1]
+    pos = starts[poisoned] + 2  # the third token of the poisoned request
+
+    x = torch.ones(1, seqlen, n_heads, d_head, device=device)
+    B = torch.ones(1, seqlen, 1, d_state, device=device)
+    if target == "x":
+        x[0, pos, 0, 1] = nonfinite_value
+    else:
+        B[0, pos, 0, 1] = nonfinite_value
+    dt = torch.ones(1, seqlen, n_heads, device=device)
+    A = torch.zeros(n_heads, device=device)
+    C = torch.ones(1, seqlen, 1, d_state, device=device)
+    seq_idx = torch.repeat_interleave(
+        torch.arange(len(lens), dtype=torch.int32, device=device),
+        torch.tensor(lens, device=device),
+    ).unsqueeze(0)
+    cu_seqlens = torch.tensor(starts, dtype=torch.int32, device=device)
+
+    out, varlen_states = mamba_chunk_scan_combined(
+        x, dt, A, B, C, chunk_size,
+        seq_idx=seq_idx, cu_seqlens=cu_seqlens, return_varlen_states=True,
+    )
+
+    for i, n in enumerate(lens):
+        seq_out = out[0, starts[i]:starts[i + 1]]
+        state = varlen_states[i]
+        if i != poisoned:
+            expected = (d_state * torch.arange(1, n + 1, device=device, dtype=torch.float32))
+            expected = expected[:, None, None].expand(n, n_heads, d_head)
+            assert seq_out.isfinite().all(), f"request {i}'s output must stay finite"
+            assert state.isfinite().all(), f"request {i}'s final state must stay finite"
+            torch.testing.assert_close(seq_out, expected)
+            torch.testing.assert_close(state, torch.full_like(state, float(n)))
+        else:
+            rel = pos - starts[i]
+            own = seq_out[rel:, 0, 1] if target == "x" else seq_out[rel:]
+            assert (~own.isfinite()).all(), (
+                "the poisoned request's own output must stay non-finite from its non-finite token on"
+            )
+            assert not state.isfinite().all(), "the poisoned request's own final state must stay non-finite"

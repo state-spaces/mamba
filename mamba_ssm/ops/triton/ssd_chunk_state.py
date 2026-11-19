@@ -244,19 +244,17 @@ def _chunk_state_fwd_kernel(
     for k in range(0, chunk_size_limit, BLOCK_SIZE_K):
         x = tl.load(x_ptrs, mask=(offs_m[:, None] < hdim) & (offs_k[None, :] < chunk_size_limit - k), other=0.0)
         b = tl.load(b_ptrs, mask=(offs_k[:, None] < chunk_size_limit - k) & (offs_n[None, :] < dstate), other=0.0).to(tl.float32)
-        if HAS_SEQ_IDX and chunk_has_boundary:
-            # A non-finite x or B from one sequence must not reach the dot product
-            # below: for another sequence in this chunk, scale masks its own
-            # contribution to 0, but 0 * inf (or 0 * nan) is still nan, which
-            # tl.dot then sums into every output of this chunk, not just the
-            # sequence the non-finite value belongs to. `v - v` is 0 for every
-            # finite v and nan for +-inf/nan, so this replaces only the
-            # non-finite elements, the same idiom as `x == x` for nan alone.
-            x = tl.where((x - x) == 0.0, x, 0.0)
-            b = tl.where((b - b) == 0.0, b, 0.0)
         dA_cs_k = tl.load(dA_cumsum_ptrs, mask=offs_k < chunk_size_limit - k, other=0.0).to(tl.float32)
         if HAS_SEQ_IDX:
             seq_idx_k = tl.load(seq_idx_ptrs, mask=offs_k < chunk_size_limit - k, other=-1)
+            if chunk_has_boundary:
+                # Rows of another sequence get weight 0 in `scale` below, but 0 * inf (or
+                # 0 * nan) is still nan, and tl.dot would sum it into the whole chunk.
+                # Zero those rows outright instead. Rows of this chunk's last sequence
+                # keep their own non-finite values, so they still reach its state.
+                in_last = (seq_idx_last >= 0) & (seq_idx_k == seq_idx_last)
+                x = tl.where(in_last[None, :], x, 0.0)
+                b = tl.where(in_last[:, None], b, 0.0)
         dt_k = tl.load(dt_ptrs, mask=offs_k < chunk_size_limit - k, other=0.0).to(tl.float32)
         if not HAS_SEQ_IDX:
             # scale = tl.exp((dA_cs_last - dA_cs_k)) * dt_k
