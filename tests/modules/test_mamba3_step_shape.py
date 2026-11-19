@@ -1,19 +1,8 @@
 """Shape contract for Mamba3.step — matches Mamba2 decode (B, 1, D)."""
-import types
-
 import pytest
 import torch
 
 from mamba_ssm.modules import mamba3 as mamba3_mod
-
-
-class _DummyNorm:
-    def __init__(self):
-        self.weight = torch.ones(1)
-        self.eps = 1e-5
-
-    def __call__(self, y, z=None):
-        return y
 
 
 def _stub_step_fn(*args, **kwargs):
@@ -48,8 +37,9 @@ def test_mamba3_step_accepts_batched_token(monkeypatch, keep_seq):
         device="cpu",
         dtype=torch.float32,
     )
-    # Avoid needing the real CuteDSL path beyond the stub.
-    m.norm = _DummyNorm()
+    # _preprocess calls these Triton norms even though the step kernel is stubbed.
+    m.B_norm = torch.nn.Identity()
+    m.C_norm = torch.nn.Identity()
 
     angle, ssm, k_state, v_state = m.allocate_inference_cache(
         batch_size=batch, max_seqlen=8, device="cpu", dtype=torch.float32
