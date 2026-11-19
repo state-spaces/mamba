@@ -2,14 +2,15 @@
 
 Why this file exists
 --------------------
-``Mamba3.step`` (``mamba_ssm/modules/mamba3.py:343``) is the standard decode entry
-(the only thing ``forward`` dispatches to when ``inference_params.seqlen_offset > 0``,
-``mamba3.py:200-202``), but it calls ``mamba3_step_fn`` -- a cutlass/CuteDSL kernel
-that has not been ported to Ascend.  The import guard leaves
-``mamba3_step_fn = None`` on NPU and the ``assert`` at ``mamba3.py:365`` fires, so
-the module-level decode path is unusable on this stack even though the Triton
-``mamba3_siso_step`` op already implements the same recurrence (see
-``scripts/infer_siso_step.py``, which bypasses cutlass for exactly this reason).
+``Mamba3.step`` (``mamba_ssm/modules/mamba3.py``) is the standard decode entry (the
+only thing ``forward`` dispatches to when ``inference_params.seqlen_offset > 0``).
+Its kernel is dispatched by ``mamba_ssm.ops.backend``: on NPU ``mamba3_step_fn`` is
+the Ascend C ``mamba3_decode_step`` operator, which needs the pre-built
+``libmamba3_decode_step_ops.so``.  This test keeps calling the Triton
+``mamba3_siso_step`` op directly (as ``scripts/infer_siso_step.py`` does) because
+that path needs no compiled extension -- ``mamba3_siso_step`` implements the same
+recurrence, and ``tests/ops/ascendc/test_mamba3_mimo_step.py`` covers the
+module-level ``Mamba3.step`` through the dispatched Ascend C operator.
 
 This test wires the *module* to that Triton op and checks the only thing that can
 be checked without a golden: **decode must reproduce prefill**.  Same model, same

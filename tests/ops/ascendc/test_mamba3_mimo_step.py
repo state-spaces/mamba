@@ -6,8 +6,9 @@ Copyright (c) 2026, Dao AI Lab, Goombalab
 Pytest coverage for Mamba3.step() and mixed forward/step decoding.
 
 Upstream: ``tests/ops/cute/test_mamba3_mimo_step.py`` (CUDA / CuteDSL).  On the
-Ascend NPU the two kernels that test exercises do not exist, so this port swaps
-them for their A2 counterparts while keeping the workload, the seed, the four
+Ascend NPU the two kernels that test exercises do not exist, so this port drives
+their A2 counterparts -- which ``ops.backend`` now selects on its own -- while
+keeping the workload, the seed, the four
 configurations (SISO/MIMO x is_outproj_norm) and every assertion of the original
 suite:
 
@@ -17,10 +18,11 @@ suite:
     Mamba3.forward  SISO  -> mamba3_siso_combined -> unchanged (triton-ascend)
     Mamba3.step()         -> mamba3_step_fn (cute)-> mamba3_step_fn (Ascend C, A2 kernel)
 
-The swap is a two-line import on the module globals of
-``mamba_ssm.modules.mamba3`` (``mamba3_mimo_combined`` / ``mamba3_step_fn``), the
-same way ``tests/ops/triton/test_mamba3_siso_e2e_npu.py`` installs its golden.
-No production source is modified.
+No swap is needed: ``mamba_ssm.modules.mamba3`` takes ``mamba3_mimo_combined``
+and ``mamba3_step_fn`` from ``mamba_ssm.ops.backend``, which on this build
+resolves both to the Ascend implementations.  ``_require_dispatch`` below
+asserts exactly that, so a dispatch regression fails this suite instead of
+silently testing CUDA kernels.
 
 One contract difference found while porting, and **deliberately not patched in this
 file**: the A2 kernel takes one dtype code for ``A`` / ``dt`` / ``trap`` / ``D``
@@ -30,16 +32,16 @@ projection).  A bf16 ``trap`` next to an fp32 ``A`` was silently misread: ~13% o
 the output elements off by more than 0.1, measured max|err| = 1.15 on a case whose
 golden matches at 3e-8 once the scalar side is fp32.  That is fixed in the operator
 wrapper now -- ``mamba3_step_fn`` normalises the four tensors to fp32 and the C++
-validator rejects a mixed group -- so this file installs the operator as-is and a
+validator rejects a mixed group -- so this file exercises the dispatched operator as-is and a
 regression there fails the suite instead of being papered over by an adapter.
 
 Usage:
     # correctness (inside the NPU container, from the repo root)
-    MAMBA3_STEP_DEVICE=npu MAMBA3_DISABLE_TILELANG=1 ASCEND_RT_VISIBLE_DEVICES=0 \
+    MAMBA3_STEP_DEVICE=npu ASCEND_RT_VISIBLE_DEVICES=0 \
         python -m pytest -q -s -p no:cacheprovider tests/ops/ascendc/test_mamba3_mimo_step.py
 
     # benchmark (single step, no assertions)
-    MAMBA3_DISABLE_TILELANG=1 python tests/ops/ascendc/test_mamba3_mimo_step.py
+    python tests/ops/ascendc/test_mamba3_mimo_step.py
 
 Prerequisites:
     * ``torch_npu`` and an Ascend device;
@@ -65,11 +67,6 @@ import pytest
 import torch
 from torch import Tensor
 
-
-# TileLang's CUDA MIMO path cannot be built on Ascend; skip the import so that
-# ``mamba_ssm.modules.mamba3`` comes up with ``mamba3_mimo_combined = None``
-# (patched to the A2 kernel below).
-os.environ.setdefault("MAMBA3_DISABLE_TILELANG", "1")
 
 warnings.filterwarnings("ignore")
 logging.disable(logging.WARNING)
@@ -132,23 +129,27 @@ def _npu_kernels_available() -> Optional[str]:
     return None
 
 
-def _install_npu_kernels() -> None:
-    """Point the Mamba3 module at the A2 forward/step kernels.
+def _require_dispatch() -> None:
+    """Fail unless ``Mamba3`` picked the NPU kernels through ``ops.backend``.
 
-    ``Mamba3.forward`` dispatches to a module-global ``mamba3_mimo_combined`` and
-    ``Mamba3.step`` to ``mamba3_step_fn``; rebinding those two names is the whole
-    port.  The SISO forward keeps using ``mamba3_siso_combined`` (triton-ascend),
-    which already runs on NPU.
+    ``Mamba3.forward`` reads the module-global ``mamba3_mimo_combined`` and
+    ``Mamba3.step`` reads ``mamba3_step_fn``; both are seeded by
+    ``mamba_ssm.ops.backend`` from the active backend, so this suite must not
+    patch them by hand -- doing so would hide a dispatch regression.
     """
     import mamba_ssm.modules.mamba3 as m3mod
-    from mamba_ssm.ops.ascendc.mamba3_step import mamba3_step_fn as ascendc_step_fn
-    from mamba_ssm.ops.tilelang_ascend.mamba3.mamba3_mimo import mamba3_mimo as a2_mimo
 
-    m3mod.mamba3_mimo_combined = a2_mimo
-    # No dtype adapter on purpose: ``mamba3_step_fn`` normalises the scalar side
-    # (A/dt/trap/D) to fp32 itself (and the C++ validator rejects a mixed group),
-    # so upcasting ``dt``/``trap`` here would hide a regression of that normalisation.
-    m3mod.mamba3_step_fn = ascendc_step_fn
+    assert m3mod.mamba3_mimo_combined is not None, (
+        "ops.backend resolved mamba3_mimo to None; is the tilelang build with "
+        "the ascend910 backend missing, or MAMBA3_DISABLE_TILELANG set?"
+    )
+    assert m3mod.mamba3_mimo_combined.__module__.startswith(
+        "mamba_ssm.ops.tilelang_ascend."
+    ), f"mamba3_mimo came from {m3mod.mamba3_mimo_combined.__module__}"
+    assert m3mod.mamba3_step_fn is not None, "ops.backend resolved mamba3_step_fn to None"
+    assert m3mod.mamba3_step_fn.__module__ == "mamba_ssm.ops.ascendc.mamba3_step", (
+        f"mamba3_step_fn came from {m3mod.mamba3_step_fn.__module__}, expected the Ascend C step"
+    )
 
 
 def _require_npu_kernels() -> None:
@@ -157,7 +158,7 @@ def _require_npu_kernels() -> None:
     reason = _npu_kernels_available()
     if reason is not None:
         pytest.skip(reason)
-    _install_npu_kernels()
+    _require_dispatch()
 
 
 def _require_npu_kernels_or_exit() -> None:
@@ -167,7 +168,7 @@ def _require_npu_kernels_or_exit() -> None:
     reason = _npu_kernels_available()
     if reason is not None:
         raise SystemExit(reason)
-    _install_npu_kernels()
+    _require_dispatch()
 
 
 def _mamba3_cls():

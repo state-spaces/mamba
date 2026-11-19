@@ -1,8 +1,6 @@
 # Copyright (c) 2026, Dao AI Lab, Goombalab.
 
 import math
-import os
-import warnings
 
 from einops import rearrange, repeat
 
@@ -10,52 +8,23 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# Backend dispatch: on CUDA this resolves to ``mamba_ssm.ops.triton`` (the
-# upstream implementation), on Ascend NPU to ``mamba_ssm.ops.triton_ascend``.
-# This module is the only place in the model code that picks a backend; see
-# ``mamba_ssm/ops/backend.py`` for the resolution order and the
-# ``MAMBA3_TRITON_BACKEND`` override.
+# Backend dispatch: every Mamba-3 operator family resolves through
+# ``mamba_ssm.ops.backend`` -- the SISO Triton kernels, the MIMO TileLang
+# kernels and the single-token decode step.  On CUDA that is the upstream
+# implementation, on Ascend NPU the port (``triton_ascend`` /
+# ``tilelang_ascend`` / the Ascend C step).  This module is the only place in
+# the model code that asks for a backend; see ``mamba_ssm/ops/backend.py``
+# for the resolution order, the ``MAMBA3_TRITON_BACKEND`` override and the
+# ``MAMBA3_DISABLE_TILELANG`` kill switch.  A family that is not installed
+# resolves to ``None`` and trips the matching assertion below instead of
+# silently running something else.
+from mamba_ssm.ops import backend as _ops_backend
 from mamba_ssm.ops.backend import RMSNormGated
 
-# TileLang's MIMO path cannot be built/imported on Ascend NPU (it fails with
-# non-ImportError errors such as ``PassConfigKey.TL_ENABLE_FAST_MATH``).  Setting
-# ``MAMBA3_DISABLE_TILELANG=1`` skips the import entirely so that the SISO Triton
-# path (``mamba3_siso_combined``) can be used on NPU.  On CUDA the variable is
-# unset and the tilelang path is imported as before.
-_TILELANG_DISABLED = os.environ.get("MAMBA3_DISABLE_TILELANG", "").lower() in (
-    "1",
-    "true",
-    "yes",
-    "on",
-)
-
-if _TILELANG_DISABLED:
-    mamba3_mimo_combined = None
-else:
-    try:
-        from mamba_ssm.ops.tilelang.mamba3.mamba3_mimo import mamba3_mimo as mamba3_mimo_combined
-    except ImportError:
-        mamba3_mimo_combined = None
-    except Exception as exc:
-        # TileLang can raise non-ImportError exceptions at import time; keep the
-        # module importable but surface the real error instead of silently
-        # swallowing it.
-        warnings.warn(
-            "mamba3_mimo (tilelang) could not be imported; the MIMO path is "
-            f"disabled. Set MAMBA3_DISABLE_TILELANG=1 to silence this. cause: {exc!r}",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        mamba3_mimo_combined = None
-
-from mamba_ssm.ops.backend import mamba3_siso_combined
-
 from mamba_ssm.ops.backend import apply_rotary_qk_inference_fwd
-
-try:
-    from mamba_ssm.ops.cute.mamba3.mamba3_step_fn import mamba3_step_fn
-except ImportError:    
-    mamba3_step_fn = None
+from mamba_ssm.ops.backend import mamba3_mimo as mamba3_mimo_combined
+from mamba_ssm.ops.backend import mamba3_siso_combined
+from mamba_ssm.ops.backend import mamba3_step_fn
 
 
 def heavy_tail_activation(x: torch.Tensor) -> torch.Tensor:
@@ -121,7 +90,13 @@ class Mamba3(nn.Module):
         if not self.is_mimo:
             self.mimo_rank = 1
         else:
-            assert mamba3_mimo_combined is not None, "Fails to import Mamba-3 MIMO kernels. Please ensure you installed the necessary dependencies, such as TileLang."
+            assert mamba3_mimo_combined is not None, (
+                f"Mamba-3 MIMO kernels are not available on the "
+                f"{_ops_backend.backend()} backend: ops.backend.mamba3_mimo is "
+                f"None, so install the TileLang build for it (see "
+                f"USAGE_mamba3_mimo_npu.md) or unset "
+                f"{_ops_backend.DISABLE_TILELANG_ENV} if it is set."
+            )
 
         self.d_inner = int(self.expand * self.d_model)
         assert self.d_inner % self.headdim == 0
@@ -347,7 +322,8 @@ class Mamba3(nn.Module):
 
     def step(self, u, angle_state, ssm_state, k_state, v_state, **kwargs):
         """
-        Decode function using CuteDSL kernel from mamba3_step_fn.py.
+        Decode step.  ``mamba3_step_fn`` is the backend's kernel: CuteDSL on
+        CUDA, the Ascend C ``mamba3_decode_step`` operator on NPU.
         Also modify the state vars in-place for the next step.
 
         NOTE: Only tested on H100. Compatibility with other hardware
@@ -367,7 +343,12 @@ class Mamba3(nn.Module):
             nxt_k_state: (batch, R, nheads, d_state), where R = mimo_rank (R=1 if not MIMO)
             nxt_v_state: (batch, nheads, headdim)
         """
-        assert mamba3_step_fn is not None, "Cute Mamba-3 step function is not available. Please ensure you installed the necessary dependencies, such as nvidia-cutlass-dsl and quack-kernels."
+        assert mamba3_step_fn is not None, (
+            f"No Mamba-3 decode step on the {_ops_backend.backend()} backend "
+            f"(ops.backend.mamba3_step_fn is None): CUDA needs "
+            f"nvidia-cutlass-dsl + quack-kernels, the Ascend NPU side needs "
+            f"an importable mamba_ssm.ops.ascendc"
+        )
 
         # in_proj
         zxBCdt = self.in_proj(u)

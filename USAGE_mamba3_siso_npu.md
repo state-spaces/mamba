@@ -11,7 +11,7 @@ Neither ships with `torch_npu`, and neither works from a plain `pip install` on 
 | Package | What it compiles | Needed for | Version validated here |
 |---|---|---|---|
 | `triton-ascend` | every Triton kernel of this path (`angle_dt*`, `mamba3_siso_fwd`, the `compute_*` / `angle_dt_bwd` chain, the rotary step) | always | `3.6.0+dev20260921` -- it must match the Triton your `torch` pairs with (`torch 2.12` <-> `triton 3.6`) |
-| `tilelang-mlir-ascend` (imports as `tilelang`) | the MIMO forward `mamba3_mimo` | **not** this path -- with `MAMBA3_DISABLE_TILELANG=1` (set in every command below) nothing imports it; only `is_mimo=True` needs it, see `USAGE_mamba3_mimo_npu.md` | `0.1.15+cuda.git0b31c2f4`, i.e. branch `v0.1.15` @ `0b31c2f4`, built with `USE_ASCEND910=ON` |
+| `tilelang-mlir-ascend` (imports as `tilelang`) | the MIMO forward `mamba3_mimo` | **not** this path -- `mamba_ssm.ops.backend` only reaches it for `is_mimo=True`, and `MAMBA3_DISABLE_TILELANG=1` disables that route outright (set it to keep a SISO-only run from importing this package at all); see `USAGE_mamba3_mimo_npu.md` | `0.1.15+cuda.git0b31c2f4`, i.e. branch `v0.1.15` @ `0b31c2f4`, built with `USE_ASCEND910=ON` |
 
 Validated combination: 910B3, CANN 9.1.0, Python 3.12, `torch 2.12.0+cpu`, `torch_npu 2.12.0.post2`,
 `triton-ascend 3.6.0+dev20260921`, `tilelang 0.1.15+cuda.git0b31c2f4`.
@@ -204,13 +204,28 @@ Two constraints:
 1. **The chunk size is clamped.** On NPU `chunk_size` is capped at <=64 by `effective_chunk_size`, and for `seqlen >= 64` it is reduced further to 32. Chunking is **mathematically equivalent but not bitwise equivalent**: the number of `mod 2*pi` folds changes with the chunk size, and so does the cross-chunk accumulation order.
 2. **The measured safe upper bound for `RMSNormGated`'s `group_size` is 8192** (with `is_outproj_norm=True` this is `headdim`). Exceeding it is a **compile-time** `ub overflow`, never a silent wrong result; `16384` measured **1.83x** over the limit.
 
+The `headdim=16` above is fine for forward/backward but **cannot decode**: the step operator needs
+`D % tile_D == 0` with `tile_D >= 32`, which is why section B1 builds its model with `headdim=32`
+(see B3).
+
 ## B. Inference (decode): `mamba3_siso_step` on NPU
-Upstream `Mamba3.step()` depends on the cutlass/CuteDSL `mamba3_step_fn`, which has **not been migrated to
-Ascend**. The import guard in `mamba3.py` leaves it as `None`, so `forward(inference_params=...)` with
-`seqlen_offset > 0` dispatches into `step()` and **fails an assertion**. On NPU, call the SISO decode step
-directly: keep using the module for prefill (internally `mamba3_siso_combined(..., return_final_states=True)`)
-to obtain the four states, then call step once per token. Runnable example: `scripts/infer_siso_step.py`;
-test version: `tests/ops/triton/test_mamba3_siso_module_decode_npu.py`.
+
+`Mamba3.step()` calls `mamba3_step_fn`, which `mamba_ssm.ops.backend` dispatches per backend: on NPU it is
+the Ascend C `mamba3_decode_step` operator, so the module-level decode path works as soon as
+`build/libmamba3_decode_step_ops.so` exists (section C) -- no rebinding, no environment variable before the
+import. Which kernels a process actually uses (this is the only thing to check after a version bump):
+
+```python
+from mamba_ssm.ops import backend as b
+print(b.backend())                        # 'ascend' on this build, 'cuda' upstream
+print(b.mamba3_step_fn.__module__)        # mamba_ssm.ops.ascendc.mamba3_step
+print(b.mamba3_siso_combined.__module__)  # mamba_ssm.ops.triton_ascend.mamba3.mamba3_siso_combined
+```
+
+A family that is not installed resolves to `None` instead of falling back, and `Mamba3.step()` then trips
+an assertion that names the backend. The op-level route below (prefill through the module, then call the
+step op once per token) stays available and is what `scripts/infer_siso_step.py` uses, because it can also
+run the pure-Triton step; test version: `tests/ops/triton/test_mamba3_siso_module_decode_npu.py`.
 
 Two interchangeable implementations of the single-token step (same signature, same
 `(out, [angle_state, ssm_state, k_state, v_state])` return, so they are drop-in replacements):
@@ -228,7 +243,7 @@ from types import SimpleNamespace
 import torch
 from mamba_ssm.modules.mamba3 import Mamba3
 
-model = Mamba3(d_model=128, d_state=16, expand=2, headdim=16, ngroups=1,
+model = Mamba3(d_model=128, d_state=16, expand=2, headdim=32, ngroups=1,   # not 16: see B3
                is_mimo=False, is_outproj_norm=False, chunk_size=64,
                dtype=torch.bfloat16, device="npu", layer_idx=0).eval()
 u = torch.randn(2, 64, 128, dtype=torch.bfloat16, device="npu")
@@ -288,18 +303,41 @@ out_decode = torch.stack(outs, dim=1)   # (b, l - 16, d_model)
 print(out_decode.shape, out_decode.dtype, out_prefill.shape)
 ```
 
-Extra shape constraints of the Ascend C path (violations are reported by `mamba3_step_fn` itself, never silently):
-`d_state % 8 == 0`; `headdim_v` must be divisible by one of `32/64/128` (`tile_D` is picked automatically);
-`headdim_qk % 2 == 0`; NPU only. `D=None` is treated as zeros, whereas the Triton path simply omits the `D*v` term.
+### B3. Shape constraints of the decode step
 
-### B3. Four traps (all fail **silently**; none of them raises)
+`tile_D` is the kernel's tile width along `D`, the operator requires **`D % tile_D == 0`**, accepts
+`tile_D` in `{32, 64, 128}` (`SUPPORTED_TILE_D` in `mamba3_step.py`) and **defaults to 64**. The three
+entry points do not resolve it the same way, and that difference is what bites:
+
+| Entry point | `tile_D` | `headdim` must be |
+|---|---|---|
+| `mamba3_step_fn` (the operator, `ops/ascendc/mamba3_step.py`) | argument, default **64** | a multiple of 64, or pass `tile_D=32`/`128` yourself |
+| `mamba3_siso_step` (SISO wrapper) | `pick_tile_d(headdim_v)`: the first of `128, 64, 32` that divides it | a multiple of **32**, 64 or 128 |
+| `Mamba3.step()` (the module) | **hard-coded `tile_D=64`, `num_warps=4`** (`mamba3.py:417`, `:440`) | a multiple of **64** |
+
+`headdim=32` therefore decodes through the op-level wrapper -- `tests/ops/triton/test_mamba3_siso_npu.py`
+runs exactly that (`headdim_v=32`) -- but **not** through `Mamba3.step()`, which raises
+
+    ValueError: mamba3_decode_step: D(32) 必须能被 tile_D(64) 整除
+
+and `headdim=16` fails one level earlier, inside the wrapper:
+`mamba3_siso_step: headdim_v(16) 必须能被 (128, 64, 32) 之一整除（mamba3_step_fn 的 tile_D 约束）`.
+The examples above pass `headdim=32` for the op-level route; use `headdim=64` (or pass `tile_D`
+explicitly at the op level) if you decode through `Mamba3.step()`. Raising the module to pick `tile_D`
+from `headdim` would lift the restriction -- it is not done yet, so do not rely on it.
+
+Everything else: `d_state % 8 == 0`; `headdim_qk % 2 == 0`; NPU only. `D=None` is treated as zeros,
+whereas the Triton path simply omits the `D*v` term. Violations are reported by the wrapper itself,
+never silently.
+
+### B4. Four traps (all fail **silently**; none of them raises)
 
 1. `Trap` must be the projection **before** sigmoid (the kernel applies sigmoid itself). Passing the post-sigmoid value sigmoids twice: measured p95 degrades from `2.1e-2` to `1.28` (x62).
 2. `C/B` must be **normalised before expanding** (`C_norm/B_norm` -> `expand(-1,-1,nheads,-1)`); skipping the norm measured x71.
 3. `Angles` must be the **raw per-token angles (fp32)**; do not cumsum them yourself, and do **not** call `apply_rotary_qk_inference_fwd` (rotation happens inside the kernel).
 4. The state order is `(angle, ssm, k, v)`; the prefill `Final_K_State` needs `.squeeze(1)` to drop the mimo-rank axis.
 
-### B4. Precision contract
+### B5. Precision contract
 **Equivalence (main conclusion).** Against the fp32/fp64 anchors there is no regression over the 831 comparisons, and no output passes its anchor on A100 while failing on NPU.
 
 **Absolute CANN gate.** 418/831 do not clear the absolute gate, but all of them are A100-identical, i.e. they are a property of the bf16 chain rather than of the port. Never read "NPU vs A100 FAIL" as an NPU defect: such a comparison must always quote A100 vs anchor as well.
@@ -418,11 +456,13 @@ and exit non-zero on failure; the third is a pytest module. All three need `torc
 | File | What it checks |
 |---|---|
 | `tests/ops/triton/test_mamba3_siso_npu.py` | Operator level, bf16 on `npu`, against the upstream PyTorch reference: `angle_dt`, a 64-step decode recurrence (the four states are carried across steps), and combined chunked forward + backward with every gradient. `MAMBA3_SISO_STEP_IMPL=ascendc` (default) or `triton` selects which decode step is measured, so one run per value gives the A/B comparison. |
-| `tests/ops/triton/test_mamba3_siso_module_decode_npu.py` | Module level: `Mamba3` prefill and token-by-token decode must agree, same device, teacher-forced input. It drives the Triton step (not the Ascend C operator) and skips itself when no accelerator is present. |
+| `tests/ops/triton/test_mamba3_siso_module_decode_npu.py` | Module level: `Mamba3` prefill and token-by-token decode must agree, same device, teacher-forced input. It drives the Triton step (not the Ascend C operator) and skips itself when no accelerator is present: it calls `mamba3_siso_step` directly, so it runs without the built `.so`; `Mamba3.step()` itself is covered by the Ascend C suite. |
 | `tests/ops/triton/test_mamba3_siso_e2e_npu.py` | Module level, **the only end-to-end suite for SISO**: a real `Mamba3` (`d_model=128`, `d_state=64`, `headdim=32`, `ngroups=2`, bf16) is deep-copied and one copy runs with `mamba3_siso_combined` swapped for the frozen fp32 `mamba3_siso_fwd_ref`, so `in_proj`, the B/C norms, `out_proj` and the ADT/DT/angle preprocessing cancel out and only the SISO kernel chain is measured -- the dtype contract between module and kernel (Q/K/V/Z cast to bf16 at the wrapper entry, `trap` kept fp32) is exactly what this catches. 3 cases: batched forward + backward at `B=2, S=128` (`out`, `du` and 8 parameter gradients, plus peak NPU memory), a larger forward at `B=1, S=512` (UB / memory pressure), and varlen (`cu_seqlens=[40, 64, 24]`). Gates on the upstream criterion -- p95 relative error over `|ref| >= 1e-2` at `rtol=1e-1`, with the globally normalised max for the per-channel scalars -- while the guide and CANN lines are printed for every tensor. |
 
 ```bash
 # the third suite (pytest; ~30 s once the Triton kernels are cached, ~10 min on a cold cache)
+# MAMBA3_DISABLE_TILELANG=1 is optional here -- it only keeps this SISO run from importing the
+# MIMO TileLang package, which this path never executes.
 MAMBA3_DISABLE_TILELANG=1 ASCEND_RT_VISIBLE_DEVICES=0 \
     python -m pytest -q -s -p no:cacheprovider tests/ops/triton/test_mamba3_siso_e2e_npu.py
 ```

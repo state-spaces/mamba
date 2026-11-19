@@ -20,6 +20,8 @@ how to switch the step implementation - is documented in
 ```python
 # backend-agnostic (model code)
 from mamba_ssm.ops.backend import mamba3_siso_combined, RMSNormGated
+from mamba_ssm.ops.backend import mamba3_mimo as mamba3_mimo_combined
+from mamba_ssm.ops.backend import mamba3_step_fn
 
 # Ascend-side code that must not fall back to CUDA
 from mamba_ssm.ops.triton_ascend.mamba3.mamba3_siso_bwd import compute_dqkv
@@ -36,6 +38,11 @@ from mamba_ssm.ops.triton_ascend.mamba3.mamba3_siso_bwd import compute_dqkv
    always agree);
 3. auto: `torch.npu.is_available()` → `ascend`;
 4. otherwise `cuda`.
+
+The same switch picks the other two Mamba-3 families: `tilelang` / `tilelang_ascend`
+(MIMO forward) and `cute` / `ascendc` (the single-token decode step), both dispatched
+by `mamba_ssm/ops/backend.py`.  Those two resolve to `None` when their toolchain is
+missing; `MAMBA3_DISABLE_TILELANG=1` forbids the MIMO route outright.
 
 The result is memoized on first use.  To A/B against the upstream kernels on an
 Ascend box, set `MAMBA3_TRITON_BACKEND=cuda`; expect it to fail on TMA / PTX /
@@ -64,7 +71,8 @@ side.  On a build without CANN libdevice they take the CUDA formulation instead
 of raising, which keeps CPU-side static checks, `TRITON_INTERPRET` runs and the
 forced A/B mode working.  Do **not** add new backend conditionals to
 `mamba_ssm/ops/triton` — new NPU work belongs here, registered in
-`mamba_ssm/ops/backend.py::_EXPORTS` (same name and signature on both sides).
+`mamba_ssm/ops/backend.py::_EXPORTS` (same name and signature on both sides);
+the MIMO package `tilelang_ascend` follows the same rule.
 
 ## Verification
 

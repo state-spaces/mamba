@@ -27,7 +27,14 @@ Layout mirrors the upstream package::
 Nothing here is imported by ``mamba_ssm.ops.triton``.  The only place that
 chooses between the two packages is ``mamba_ssm.ops.backend``; model code asks
 that module, while Ascend-only code (``ops/ascendc``, ``ops/tilelang_ascend``,
-NPU tests) imports this package directly.
+NPU tests) imports this package directly.  The MIMO forward is the ``tilelang``
+family (``ops.tilelang`` / ``ops.tilelang_ascend``), so it is not mirrored here;
+the same dispatcher serves all three families.
+
+``mamba3/mamba3_mimo_utils.py`` is deliberately absent: the MIMO segsum helpers
+are shared verbatim with the CUDA side (``ops/triton/mamba3/mamba3_mimo_utils.py``)
+so both backends run identical discretisation maths instead of two copies that
+can drift.
 
 The kernels keep their ``npu_compat.IS_CANN`` branches even though this package
 is the Ascend side: on a build without CANN libdevice they fall back to the CUDA

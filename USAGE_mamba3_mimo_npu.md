@@ -186,35 +186,25 @@ python -c "import tilelang, tilelang.ascend910.language; print(tilelang.__versio
 | Piece | Implementation | Notes |
 |---|---|---|
 | `Mamba3.forward`, MIMO branch | `mamba_ssm.ops.tilelang_ascend.mamba3.mamba3_mimo` (TileLang, A2) | Drop-in mirror of the CUDA `mamba3_mimo`: same arguments including `return_state`, `fuse_pregate_headwise_rms_norm`, `outproj_norm_weight`. Also exports `mamba3_mimo_fwd` / `mamba3_mimo_bwd` used by the op-level tests. |
-| `Mamba3.step()` | `mamba_ssm.ops.ascendc.mamba3_step.mamba3_step_fn` (Ascend C, kernel-direct `mamba3_decode_step`) | The **same** operator as SISO, with `R = mimo_rank`. `Mamba3.step` calls it for both variants, so one rebinding covers both. |
+| `Mamba3.step()` | `mamba_ssm.ops.ascendc.mamba3_step.mamba3_step_fn` (Ascend C, kernel-direct `mamba3_decode_step`) | The **same** operator as SISO, with `R = mimo_rank`. `Mamba3.step` calls it for both variants; `ops.backend` dispatches to it on NPU. It passes `tile_D=64`, so the module needs `headdim % 64 == 0` (section C). |
 | step's rotary / angle state | `mamba_ssm.ops.triton_ascend.mamba3.mamba3_mimo_rotary_step.apply_rotary_qk_inference_fwd` (`mamba_ssm.ops.backend` re-exports it for `Mamba3.step`) | `rotate_pairwise = not is_mimo` (`mamba3.py:392`): SISO rotates adjacent pairs, MIMO uses the blockwise/halved rotation. `angle = angle_state + tanh(angle_proj) * dt * pi`, `tanh(2sigmoid(2x) - 1)` inside the kernel. |
 
-## B. Module wiring: the default route is still the CUDA kernel
+## B. Module wiring: nothing to patch
 
-`mamba_ssm/modules/mamba3.py:27-44` binds `mamba3_mimo_combined` to the **CUDA** tilelang module
-(`mamba_ssm.ops.tilelang.mamba3.mamba3_mimo`). On NPU that import raises a non-`ImportError`
-(`PassConfigKey.TL_ENABLE_FAST_MATH`), so `MAMBA3_DISABLE_TILELANG=1` is recommended to skip it
-entirely; `mamba3_mimo_combined` then stays `None` and `Mamba3(is_mimo=True)` trips
-`mamba3.py:119`:
+`mamba_ssm/modules/mamba3.py` no longer imports the MIMO kernels itself: it takes
+`mamba3_mimo_combined` and `mamba3_step_fn` from `mamba_ssm.ops.backend`, which resolves each
+family by backend --
 
-```
-assert mamba3_mimo_combined is not None, "Fails to import Mamba-3 MIMO kernels. ..."
-```
+| family | CUDA / ROCm | Ascend NPU |
+|---|---|---|
+| MIMO forward | `mamba_ssm.ops.tilelang.mamba3.mamba3_mimo` | `mamba_ssm.ops.tilelang_ascend.mamba3.mamba3_mimo` |
+| decode step | `mamba_ssm.ops.cute.mamba3.mamba3_step_fn` | `mamba_ssm.ops.ascendc.mamba3_step` |
 
-So a MIMO run needs the A2 kernels installed explicitly. Two lines, no operator source touched:
+so a MIMO run needs the toolchain from sections 0 and C and nothing else:
 
 ```python
-import os
-os.environ.setdefault("MAMBA3_DISABLE_TILELANG", "1")   # before importing mamba3
-
 import torch
-import mamba_ssm.modules.mamba3 as m3mod
 from mamba_ssm.modules.mamba3 import Mamba3
-from mamba_ssm.ops.ascendc.mamba3_step import mamba3_step_fn
-from mamba_ssm.ops.tilelang_ascend.mamba3.mamba3_mimo import mamba3_mimo
-
-m3mod.mamba3_mimo_combined = mamba3_mimo
-m3mod.mamba3_step_fn = mamba3_step_fn    # normalises A/dt/trap/D itself (section D)
 
 model = Mamba3(d_model=2048, d_state=128, headdim=64, is_mimo=True, mimo_rank=4,
                chunk_size=64 // 4, dtype=torch.bfloat16, device="npu",
@@ -230,8 +220,26 @@ with torch.no_grad():
         outs.append(o)
 ```
 
-SISO is unaffected by this: `mamba3_siso_combined` already resolves to the ported Triton kernel, so
-`is_mimo=False` works with `MAMBA3_DISABLE_TILELANG=1` alone.
+`mamba3_mimo_combined is None` -- the constructor then trips an assertion that names the
+backend -- means the `tilelang` build with the `ascend910` backend is missing, or
+`MAMBA3_DISABLE_TILELANG` is set.  That variable is now a **kill switch for the MIMO route
+on either backend**: an Ascend build never imports the CUDA TileLang package in the first
+place, and a SISO-only run sets it to skip the Ascend TileLang import as well (the SISO
+path never needs it -- see `USAGE_mamba3_siso_npu.md`).
+
+A hand rebinding (`m3mod.mamba3_mimo_combined = ...`) still works -- the model reads those
+module globals at call time -- but it bypasses the dispatch and is not needed; do not use
+it in new code.  SISO is unaffected by any of this: `mamba3_siso_combined` resolves through
+the `triton` family.
+
+Which kernels a process actually uses -- the only thing to check after a version bump:
+
+```python
+from mamba_ssm.ops import backend as b
+print(b.backend())                        # 'ascend' on this build
+print(b.mamba3_mimo.__module__)           # mamba_ssm.ops.tilelang_ascend.mamba3.mamba3_mimo
+print(b.mamba3_step_fn.__module__)        # mamba_ssm.ops.ascendc.mamba3_step
+```
 
 ## C. Shapes, dtypes, and what the module passes
 
@@ -239,11 +247,25 @@ SISO is unaffected by this: `mamba3_siso_combined` already resolves to the porte
 32/64/128, `mimo_rank` 1/2/4/8, `chunk_size` 8..64 (coupled to `r` as `chunk = 64 // r` in the
 module: `r=4 -> 16`, `r=1 -> 64`). The CUDA-only `bb_threads` knob is dropped on NPU.
 
-```python
-# step kernel constraints (mamba3_step_fn)
-d_state % 8 == 0            # vectorised read/write
-headdim % tile_D == 0       # tile_D in {32, 64, 128}; Mamba3.step passes tile_D=64
-```
+**Step kernel constraints** (`mamba3_step_fn`, `ops/ascendc/mamba3_step.py`): `d_state % 8 == 0`
+(vectorised read/write) and **`D % tile_D == 0`**, with `tile_D` in `{32, 64, 128}` and **defaulting to
+64**. `D` is `headdim` unless the outproj/z route changes it, and the three entry points resolve
+`tile_D` differently:
+
+| Entry point | `tile_D` | `headdim` must be |
+|---|---|---|
+| `mamba3_step_fn` (the operator) | argument, default **64** | a multiple of 64, or pass `tile_D=32`/`128` |
+| `mamba3_siso_step` (SISO wrapper) | `pick_tile_d(headdim_v)`: first of `128, 64, 32` that divides it | a multiple of **32** |
+| `Mamba3.step()` (this document's path) | **hard-coded `tile_D=64`, `num_warps=4`** (`mamba3.py:417`, `:440`) | a multiple of **64** |
+
+So `Mamba3.step()` with `headdim=32` fails with
+
+    ValueError: mamba3_decode_step: D(32) 必须能被 tile_D(64) 整除
+
+even though the same `headdim` works through the op-level SISO wrapper (which picks `tile_D=32`), and
+`headdim=16` fails earlier still. The step suite below uses `headdim=64` for exactly this reason. If you
+need a smaller head, call the operator yourself with an explicit `tile_D`; the module does not derive it
+from `headdim` yet.
 
 **dtypes.** The step operator takes five independent dtype groups (`mamba3_step.py`): state/state_out;
 `B`/`Bstate`/`C`; `x`/`Xstate`/`z`/`out`; `xproj`/`outproj`/`zproj`; and `A`/`dt`/`trap`/`D` -- dtype is
@@ -283,11 +305,11 @@ explicit fp32 call.
 
 ```bash
 # module-level step suite: 4 passed in ~13.5 min on 910B3 (kernel compilation dominates)
-MAMBA3_STEP_DEVICE=npu MAMBA3_DISABLE_TILELANG=1 ASCEND_RT_VISIBLE_DEVICES=0 \
+MAMBA3_STEP_DEVICE=npu ASCEND_RT_VISIBLE_DEVICES=0 \
     python -m pytest -q -s -p no:cacheprovider tests/ops/ascendc/test_mamba3_mimo_step.py
 
 # same file, benchmark instead of assertions (per-step latency + achieved bandwidth, 4 variants)
-MAMBA3_DISABLE_TILELANG=1 python tests/ops/ascendc/test_mamba3_mimo_step.py
+python tests/ops/ascendc/test_mamba3_mimo_step.py
 
 # op-level acceptance (33 items)
 python -m pytest -q tests/ops/tilelang_ascend/test_mamba3_mimo_upstream_std.py
@@ -304,7 +326,7 @@ ones, 128 / 32). It needs `torch_npu`, `tilelang` with the `ascend910` backend a
 * **Module level (step):** 4/4 cases pass at the upstream workload; step vs forward max|err| 3.9e-2
   over 32 tokens (tolerance 0.1), including the mixed prefix/suffix decode.
 * **Speed** (`B=8`, single step, NPU event timing, mean of 30 steps after 5 warmup; reproduce with
-  `MAMBA3_STEP_BATCH=8 MAMBA3_DISABLE_TILELANG=1 python tests/ops/ascendc/test_mamba3_mimo_step.py`):
+  `MAMBA3_STEP_BATCH=8 python tests/ops/ascendc/test_mamba3_mimo_step.py`):
 
   | Variant | rotation | ms/step | GB/s |
   |---|---|---|---|

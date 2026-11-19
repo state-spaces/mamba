@@ -820,6 +820,9 @@ def _resolve_device(arg) -> str:
 
 
 def _setup_npu():
+    # SISO-only run: skip the MIMO TileLang route so its import (and the
+    # ascend910 build requirement) is never pulled in; the Triton SISO kernels
+    # and the decode step do not need it.
     os.environ.setdefault("MAMBA3_DISABLE_TILELANG", "1")
     try:
         import triton.backends.nvidia.driver as nv_driver
@@ -843,6 +846,7 @@ def main(argv=None) -> int:
     device = _resolve_device(args.device)
     if device == "npu":
         _setup_npu()
+    # Same reason as ``_setup_npu``: this script never uses the MIMO route.
     os.environ.setdefault("MAMBA3_DISABLE_TILELANG", "1")
 
     dtype = NAME_DTYPE[args.dtype] if args.dtype else (
