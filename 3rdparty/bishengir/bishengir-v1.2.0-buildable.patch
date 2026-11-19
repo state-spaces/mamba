@@ -1,0 +1,42 @@
+# Makes AscendNPU-IR v1.2.0 buildable, and fixes the mmadL1 out-of-bounds read.
+#
+# Usage (from the source tree root):  patch -p1 --dry-run < this-file  ->  patch -p1 < this-file
+#
+# Two hunks:
+#   1) HFusionToHIVM.cpp: guard the buffer-semantics mmadL1 (0 SSA results) so the
+#      getResult(0) below cannot read out of bounds -> probabilistic SIGSEGV.
+#   2) Utils.cpp: add the missing explicit instantiation of
+#      collapseAndReplace<CollapseShapeOp>. The template is defined in the .cpp,
+#      tag v1.2.0 only instantiates the ExpandShapeOp form, while
+#      PropagateExpandUp.cpp uses the CollapseShapeOp one -> undefined symbol at link.
+#
+# The two are independent: hunk 1 alone still crashes probabilistically; hunk 2
+# alone builds but still crashes.
+
+--- a/bishengir/lib/Conversion/HFusionToHIVM/HFusionToHIVM.cpp
++++ b/bishengir/lib/Conversion/HFusionToHIVM/HFusionToHIVM.cpp
+@@ -1347,6 +1347,11 @@
+     });
+ 
+     moduleOp->walk([&](hivm::MmadL1Op op) {
++      // bishengir fix: a buffer-semantics mmadL1 has no results, so getResult(0)
++      // below reads out of bounds. Skip the TileMixCubeNum annotation walk for it
++      // (the annotation is never emitted by the TileLang port, so this is a no-op).
++      if (op->getNumResults() == 0)
++        return;
+       std::optional<Operation *> tileCubeMarkOp =
+           utils::getAnnotateOpWithAttr(op.getResult(0), hivm::TileMixCubeNumAttr::name);
+       if (tileCubeMarkOp.has_value()) {
+--- a/bishengir/lib/Dialect/Tensor/Transforms/PropagateReshape/Utils.cpp
++++ b/bishengir/lib/Dialect/Tensor/Transforms/PropagateReshape/Utils.cpp
+@@ -240,6 +240,10 @@
+     PatternRewriter &rewriter, mlir::tensor::ExpandShapeOp reshapeOp, Type ty,
+     Value newVal, Operation *definingOp);
+ 
++template void collapseAndReplace<mlir::tensor::CollapseShapeOp>(
++    PatternRewriter &rewriter, mlir::tensor::CollapseShapeOp reshapeOp, Type ty,
++    Value newVal, Operation *definingOp);
++
+ LogicalResult computeExpandPad(OpBuilder &rewriter, tensor::PadOp &padOp,
+                                ArrayRef<ReassociationIndices> reassociation,
+                                DenseMap<uint64_t, uint64_t> &padBodyMapping,

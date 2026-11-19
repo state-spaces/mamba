@@ -1,0 +1,26 @@
+// Minimal reproducer: bishengir-compile 1.2.0 (CANN 9.1.0, commit 8796a8ac1508)
+// crashes in ConvertHFusionToHIVM on any `hivm.hir.mmadL1` with buffer semantics
+// (i.e. zero SSA results).
+//
+//   HFusionToHIVM.cpp:1351
+//     utils::getAnnotateOpWithAttr(op.getResult(0), ...)   // <-- size() == 0
+//
+// Release build  : 5/5 SIGSEGV (rc=139)
+// Assertion build: 5/5 abort  -> Assertion `Index < size() && "invalid index for
+//                                  value range"' failed
+//
+// Run with mamba_ssm/ops/tilelang_ascend/tools/repro/run_bishengir_crash.sh (or with
+// verify_patched_bishengir.sh, which uses this file as its crash check).
+module attributes {hivm.module_core_type = #hivm.module_core_type<AIC>, memref.memref_as_ptr} {
+  func.func @main(%arg3: memref<?xf16, #hivm.address_space<gm>>, %arg4: memref<?xf16, #hivm.address_space<gm>>, %arg5: memref<?xf32, #hivm.address_space<gm>>) attributes {hacc.entry, hacc.function_kind = #hacc.function_kind<DEVICE>, hivm.func_core_type = #hivm.func_core_type<AIC>, mix_mode = "aic"} {
+    %c64 = arith.constant 64 : index
+    %c32 = arith.constant 32 : index
+    %c128 = arith.constant 128 : index
+    %true = arith.constant true
+    %a = memref.alloc() : memref<128x32xf16, strided<[32, 1]>, #hivm.address_space<cbuf>>
+    %b = memref.alloc() : memref<64x32xf16, strided<[32, 1]>, #hivm.address_space<cbuf>>
+    %c = memref.alloc() : memref<128x64xf32, strided<[64, 1]>, #hivm.address_space<cc>>
+    hivm.hir.mmadL1 {b_transpose} ins(%a, %b, %true, %c128, %c32, %c64 : memref<128x32xf16, strided<[32, 1]>, #hivm.address_space<cbuf>>, memref<64x32xf16, strided<[32, 1]>, #hivm.address_space<cbuf>>, i1, index, index, index) outs(%c : memref<128x64xf32, strided<[64, 1]>, #hivm.address_space<cc>>)
+    return
+  }
+}

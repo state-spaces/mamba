@@ -1,0 +1,22 @@
+module attributes {hivm.module_core_type = #hivm.module_core_type<AIC>, memref.memref_as_ptr} {
+  func.func @main(%arg0: i64 {hacc.arg_type = #hacc.arg_type<ffts_base_address>}, %arg1: memref<?xi8>, %arg2: memref<?xi8>, %arg3: memref<?xbf16, #hivm.address_space<gm>>, %arg4: memref<?xbf16, #hivm.address_space<gm>>, %arg5: memref<?xf32, #hivm.address_space<gm>>, %arg6: i32, %arg7: i32, %arg8: i32, %arg9: i32, %arg10: i32, %arg11: i32) attributes {SyncBlockLockArgIdx = 0 : i64, WorkspaceArgIdx = 1 : i64, hacc.entry, hacc.function_kind = #hacc.function_kind<DEVICE>, hivm.func_core_type = #hivm.func_core_type<AIC>, mix_mode = "aic"} {
+    %c64 = arith.constant 64 : index
+    %c128 = arith.constant 128 : index
+    %true = arith.constant true
+    hivm.hir.set_ffts_base_addr %arg0
+    %reinterpret_cast = memref.reinterpret_cast %arg3 to offset: [0], sizes: [128, 64], strides: [64, 1] : memref<?xbf16, #hivm.address_space<gm>> to memref<128x64xbf16, strided<[64, 1]>, #hivm.address_space<gm>>
+    %reinterpret_cast_0 = memref.reinterpret_cast %arg5 to offset: [0], sizes: [128, 64], strides: [64, 1] : memref<?xf32, #hivm.address_space<gm>> to memref<128x64xf32, strided<[64, 1]>, #hivm.address_space<gm>>
+    %reinterpret_cast_1 = memref.reinterpret_cast %arg4 to offset: [0], sizes: [64, 64], strides: [64, 1] : memref<?xbf16, #hivm.address_space<gm>> to memref<64x64xbf16, strided<[64, 1]>, #hivm.address_space<gm>>
+    %alloc = memref.alloc() : memref<128x64xbf16, strided<[64, 1]>, #hivm.address_space<cbuf>>
+    %alloc_2 = memref.alloc() : memref<64x64xbf16, strided<[64, 1]>, #hivm.address_space<cbuf>>
+    %alloc_3 = memref.alloc() : memref<128x64xf32, strided<[64, 1]>, #hivm.address_space<cc>>
+    hivm.hir.nd2nz {dst_continuous} ins(%reinterpret_cast : memref<128x64xbf16, strided<[64, 1]>, #hivm.address_space<gm>>) outs(%alloc : memref<128x64xbf16, strided<[64, 1]>, #hivm.address_space<cbuf>>) init_out_buffer = false
+    hivm.hir.nd2nz {dst_continuous} ins(%reinterpret_cast_1 : memref<64x64xbf16, strided<[64, 1]>, #hivm.address_space<gm>>) outs(%alloc_2 : memref<64x64xbf16, strided<[64, 1]>, #hivm.address_space<cbuf>>) init_out_buffer = false
+    hivm.hir.pipe_barrier[<PIPE_ALL>]
+    hivm.hir.mmadL1 {b_transpose} ins(%alloc, %alloc_2, %true, %c128, %c64, %c64 : memref<128x64xbf16, strided<[64, 1]>, #hivm.address_space<cbuf>>, memref<64x64xbf16, strided<[64, 1]>, #hivm.address_space<cbuf>>, i1, index, index, index) outs(%alloc_3 : memref<128x64xf32, strided<[64, 1]>, #hivm.address_space<cc>>)
+    hivm.hir.pipe_barrier[<PIPE_ALL>]
+    hivm.hir.fixpipe {dma_mode = #hivm.dma_mode<nz2nd>} ins(%alloc_3 : memref<128x64xf32, strided<[64, 1]>, #hivm.address_space<cc>>) outs(%reinterpret_cast_0 : memref<128x64xf32, strided<[64, 1]>, #hivm.address_space<gm>>)
+    return
+  }
+}
+
