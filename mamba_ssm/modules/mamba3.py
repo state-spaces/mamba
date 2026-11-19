@@ -320,20 +320,26 @@ class Mamba3(nn.Module):
         will be made available in the future.
 
         Args:
-            u: (batch, d_model)
+            u: (batch, d_model) or (batch, 1, d_model) — same decode contract as Mamba2.step
             angle_state: (batch, nheads, num_rope_angles)
             ssm_state: (batch, nheads, headdim, d_state)
             k_state: (batch, R, nheads, d_state), where R = mimo_rank (R=1 if not MIMO)
             v_state: (batch, nheads, headdim)
             **kwargs: ignored
         Returns:
-            out: (batch, d_model)
+            out: same rank as u — (batch, d_model) or (batch, 1, d_model)
             nxt_angle_state: (batch, nheads, num_rope_angles)
             state_out: (batch, nheads, headdim, d_state)
             nxt_k_state: (batch, R, nheads, d_state), where R = mimo_rank (R=1 if not MIMO)
             nxt_v_state: (batch, nheads, headdim)
         """
         assert mamba3_step_fn is not None, "Cute Mamba-3 step function is not available. Please ensure you installed the necessary dependencies, such as nvidia-cutlass-dsl and quack-kernels."
+
+        # Match Mamba2.step: generation / forward decode pass (B, 1, D).
+        keep_seqlen_dim = u.dim() == 3
+        if keep_seqlen_dim:
+            assert u.shape[1] == 1, "Only support decoding with 1 token at a time for now"
+            u = u.squeeze(1)
 
         # in_proj
         zxBCdt = self.in_proj(u)
@@ -437,6 +443,8 @@ class Mamba3(nn.Module):
         k_state.copy_(nxt_k_state)
         v_state.copy_(nxt_v_state)
 
+        if keep_seqlen_dim:
+            out = out.unsqueeze(1)
         return out, nxt_angle_state, ssm_state, nxt_k_state, nxt_v_state
     
     def allocate_inference_cache(self, batch_size, max_seqlen, device=None, dtype=None, inplace_state=None, **kwargs):
