@@ -234,6 +234,11 @@ def _chunk_state_fwd_kernel(
     chunk_size_limit = min(chunk_size, seqlen - pid_c * chunk_size)
     if HAS_SEQ_IDX:
         seq_idx_last = tl.load(seq_idx_ptr + (chunk_size_limit - 1) * stride_seq_idx_seqlen)
+        # seq_idx is non-decreasing within a chunk, so the whole chunk belongs to
+        # one sequence iff its first and last positions agree. Most chunks are
+        # like this; only one straddling a sequence boundary needs the sanitize
+        # below, so skip it for every other chunk.
+        chunk_has_boundary = tl.load(seq_idx_ptr) != seq_idx_last
 
     acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     for k in range(0, chunk_size_limit, BLOCK_SIZE_K):
@@ -242,6 +247,14 @@ def _chunk_state_fwd_kernel(
         dA_cs_k = tl.load(dA_cumsum_ptrs, mask=offs_k < chunk_size_limit - k, other=0.0).to(tl.float32)
         if HAS_SEQ_IDX:
             seq_idx_k = tl.load(seq_idx_ptrs, mask=offs_k < chunk_size_limit - k, other=-1)
+            if chunk_has_boundary:
+                # Rows of another sequence get weight 0 in `scale` below, but 0 * inf (or
+                # 0 * nan) is still nan, and tl.dot would sum it into the whole chunk.
+                # Zero those rows outright instead. Rows of this chunk's last sequence
+                # keep their own non-finite values, so they still reach its state.
+                in_last = (seq_idx_last >= 0) & (seq_idx_k == seq_idx_last)
+                x = tl.where(in_last[None, :], x, 0.0)
+                b = tl.where(in_last[:, None], b, 0.0)
         dt_k = tl.load(dt_ptrs, mask=offs_k < chunk_size_limit - k, other=0.0).to(tl.float32)
         if not HAS_SEQ_IDX:
             # scale = tl.exp((dA_cs_last - dA_cs_k)) * dt_k

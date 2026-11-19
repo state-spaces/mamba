@@ -43,7 +43,7 @@ def init_to_zero(names):
         triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32}, num_stages=5, num_warps=2),
         triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=2),
     ]),
-    key=['chunk_size', 'hdim', 'dstate', 'IS_CAUSAL'],
+    key=['chunk_size', 'hdim', 'dstate', 'IS_CAUSAL', 'SPECIAL'],
 )
 @triton.jit
 def _chunk_scan_fwd_kernel(
@@ -72,6 +72,7 @@ def _chunk_scan_fwd_kernel(
     BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
     BLOCK_SIZE_DSTATE: tl.constexpr,
     IS_TRITON_22: tl.constexpr,
+    SPECIAL: tl.constexpr,
 ):
     pid_bc = tl.program_id(axis=1)
     pid_c = pid_bc // batch
@@ -97,6 +98,26 @@ def _chunk_scan_fwd_kernel(
     if HAS_SEQ_IDX:
         seq_idx_prev = tl.load(seq_idx_ptr - stride_seq_idx_seqlen, mask=pid_c >= 1, other=0)
         seq_idx_m = tl.load(seq_idx_ptr + offs_m * stride_seq_idx_seqlen, mask=offs_m < chunk_size_limit, other=-1)
+        # seq_idx is non-decreasing within a chunk, so every row of the chunk continues
+        # the previous chunk's sequence iff the last one does. Almost every chunk does,
+        # and it is the only kind that can neither see another sequence's non-finite
+        # values nor hide its own. The others (a sequence starts inside them) need the
+        # slower handling compiled into the SPECIAL variant, so each launch skips the
+        # chunks it is not for and the common path carries none of that code.
+        seq_idx_last = tl.load(seq_idx_ptr + (chunk_size_limit - 1) * stride_seq_idx_seqlen)
+        chunk_has_boundary = tl.load(seq_idx_ptr) != seq_idx_last
+        needs_special = seq_idx_last != seq_idx_prev
+        if SPECIAL:
+            if not needs_special:
+                return
+            # Non-finite values a row must still see: those of its own sequence. Other
+            # sequences' values are zeroed before tl.dot (0 * nan is nan); these then
+            # put the row's own back.
+            prev_bad = tl.zeros((BLOCK_SIZE_N,), dtype=tl.float32)
+            poison = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+        else:
+            if needs_special:
+                return
     acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
 
     # Without the if (pid_c > -1), with Triton 2.1.0, I get
@@ -114,6 +135,15 @@ def _chunk_scan_fwd_kernel(
         if BLOCK_SIZE_DSTATE <= 128:
             C = tl.load(C_ptrs, mask=(offs_m[:, None] < chunk_size_limit) & (offs_k_dstate[None, :] < dstate), other=0.0)
             prev_states = tl.load(prev_states_ptrs, mask=(offs_k_dstate[:, None] < dstate) & (offs_n[None, :] < hdim), other=0.0)
+            if HAS_SEQ_IDX and SPECIAL:
+                # prev_states can carry another sequence's non-finite state across a
+                # chunk boundary. scale_m is 0 for those rows, but 0 * nan is still nan
+                # and would leak through tl.dot, so drop non-finite entries here and
+                # remember which columns had one; only rows that continue the previous
+                # chunk's sequence get them back after the loops.
+                prev_finite = (prev_states - prev_states) == 0.0
+                prev_bad += tl.sum(tl.where(prev_finite, 0.0, 1.0), axis=0)
+                prev_states = tl.where(prev_finite, prev_states, 0.0)
             prev_states = prev_states.to(C_ptr.dtype.element_ty)
             acc = tl.dot(C, prev_states) * scale_m[:, None]
         else:
@@ -121,6 +151,11 @@ def _chunk_scan_fwd_kernel(
                 C = tl.load(C_ptrs, mask=(offs_m[:, None] < chunk_size_limit) & (offs_k_dstate[None, :] < dstate - k), other=0.0)
                 # C = (C * scale_m[:, None]).to(C_ptr.dtype.element_ty)
                 prev_states = tl.load(prev_states_ptrs, mask=(offs_k_dstate[:, None] < dstate - k) & (offs_n[None, :] < hdim), other=0.0)
+                if HAS_SEQ_IDX and SPECIAL:
+                    # See the comment on the other prev_states handling above.
+                    prev_finite = (prev_states - prev_states) == 0.0
+                    prev_bad += tl.sum(tl.where(prev_finite, 0.0, 1.0), axis=0)
+                    prev_states = tl.where(prev_finite, prev_states, 0.0)
                 prev_states = prev_states.to(C_ptr.dtype.element_ty)
                 acc += tl.dot(C, prev_states)
                 C_ptrs += BLOCK_SIZE_K
@@ -147,11 +182,32 @@ def _chunk_scan_fwd_kernel(
             cb = tl.where(mask, cb, 0.0)
         cb = cb.to(x_ptr.dtype.element_ty)
         x = tl.load(x_ptrs, mask=(offs_k[:, None] < chunk_size_limit - k) & (offs_n[None, :] < hdim), other=0.0)
+        if HAS_SEQ_IDX and SPECIAL and chunk_has_boundary:
+            # cb[m, k] is already exactly 0 for seq_idx[m] != seq_idx[k] (comment
+            # above), but x does not carry an m axis, so a non-finite x here would
+            # still turn into nan at 0 * inf (or 0 * nan) for every m row that
+            # reads this k, not just the rows whose own sequence contains it. Drop it
+            # for the dot, and mark the rows that may see it (same sequence, at or after
+            # k) so it comes back below.
+            seq_idx_k = tl.load(seq_idx_ptr + (k + offs_k) * stride_seq_idx_seqlen, mask=(k + offs_k) < chunk_size_limit, other=-1)
+            x_finite = (x - x) == 0.0
+            sees_k = seq_idx_m[:, None] == seq_idx_k[None, :]
+            if IS_CAUSAL:
+                sees_k = sees_k & (offs_m[:, None] >= k + offs_k[None, :])
+            poison += tl.dot(sees_k.to(tl.float32), tl.where(x_finite, 0.0, 1.0))
+            x = tl.where(x_finite, x, 0.0)
         acc += tl.dot(cb, x)
         cb_ptrs += BLOCK_SIZE_K * stride_cb_csize_k
         x_ptrs += BLOCK_SIZE_K * stride_x_seqlen
         dt_ptrs += BLOCK_SIZE_K * stride_dt_csize
         dA_cumsum_ptrs += BLOCK_SIZE_K * stride_dA_cs_csize
+
+    if HAS_SEQ_IDX and SPECIAL:
+        # Give each row back the non-finite values of its own sequence: x entries from the
+        # intra-chunk loop, and the carried state when the row continues the previous chunk.
+        acc = tl.where(poison > 0.0, float("nan"), acc)
+        continues_prev = seq_idx_m == seq_idx_prev
+        acc = tl.where(continues_prev[:, None] & (prev_bad[None, :] > 0.0), float("nan"), acc)
 
     offs_out_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_out_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
@@ -1283,28 +1339,35 @@ def _chunk_scan_fwd(cb, x, dt, dA_cumsum, C, states, D=None, z=None, seq_idx=Non
                     batch * nchunks, nheads)
     z_strides = ((z.stride(0), z.stride(1), z.stride(2), z.stride(3))
                   if z is not None else (0, 0, 0, 0))
-    _chunk_scan_fwd_kernel[grid](
-        cb, x, z, out, out_x, dt, dA_cumsum, seq_idx, C, states, D,
-        chunk_size, headdim, dstate,
-        batch, seqlen, nheads // ngroups,
-        cb.stride(0), cb.stride(1), cb.stride(2), cb.stride(3), cb.stride(4),
-        x.stride(0), x.stride(1), x.stride(2), x.stride(3),
-        z_strides[0], z_strides[1], z_strides[2], z_strides[3],
-        out.stride(0), out.stride(1), out.stride(2), out.stride(3),
-        dt.stride(0), dt.stride(2), dt.stride(1), dt.stride(3),
-        dA_cumsum.stride(0), dA_cumsum.stride(2), dA_cumsum.stride(1), dA_cumsum.stride(3),
-        *((seq_idx.stride(0), seq_idx.stride(1)) if seq_idx is not None else (0, 0)),
-        C.stride(0), C.stride(1), C.stride(2), C.stride(3),
-        states.stride(0), states.stride(1), states.stride(2), states.stride(3), states.stride(4),
-        D.stride(0) if D is not None else 0,
-        True,
-        D is not None,
-        D.dim() == 2 if D is not None else True,
-        BLOCK_SIZE_DSTATE=max(triton.next_power_of_2(dstate), 16),
-        HAS_Z=z is not None,
-        HAS_SEQ_IDX=seq_idx is not None,
-        IS_TRITON_22=TRITON_22,
-    )
+    def launch(special):
+        _chunk_scan_fwd_kernel[grid](
+            cb, x, z, out, out_x, dt, dA_cumsum, seq_idx, C, states, D,
+            chunk_size, headdim, dstate,
+            batch, seqlen, nheads // ngroups,
+            cb.stride(0), cb.stride(1), cb.stride(2), cb.stride(3), cb.stride(4),
+            x.stride(0), x.stride(1), x.stride(2), x.stride(3),
+            z_strides[0], z_strides[1], z_strides[2], z_strides[3],
+            out.stride(0), out.stride(1), out.stride(2), out.stride(3),
+            dt.stride(0), dt.stride(2), dt.stride(1), dt.stride(3),
+            dA_cumsum.stride(0), dA_cumsum.stride(2), dA_cumsum.stride(1), dA_cumsum.stride(3),
+            *((seq_idx.stride(0), seq_idx.stride(1)) if seq_idx is not None else (0, 0)),
+            C.stride(0), C.stride(1), C.stride(2), C.stride(3),
+            states.stride(0), states.stride(1), states.stride(2), states.stride(3), states.stride(4),
+            D.stride(0) if D is not None else 0,
+            True,
+            D is not None,
+            D.dim() == 2 if D is not None else True,
+            BLOCK_SIZE_DSTATE=max(triton.next_power_of_2(dstate), 16),
+            HAS_Z=z is not None,
+            HAS_SEQ_IDX=seq_idx is not None,
+            IS_TRITON_22=TRITON_22,
+            SPECIAL=special,
+        )
+
+    launch(False)
+    if seq_idx is not None:
+        # Chunks where a sequence starts: see SPECIAL in _chunk_scan_fwd_kernel.
+        launch(True)
     return out, out_x
 
 
