@@ -374,6 +374,8 @@ setup(
             "mamba_ssm.egg-info",
         )
     ),
+    # JIT-built CUDA kernels (mamba_ssm.ops.cuda.mamba3): ship their sources in the wheel
+    package_data={"mamba_ssm": ["ops/cuda/mamba3/*.cu", "ops/cuda/mamba3/*.cuh"]},
     author="Tri Dao, Albert Gu",
     author_email="tri@tridao.me, agu@cs.cmu.edu",
     description="Mamba state-space model",
