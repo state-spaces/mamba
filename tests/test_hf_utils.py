@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import pickle
 from pathlib import Path
 
 import pytest
@@ -50,15 +51,15 @@ def test_load_state_dict_hf_missing_weights(monkeypatch):
         hf_utils.load_state_dict_hf("missing/model")
 
 
-def test_load_state_dict_hf_uses_weights_only_false(tmp_path, monkeypatch):
+def test_load_state_dict_hf_uses_weights_only_true(tmp_path, monkeypatch):
     weights_path = tmp_path / "pytorch_model.bin"
     tensor = torch.randn(2, 2)
     torch.save({"weight": tensor}, weights_path)
 
     captured = {}
 
-    def fake_torch_load(path, **kwargs):
-        captured.update(kwargs)
+    def fake_torch_load(path, *, weights_only=None, **kwargs):
+        captured.update(kwargs, weights_only=weights_only)
         return {"weight": tensor.clone()}
 
     monkeypatch.setattr(
@@ -70,5 +71,27 @@ def test_load_state_dict_hf_uses_weights_only_false(tmp_path, monkeypatch):
 
     state_dict = hf_utils.load_state_dict_hf("dummy/model")
     assert torch.allclose(state_dict["weight"], tensor)
-    if "weights_only" in captured:
-        assert captured["weights_only"] is False
+    assert captured["weights_only"] is True
+
+
+@pytest.mark.parametrize("dtype", [None, torch.float16, torch.float64])
+def test_load_state_dict_hf_converts_dtype_and_device(tmp_path, monkeypatch, dtype):
+    weights_path = tmp_path / "pytorch_model.bin"
+    tensor = torch.randn(2, 2)
+    torch.save({"weight": tensor}, weights_path)
+    monkeypatch.setattr(hf_utils, "cached_file", lambda *args, **kwargs: str(weights_path))
+
+    state_dict = hf_utils.load_state_dict_hf("dummy/model", device="cpu", dtype=dtype)
+
+    expected = tensor if dtype is None else tensor.to(dtype=dtype)
+    torch.testing.assert_close(state_dict["weight"], expected)
+    assert state_dict["weight"].device == torch.device("cpu")
+
+
+def test_load_state_dict_hf_rejects_non_tensor_pickle(tmp_path, monkeypatch):
+    weights_path = tmp_path / "pytorch_model.bin"
+    torch.save({"weight": object()}, weights_path)
+    monkeypatch.setattr(hf_utils, "cached_file", lambda *args, **kwargs: str(weights_path))
+
+    with pytest.raises(pickle.UnpicklingError, match="[Ww]eights only|[Ww]eights_only"):
+        hf_utils.load_state_dict_hf("dummy/model")

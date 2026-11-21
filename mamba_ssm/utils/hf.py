@@ -29,10 +29,10 @@ def load_state_dict_hf(model_name, device=None, dtype=None):
             f"Could not find {WEIGHTS_NAME} for Hugging Face model {model_name!r}."
         )
     load_kwargs = {"map_location": mapped_device}
-    # PyTorch 2.6+ defaults weights_only=True; HF checkpoints need the full pickle.
+    # State dictionaries do not require arbitrary Python object unpickling.
     if "weights_only" in torch.load.__code__.co_varnames:
-        load_kwargs["weights_only"] = False
-    return torch.load(resolved_archive_file, **load_kwargs)
+        load_kwargs["weights_only"] = True
+    state_dict = torch.load(resolved_archive_file, **load_kwargs)
     # Convert dtype before moving to GPU to save memory
     if dtype is not None:
         state_dict = {k: v.to(dtype=dtype) for k, v in state_dict.items()}
