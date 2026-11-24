@@ -43,7 +43,10 @@ from mamba_ssm.ops.triton.mamba3.mamba3_mimo_utils import bwd_dadt_fused_triton_
 from mamba_ssm.ops.triton.mamba3.grouped_head_reduction import (
     reduce_grouped_qk_grads_and_bias_triton,
 )
-from mamba_ssm.ops.tilelang.mamba3.mamba3_mimo_bwd import mamba_mimo_bwd_combined
+from mamba_ssm.ops.tilelang.mamba3.mamba3_mimo_bwd import (
+    _run_bwd_kernel,
+    mamba_mimo_bwd_combined,
+)
 
 # def get_configs():
 #     iter_params = dict(num_stages=[0, 1, 2, 3], threads=[128, 256, 512])
@@ -81,6 +84,7 @@ def mamba_mimo_bwd_fwd(
     threads: int = 128,
     num_stages: int = 0,
     states_dtype = torch.bfloat16,
+    small_smem: bool = False,
 ) -> torch.Tensor:
     """
     TileLang kernel factory for the varlen Mamba3 bwd-fwd pass.
@@ -183,7 +187,11 @@ def mamba_mimo_bwd_fwd(
             o_shared = T.alloc_shared([chunk_size, P], dtype)
             v_shared = T.alloc_shared([chunk_size, P], dtype)
             states_accum_cast_shared = T.alloc_shared([N, P], dtype)
-            qk_dot_full_shared = T.alloc_shared([fused_chunk_size, fused_chunk_size], dtype)
+            if small_smem:
+                # Only the [chunk_size, R, R] block diagonal of Q @ K^T is used.
+                qk_dot_full_shared = T.alloc_shared([chunk_size, R, R], dtype)
+            else:
+                qk_dot_full_shared = T.alloc_shared([fused_chunk_size, fused_chunk_size], dtype)
 
             if reduceO:
                 dPhi_shared = T.alloc_shared([R, P], accum_dtype)
@@ -197,17 +205,29 @@ def mamba_mimo_bwd_fwd(
             dZeta_shared = T.alloc_shared([R, P], accum_dtype)
             T.clear(dZeta_shared)
 
-            T.annotate_layout({
-                q_shared: tilelang.layout.make_swizzled_layout(q_shared),
-                k_shared: tilelang.layout.make_swizzled_layout(k_shared),
-                PsiV_shared: tilelang.layout.make_swizzled_layout(PsiV_shared),
-                qs_shared: tilelang.layout.make_swizzled_layout(qs_shared),
-                o_shared: tilelang.layout.make_swizzled_layout(o_shared),
-                states_accum_cast_shared: tilelang.layout.make_swizzled_layout(states_accum_cast_shared),
-                qk_dot_full_shared: tilelang.layout.make_swizzled_layout(qk_dot_full_shared),
-                dout_shared: tilelang.layout.make_swizzled_layout(dout_shared),
-                z_shared: tilelang.layout.make_swizzled_layout(z_shared),
-            })
+            if small_smem:
+                T.annotate_layout({
+                    q_shared: tilelang.layout.make_swizzled_layout(q_shared),
+                    k_shared: tilelang.layout.make_swizzled_layout(k_shared),
+                    PsiV_shared: tilelang.layout.make_swizzled_layout(PsiV_shared),
+                    qs_shared: tilelang.layout.make_swizzled_layout(qs_shared),
+                    o_shared: tilelang.layout.make_swizzled_layout(o_shared),
+                    states_accum_cast_shared: tilelang.layout.make_swizzled_layout(states_accum_cast_shared),
+                    dout_shared: tilelang.layout.make_swizzled_layout(dout_shared),
+                    z_shared: tilelang.layout.make_swizzled_layout(z_shared),
+                })
+            else:
+                T.annotate_layout({
+                    q_shared: tilelang.layout.make_swizzled_layout(q_shared),
+                    k_shared: tilelang.layout.make_swizzled_layout(k_shared),
+                    PsiV_shared: tilelang.layout.make_swizzled_layout(PsiV_shared),
+                    qs_shared: tilelang.layout.make_swizzled_layout(qs_shared),
+                    o_shared: tilelang.layout.make_swizzled_layout(o_shared),
+                    states_accum_cast_shared: tilelang.layout.make_swizzled_layout(states_accum_cast_shared),
+                    qk_dot_full_shared: tilelang.layout.make_swizzled_layout(qk_dot_full_shared),
+                    dout_shared: tilelang.layout.make_swizzled_layout(dout_shared),
+                    z_shared: tilelang.layout.make_swizzled_layout(z_shared),
+                })
             T.use_swizzle(10, "row")
             T.no_set_max_nreg()
 
@@ -327,15 +347,29 @@ def mamba_mimo_bwd_fwd(
                 T.copy(k_frag, k_reshaped_shared)
 
                 # --- QK dot ---
-                qk_dot_frag = T.alloc_fragment([fused_chunk_size, fused_chunk_size], dtype=accum_dtype)
-                T.gemm(q_shared, k_shared, qk_dot_frag, transpose_B=True, clear_accum=True)
-                T.copy(qk_dot_frag, qk_dot_full_shared)
-                # Write QK_DOT; for full chunks eff_tail == chunk_size so cs < eff_tail is
-                # always true and the predication has no effect on non-tail iterations.
-                for cs, r_out, r_in in T.Parallel(chunk_size, R, R):
-                    if cs < eff_tail:
-                        QK_DOT[i_b, i_h, chunk_start + cs, r_out, r_in] = \
-                            qk_dot_full_shared[cs * R + r_out, cs * R + r_in]
+                if small_smem:
+                    qk_dot_diag_frag = T.alloc_fragment([chunk_size, R, R], accum_dtype)
+                    T.clear(qk_dot_diag_frag)
+                    for cs, r_out, r_in in T.Parallel(chunk_size, R, R):
+                        for n in T.serial(N):
+                            qk_dot_diag_frag[cs, r_out, r_in] += (
+                                T.cast(q_shared[cs * R + r_out, n], accum_dtype)
+                                * T.cast(k_shared[cs * R + r_in, n], accum_dtype)
+                            )
+                    T.copy(qk_dot_diag_frag, qk_dot_full_shared)
+                    for cs, r_out, r_in in T.Parallel(chunk_size, R, R):
+                        if cs < eff_tail:
+                            QK_DOT[i_b, i_h, chunk_start + cs, r_out, r_in] = qk_dot_full_shared[cs, r_out, r_in]
+                else:
+                    qk_dot_frag = T.alloc_fragment([fused_chunk_size, fused_chunk_size], dtype=accum_dtype)
+                    T.gemm(q_shared, k_shared, qk_dot_frag, transpose_B=True, clear_accum=True)
+                    T.copy(qk_dot_frag, qk_dot_full_shared)
+                    # Write QK_DOT; for full chunks eff_tail == chunk_size so cs < eff_tail is
+                    # always true and the predication has no effect on non-tail iterations.
+                    for cs, r_out, r_in in T.Parallel(chunk_size, R, R):
+                        if cs < eff_tail:
+                            QK_DOT[i_b, i_h, chunk_start + cs, r_out, r_in] = \
+                                qk_dot_full_shared[cs * R + r_out, cs * R + r_in]
 
                 # --- Rotary Q/K ---
                 q_first_half_frag = T.alloc_fragment([chunk_size, R, N // rotary_dim_divisor], dtype)
@@ -400,7 +434,10 @@ def mamba_mimo_bwd_fwd(
                 T.clear(qkdot_psiv_frag)
                 for cs, r_out, p in T.Parallel(chunk_size, R, P):
                     for r_in in T.serial(R):
-                        qkdot_psiv_frag[cs, r_out, p] += qk_dot_full_shared[cs * R + r_out, cs * R + r_in] * PsiV_shared[cs * R + r_in, p]
+                        if small_smem:
+                            qkdot_psiv_frag[cs, r_out, p] += qk_dot_full_shared[cs, r_out, r_in] * PsiV_shared[cs * R + r_in, p]
+                        else:
+                            qkdot_psiv_frag[cs, r_out, p] += qk_dot_full_shared[cs * R + r_out, cs * R + r_in] * PsiV_shared[cs * R + r_in, p]
                     qkdot_psiv_frag[cs, r_out, p] *= gamma_frag[cs]
                 qkdot_psiv_reshaped_frag = T.view(qkdot_psiv_frag, shape=[fused_chunk_size, P])
                 for csr, p in T.Parallel(fused_chunk_size, P):
@@ -708,9 +745,14 @@ def mamba_mimo_bwd_bwd(
     threads: int = 256,
     num_stages: int = 0,
     states_dtype = torch.bfloat16,
+    small_smem: bool = False,
 ) -> torch.Tensor:
     """
     TileLang kernel factory for the varlen Mamba3 bwd-bwd pass.
+
+    small_smem selects the reduced shared-memory schedule described in
+    ``mamba_mimo_bwd_bwd`` in ``mamba3_mimo_bwd.py`` (for GPUs with ~99 KB of
+    shared memory per block, e.g. SM120).
 
     The bwd-bwd pass iterates chunks in *reverse* order, consuming the
     STATES and QK_DOT cached by the bwd-fwd pass, and writes all remaining
@@ -812,25 +854,50 @@ def mamba_mimo_bwd_bwd(
 
             dstates_shared = T.alloc_shared([N, P], dtype)
             dstates_frag = T.alloc_fragment([N, P], accum_dtype)
-            dout_shared = T.alloc_shared([chunk_size, P], dtype)
+            # small_smem: see mamba_mimo_bwd_bwd in mamba3_mimo_bwd.py.
+            if not small_smem:
+                dout_shared = T.alloc_shared([chunk_size, P], dtype)
             dPhiO_shared = T.alloc_shared([fused_chunk_size, P], dtype)
             q_shared = T.alloc_shared([fused_chunk_size, N], dtype)
             k_shared = T.alloc_shared([fused_chunk_size, N], dtype)
-            v_shared = T.alloc_shared([chunk_size, P], dtype)
-            states_shared = T.alloc_shared([N, P], dtype)
+            if small_smem:
+                PsiV_shared = T.alloc_shared([fused_chunk_size, P], dtype)
+                states_shared = dstates_shared
+            else:
+                v_shared = T.alloc_shared([chunk_size, P], dtype)
+                states_shared = T.alloc_shared([N, P], dtype)
             lkq_masked__or__dkq_masked_shared = T.alloc_shared([fused_chunk_size, fused_chunk_size], dtype)
-            dPsiV_combined_shared = T.alloc_shared([fused_chunk_size, P], dtype)
-            dqk_from_diag_shared = T.alloc_shared([fused_chunk_size, fused_chunk_size], accum_dtype)
-            q_pre_rot_shared = T.alloc_shared([fused_chunk_size, N], dtype)
-            k_pre_rot_shared = T.alloc_shared([fused_chunk_size, N], dtype)
+            if small_smem:
+                dPsiV_combined_shared = PsiV_shared
+                dqk_diag_shared = T.alloc_shared([chunk_size, R, R], accum_dtype)
+            else:
+                dPsiV_combined_shared = T.alloc_shared([fused_chunk_size, P], dtype)
+                dqk_from_diag_shared = T.alloc_shared([fused_chunk_size, fused_chunk_size], accum_dtype)
+                q_pre_rot_shared = T.alloc_shared([fused_chunk_size, N], dtype)
+                k_pre_rot_shared = T.alloc_shared([fused_chunk_size, N], dtype)
             dk_shared = T.alloc_shared([fused_chunk_size, N], dtype)
-            dq_shared = T.alloc_shared([fused_chunk_size, N], dtype)
+            if small_smem:
+                dq_shared = dk_shared
+            else:
+                dq_shared = T.alloc_shared([fused_chunk_size, N], dtype)
             qk_dot_shared = T.alloc_shared([chunk_size, R, R], dtype)
-            k_pre_trap_shared = T.alloc_shared([fused_chunk_size, N], dtype)
-            dangle_dk__or__dq_shared = T.alloc_shared([fused_chunk_size, N // rotary_dim_divisor], T.float32)
+            if small_smem:
+                k_pre_trap_shared = dk_shared
+            else:
+                k_pre_trap_shared = T.alloc_shared([fused_chunk_size, N], dtype)
+                dangle_dk__or__dq_shared = T.alloc_shared([fused_chunk_size, N // rotary_dim_divisor], T.float32)
 
             noswizzle_annot = threads == 256 and (N <= 32 or P >= 128) # NOTE: heuristics for when swizzling annotation causes kernel hang, needs more investigation
-            if not noswizzle_annot:
+            if not noswizzle_annot and small_smem:
+                T.annotate_layout({
+                    dstates_shared: tilelang.layout.make_swizzled_layout(dstates_shared),
+                    q_shared: tilelang.layout.make_swizzled_layout(q_shared),
+                    k_shared: tilelang.layout.make_swizzled_layout(k_shared),
+                    PsiV_shared: tilelang.layout.make_swizzled_layout(PsiV_shared),
+                    lkq_masked__or__dkq_masked_shared: tilelang.layout.make_swizzled_layout(lkq_masked__or__dkq_masked_shared),
+                    dk_shared: tilelang.layout.make_swizzled_layout(dk_shared),
+                })
+            elif not noswizzle_annot:
                 T.annotate_layout({
                     dstates_shared: tilelang.layout.make_swizzled_layout(dstates_shared),
                     dout_shared: tilelang.layout.make_swizzled_layout(dout_shared),
@@ -960,7 +1027,11 @@ def mamba_mimo_bwd_bwd(
 
                 # --- DOUT projection (zero-masked at tail) ---
                 dPhiO_frag = T.alloc_fragment([chunk_size, R, P], dtype)
-                if reduceO:
+                if reduceO and small_smem:
+                    for cs, r, p in T.Parallel(chunk_size, R, P):
+                        dPhiO_frag[cs, r, p] = T.if_then_else(
+                            cs < eff_tail, DOUT[i_b, chunk_start + cs, i_h, p] * Phi_frag[r, p], 0.0)
+                elif reduceO:
                     for cs, p in T.Parallel(chunk_size, P):
                         dout_shared[cs, p] = DOUT[i_b, chunk_start + cs, i_h, p]
                     if eff_tail < chunk_size:
@@ -990,11 +1061,15 @@ def mamba_mimo_bwd_bwd(
                         dPhiO_frag[cs, r, p] *= tmp * T.tanh(tmp) + tmp
                 T.copy(T.view(dPhiO_frag, shape=[fused_chunk_size, P]), dPhiO_shared)
 
-                T.copy(V[i_b, chunk_start:chunk_start + chunk_size, i_h, :], v_shared)
+                if not small_smem:
+                    T.copy(V[i_b, chunk_start:chunk_start + chunk_size, i_h, :], v_shared)
                 if hasD:
                     v_dD_frag = T.alloc_fragment([chunk_size, P], accum_dtype)
                     Psi_dD_frag = T.alloc_fragment([R, P], accum_dtype)
-                    T.copy(v_shared, v_dD_frag)
+                    if small_smem:
+                        T.copy(V[i_b, chunk_start:chunk_start + chunk_size, i_h, :], v_dD_frag)
+                    else:
+                        T.copy(v_shared, v_dD_frag)
                     T.copy(MIMO_V[i_h, :, :], Psi_dD_frag)
                     for cs, r, p in T.Parallel(chunk_size, R, P):
                         dPhiO_frag[cs, r, p] *= v_dD_frag[cs, p] * Psi_dD_frag[r, p]
@@ -1010,7 +1085,8 @@ def mamba_mimo_bwd_bwd(
                     q_frag[cs, r, n] += q_bias_frag[r, n]
                 for cs, r, n in T.Parallel(chunk_size, R, N):
                     q_shared[cs * R + r, n] = q_frag[cs, r, n]
-                T.copy(q_shared, q_pre_rot_shared)
+                if not small_smem:
+                    T.copy(q_shared, q_pre_rot_shared)
                 q_first_half_frag = T.alloc_fragment([chunk_size, R, N // rotary_dim_divisor], dtype)
                 q_second_half_frag = T.alloc_fragment([chunk_size, R, N // rotary_dim_divisor], dtype)
                 for cs, r, n in T.Parallel(chunk_size, R, N // rotary_dim_divisor):
@@ -1030,8 +1106,9 @@ def mamba_mimo_bwd_bwd(
                 for cs, r, n in T.Parallel(chunk_size, R, N):
                     k_frag[cs, r, n] += k_bias_frag[r, n]
                 T.copy(k_frag, k_reshaped_shared)
-                for csr, n in T.Parallel(fused_chunk_size, N):
-                    k_pre_rot_shared[csr, n] = k_pre_trap_shared[csr, n]
+                if not small_smem:
+                    for csr, n in T.Parallel(fused_chunk_size, N):
+                        k_pre_rot_shared[csr, n] = k_pre_trap_shared[csr, n]
                 k_first_half_frag = T.alloc_fragment([chunk_size, R, N // rotary_dim_divisor], dtype)
                 k_second_half_frag = T.alloc_fragment([chunk_size, R, N // rotary_dim_divisor], dtype)
                 for cs, r, n in T.Parallel(chunk_size, R, N // rotary_dim_divisor):
@@ -1059,7 +1136,7 @@ def mamba_mimo_bwd_bwd(
                 lkq_frag = T.alloc_fragment([fused_chunk_size, fused_chunk_size], accum_dtype)
                 T.gemm(k_shared, q_shared, lkq_frag, transpose_B=True, clear_accum=True)
                 T.copy(lkq_frag, lkq_masked__or__dkq_masked_shared)
-                if R == 1:
+                if R == 1 or small_smem:
                     lkq_masked_dtype_buf = T.alloc_fragment([fused_chunk_size, fused_chunk_size], dtype)
                     T.copy(lkq_masked__or__dkq_masked_shared, lkq_masked_dtype_buf)
                     for csr_i, csr_j in T.Parallel(fused_chunk_size, fused_chunk_size):
@@ -1115,7 +1192,10 @@ def mamba_mimo_bwd_bwd(
                 dPsi_frag = T.alloc_fragment([R, P], accum_dtype)
                 T.copy(dPsi_acc, dPsi_frag)
                 v_frag = T.alloc_fragment([chunk_size, P], accum_dtype)
-                T.copy(v_shared, v_frag)
+                if small_smem:
+                    T.copy(V[i_b, chunk_start:chunk_start + chunk_size, i_h, :], v_frag)
+                else:
+                    T.copy(v_shared, v_frag)
                 for r, p in T.Parallel(R, P):
                     for cs in T.serial(chunk_size):
                         dPsi_frag[r, p] += dPsiV_combined_shared[cs * R + r, p] * v_frag[cs, p]
@@ -1126,18 +1206,34 @@ def mamba_mimo_bwd_bwd(
                 for cs, p in T.Parallel(chunk_size, P):
                     for r in T.serial(R):
                         PsiV_frag[cs, r, p] += v_frag[cs, p] * Psi_frag[r, p]
-                PsiV_shared = T.alloc_shared([fused_chunk_size, P], dtype)
+                if not small_smem:
+                    PsiV_shared = T.alloc_shared([fused_chunk_size, P], dtype)
                 for cs, r, p in T.Parallel(chunk_size, R, P):
                     PsiV_shared[cs * R + r, p] = PsiV_frag[cs, r, p]
 
                 # --- dqk_from_diag ---
-                dqk_from_diag_frag = T.alloc_fragment([fused_chunk_size, fused_chunk_size], accum_dtype)
-                T.gemm(dPhiO_shared, PsiV_shared, dqk_from_diag_frag, transpose_B=True, clear_accum=True)
-                dgamma_diag_prereduce_frag = T.alloc_fragment([chunk_size, R, R], accum_dtype)
-                T.copy(qk_dot_shared, dgamma_diag_prereduce_frag)
-                T.copy(dqk_from_diag_frag, dqk_from_diag_shared)
-                for cs, r_out, r_in in T.Parallel(chunk_size, R, R):
-                    dgamma_diag_prereduce_frag[cs, r_out, r_in] *= dqk_from_diag_shared[cs * R + r_out, cs * R + r_in]
+                if small_smem:
+                    # Only the [chunk_size, R, R] block diagonal of dPhiO @ PsiV^T is used.
+                    dqk_diag_frag = T.alloc_fragment([chunk_size, R, R], accum_dtype)
+                    T.clear(dqk_diag_frag)
+                    for cs, r_out, r_in in T.Parallel(chunk_size, R, R):
+                        for p in T.serial(P):
+                            dqk_diag_frag[cs, r_out, r_in] += (
+                                T.cast(dPhiO_shared[cs * R + r_out, p], accum_dtype)
+                                * T.cast(PsiV_shared[cs * R + r_in, p], accum_dtype)
+                            )
+                    dgamma_diag_prereduce_frag = T.alloc_fragment([chunk_size, R, R], accum_dtype)
+                    T.copy(qk_dot_shared, dgamma_diag_prereduce_frag)
+                    for cs, r_out, r_in in T.Parallel(chunk_size, R, R):
+                        dgamma_diag_prereduce_frag[cs, r_out, r_in] *= dqk_diag_frag[cs, r_out, r_in]
+                else:
+                    dqk_from_diag_frag = T.alloc_fragment([fused_chunk_size, fused_chunk_size], accum_dtype)
+                    T.gemm(dPhiO_shared, PsiV_shared, dqk_from_diag_frag, transpose_B=True, clear_accum=True)
+                    dgamma_diag_prereduce_frag = T.alloc_fragment([chunk_size, R, R], accum_dtype)
+                    T.copy(qk_dot_shared, dgamma_diag_prereduce_frag)
+                    T.copy(dqk_from_diag_frag, dqk_from_diag_shared)
+                    for cs, r_out, r_in in T.Parallel(chunk_size, R, R):
+                        dgamma_diag_prereduce_frag[cs, r_out, r_in] *= dqk_from_diag_shared[cs * R + r_out, cs * R + r_in]
                 dgamma_diag_reduced_frag = T.alloc_fragment([chunk_size], accum_dtype)
                 T.reduce_sum(T.view(dgamma_diag_prereduce_frag, shape=[chunk_size, R * R]),
                              dgamma_diag_reduced_frag, dim=-1, clear=True)
@@ -1149,9 +1245,14 @@ def mamba_mimo_bwd_bwd(
                     T.copy(dgamma_diag_reduced_frag, DGAMMA_DIAG[i_b, i_h, chunk_start:chunk_start + chunk_size])
                 gamma_qk_frag = T.alloc_fragment([chunk_size], accum_dtype)
                 T.copy(gamma_cached_frag, gamma_qk_frag)
-                for csr_i, csr_j in T.Parallel(fused_chunk_size, fused_chunk_size):
-                    dqk_from_diag_frag[csr_i, csr_j] *= gamma_qk_frag[csr_i // R]
-                T.copy(dqk_from_diag_frag, dqk_from_diag_shared)
+                if small_smem:
+                    for cs, r_out, r_in in T.Parallel(chunk_size, R, R):
+                        dqk_diag_frag[cs, r_out, r_in] *= gamma_qk_frag[cs]
+                    T.copy(dqk_diag_frag, dqk_diag_shared)
+                else:
+                    for csr_i, csr_j in T.Parallel(fused_chunk_size, fused_chunk_size):
+                        dqk_from_diag_frag[csr_i, csr_j] *= gamma_qk_frag[csr_i // R]
+                    T.copy(dqk_from_diag_frag, dqk_from_diag_shared)
 
                 # --- dK ---
                 dk_frag = T.alloc_fragment([fused_chunk_size, N], accum_dtype)
@@ -1200,13 +1301,22 @@ def mamba_mimo_bwd_bwd(
                         dk_intrachunk_frag[csr_i, csr_j] * T.exp(SEGSUM[i_b, i_h, global_chunk_idx, csr_j // R, csr_i // R]),
                         0.0)
                 T.copy(dk_intrachunk_frag, lkq_masked__or__dkq_masked_shared)
-                T.copy(dk_frag, dk_shared)
-                dk_nodiag_frag = T.alloc_fragment([fused_chunk_size, N], accum_dtype)
-                T.copy(dk_shared, dk_nodiag_frag)
-                T.gemm(lkq_masked__or__dkq_masked_shared, q_shared, dk_nodiag_frag, clear_accum=False)
+                if small_smem:
+                    # k_pre_trap_shared shares storage with dk_shared: read it before dk_shared is written.
+                    dk_nodiag_frag = T.alloc_fragment([fused_chunk_size, N], accum_dtype)
+                    k_factor_frag = T.alloc_fragment([chunk_size, R, N], accum_dtype)
+                    T.copy(k_pre_trap_shared, T.view(k_factor_frag, shape=[fused_chunk_size, N]))
+                    T.copy(dk_frag, dk_shared)
+                    T.copy(dk_shared, dk_nodiag_frag)
+                    T.gemm(lkq_masked__or__dkq_masked_shared, q_shared, dk_nodiag_frag, clear_accum=False)
+                else:
+                    T.copy(dk_frag, dk_shared)
+                    dk_nodiag_frag = T.alloc_fragment([fused_chunk_size, N], accum_dtype)
+                    T.copy(dk_shared, dk_nodiag_frag)
+                    T.gemm(lkq_masked__or__dkq_masked_shared, q_shared, dk_nodiag_frag, clear_accum=False)
 
-                k_factor_frag = T.alloc_fragment([chunk_size, R, N], accum_dtype)
-                T.copy(k_pre_trap_shared, T.view(k_factor_frag, shape=[fused_chunk_size, N]))
+                    k_factor_frag = T.alloc_fragment([chunk_size, R, N], accum_dtype)
+                    T.copy(k_pre_trap_shared, T.view(k_factor_frag, shape=[fused_chunk_size, N]))
                 dfactor_prereduce_frag = T.alloc_fragment([chunk_size, R, N], accum_dtype)
                 for cs, r, n in T.Parallel(chunk_size, R, N):
                     dfactor_prereduce_frag[cs, r, n] = k_factor_frag[cs, r, n] * dk_nodiag_frag[cs * R + r, n]
@@ -1224,6 +1334,46 @@ def mamba_mimo_bwd_bwd(
                 for csr, n in T.Parallel(fused_chunk_size, N):
                     dk_nodiag_frag[csr, n] *= trap_scale_dk_frag[csr // R]
                 T.copy(dk_nodiag_frag, dk_shared)
+
+                if small_smem:
+                    # --- dK epilogue, before the dQ path so dq_shared can reuse dk_shared ---
+                    angles_dk_frag = T.alloc_fragment([chunk_size, N // rotary_dim_divisor], T.float32)
+                    T.copy(ANGLES[i_b, chunk_start:chunk_start + chunk_size, i_h, :], angles_dk_frag)
+                    dk_first_half_frag = T.alloc_fragment([chunk_size, R, N // rotary_dim_divisor], dtype)
+                    dk_second_half_frag = T.alloc_fragment([chunk_size, R, N // rotary_dim_divisor], dtype)
+                    k_prerot_first_half_frag = T.alloc_fragment([chunk_size, R, N // rotary_dim_divisor], dtype)
+                    k_prerot_second_half_frag = T.alloc_fragment([chunk_size, R, N // rotary_dim_divisor], dtype)
+                    for cs, r, n in T.Parallel(chunk_size, R, N // rotary_dim_divisor):
+                        dk_first_half_frag[cs, r, n] = dk_shared[cs * R + r, n]
+                        dk_second_half_frag[cs, r, n] = dk_shared[cs * R + r, N // 2 + n]
+                        k_prerot_first_half_frag[cs, r, n] = K[i_b, chunk_start + cs, r, i_h_qk, n] + T.cast(K_BIAS[i_h, r, n], dtype)
+                        k_prerot_second_half_frag[cs, r, n] = K[i_b, chunk_start + cs, r, i_h_qk, N // 2 + n] + T.cast(K_BIAS[i_h, r, N // 2 + n], dtype)
+                    dangle_dk_frag = T.alloc_fragment([chunk_size, R, N // rotary_dim_divisor], T.float32)
+                    for cs, r, n in T.Parallel(chunk_size, R, N // rotary_dim_divisor):
+                        dangle_dk_frag[cs, r, n] = \
+                            dk_first_half_frag[cs, r, n] * (-k_prerot_first_half_frag[cs, r, n] * T.sin(angles_dk_frag[cs, n]) - k_prerot_second_half_frag[cs, r, n] * T.cos(angles_dk_frag[cs, n])) + \
+                            dk_second_half_frag[cs, r, n] * (k_prerot_first_half_frag[cs, r, n] * T.cos(angles_dk_frag[cs, n]) - k_prerot_second_half_frag[cs, r, n] * T.sin(angles_dk_frag[cs, n]))
+                    dangle_frag_reduced = T.alloc_fragment([chunk_size, N // rotary_dim_divisor], T.float32)
+                    T.clear(dangle_frag_reduced)
+                    for cs, n in T.Parallel(chunk_size, N // rotary_dim_divisor):
+                        for r in T.serial(R):
+                            dangle_frag_reduced[cs, n] += dangle_dk_frag[cs, r, n]
+                    for cs, r, n in T.Parallel(chunk_size, R, N // rotary_dim_divisor):
+                        dk_shared[cs * R + r, n] = T.cos(angles_dk_frag[cs, n]) * dk_first_half_frag[cs, r, n] + T.sin(angles_dk_frag[cs, n]) * dk_second_half_frag[cs, r, n]
+                        dk_shared[cs * R + r, N // 2 + n] = -T.sin(angles_dk_frag[cs, n]) * dk_first_half_frag[cs, r, n] + T.cos(angles_dk_frag[cs, n]) * dk_second_half_frag[cs, r, n]
+                    dk_combined_frag = T.alloc_fragment([fused_chunk_size, N], accum_dtype)
+                    T.copy(dk_shared, dk_combined_frag)
+                    for csr_in, n in T.Parallel(fused_chunk_size, N):
+                        cs = csr_in // R
+                        for r_out in T.serial(R):
+                            dk_combined_frag[csr_in, n] += dqk_diag_shared[cs, r_out, csr_in % R] * T.cast(
+                                Q[i_b, chunk_start + cs, r_out, i_h_qk, n] + T.cast(Q_BIAS[i_h, r_out, n], dtype), accum_dtype)
+                    if eff_tail < chunk_size:
+                        for csr, n in T.Parallel(fused_chunk_size, N):
+                            if csr < eff_tail * R:
+                                DK[i_b, fused_chunk_start + csr, i_h, n] = dk_combined_frag[csr, n]
+                    else:
+                        T.copy(dk_combined_frag, DK[i_b, fused_chunk_start:fused_chunk_start + fused_chunk_size, i_h, :])
 
                 # --- State-passing ddA + interchunk dQ ---
                 states_frag = T.alloc_fragment([N, P], T.float32)
@@ -1279,90 +1429,134 @@ def mamba_mimo_bwd_bwd(
                 T.gemm(lkq_masked__or__dkq_masked_shared, k_shared, dq_combined_frag, transpose_A=True, clear_accum=False)
                 T.copy(dq_combined_frag, dq_shared)
 
-                # --- Inverse rotary for dK and dQ + dAngles ---
-                angles_dk_frag = T.alloc_fragment([chunk_size, N // rotary_dim_divisor], T.float32)
-                T.copy(ANGLES[i_b, chunk_start:chunk_start + chunk_size, i_h, :], angles_dk_frag)
-                dk_first_half_frag = T.alloc_fragment([chunk_size, R, N // rotary_dim_divisor], dtype)
-                dk_second_half_frag = T.alloc_fragment([chunk_size, R, N // rotary_dim_divisor], dtype)
-                k_prerot_first_half_frag = T.alloc_fragment([chunk_size, R, N // rotary_dim_divisor], dtype)
-                k_prerot_second_half_frag = T.alloc_fragment([chunk_size, R, N // rotary_dim_divisor], dtype)
-                for cs, r, n in T.Parallel(chunk_size, R, N // rotary_dim_divisor):
-                    dk_first_half_frag[cs, r, n] = dk_shared[cs * R + r, n]
-                    dk_second_half_frag[cs, r, n] = dk_shared[cs * R + r, N // 2 + n]
-                    k_prerot_first_half_frag[cs, r, n] = k_pre_rot_shared[cs * R + r, n]
-                    k_prerot_second_half_frag[cs, r, n] = k_pre_rot_shared[cs * R + r, N // 2 + n]
-                dangle_dk_frag = T.alloc_fragment([chunk_size, R, N // rotary_dim_divisor], T.float32)
-                for cs, r, n in T.Parallel(chunk_size, R, N // rotary_dim_divisor):
-                    dangle_dk_frag[cs, r, n] = \
-                        dk_first_half_frag[cs, r, n] * (-k_prerot_first_half_frag[cs, r, n] * T.sin(angles_dk_frag[cs, n]) - k_prerot_second_half_frag[cs, r, n] * T.cos(angles_dk_frag[cs, n])) + \
-                        dk_second_half_frag[cs, r, n] * (k_prerot_first_half_frag[cs, r, n] * T.cos(angles_dk_frag[cs, n]) - k_prerot_second_half_frag[cs, r, n] * T.sin(angles_dk_frag[cs, n]))
-                T.copy(T.view(dangle_dk_frag, shape=[fused_chunk_size, N // rotary_dim_divisor]), dangle_dk__or__dq_shared)
-                for cs, r, n in T.Parallel(chunk_size, R, N // rotary_dim_divisor):
-                    dk_shared[cs * R + r, n] = T.cos(angles_dk_frag[cs, n]) * dk_first_half_frag[cs, r, n] + T.sin(angles_dk_frag[cs, n]) * dk_second_half_frag[cs, r, n]
-                    dk_shared[cs * R + r, N // 2 + n] = -T.sin(angles_dk_frag[cs, n]) * dk_first_half_frag[cs, r, n] + T.cos(angles_dk_frag[cs, n]) * dk_second_half_frag[cs, r, n]
+                if not small_smem:
+                    # --- Inverse rotary for dK and dQ + dAngles ---
+                    angles_dk_frag = T.alloc_fragment([chunk_size, N // rotary_dim_divisor], T.float32)
+                    T.copy(ANGLES[i_b, chunk_start:chunk_start + chunk_size, i_h, :], angles_dk_frag)
+                    dk_first_half_frag = T.alloc_fragment([chunk_size, R, N // rotary_dim_divisor], dtype)
+                    dk_second_half_frag = T.alloc_fragment([chunk_size, R, N // rotary_dim_divisor], dtype)
+                    k_prerot_first_half_frag = T.alloc_fragment([chunk_size, R, N // rotary_dim_divisor], dtype)
+                    k_prerot_second_half_frag = T.alloc_fragment([chunk_size, R, N // rotary_dim_divisor], dtype)
+                    for cs, r, n in T.Parallel(chunk_size, R, N // rotary_dim_divisor):
+                        dk_first_half_frag[cs, r, n] = dk_shared[cs * R + r, n]
+                        dk_second_half_frag[cs, r, n] = dk_shared[cs * R + r, N // 2 + n]
+                        k_prerot_first_half_frag[cs, r, n] = k_pre_rot_shared[cs * R + r, n]
+                        k_prerot_second_half_frag[cs, r, n] = k_pre_rot_shared[cs * R + r, N // 2 + n]
+                    dangle_dk_frag = T.alloc_fragment([chunk_size, R, N // rotary_dim_divisor], T.float32)
+                    for cs, r, n in T.Parallel(chunk_size, R, N // rotary_dim_divisor):
+                        dangle_dk_frag[cs, r, n] = \
+                            dk_first_half_frag[cs, r, n] * (-k_prerot_first_half_frag[cs, r, n] * T.sin(angles_dk_frag[cs, n]) - k_prerot_second_half_frag[cs, r, n] * T.cos(angles_dk_frag[cs, n])) + \
+                            dk_second_half_frag[cs, r, n] * (k_prerot_first_half_frag[cs, r, n] * T.cos(angles_dk_frag[cs, n]) - k_prerot_second_half_frag[cs, r, n] * T.sin(angles_dk_frag[cs, n]))
+                    T.copy(T.view(dangle_dk_frag, shape=[fused_chunk_size, N // rotary_dim_divisor]), dangle_dk__or__dq_shared)
+                    for cs, r, n in T.Parallel(chunk_size, R, N // rotary_dim_divisor):
+                        dk_shared[cs * R + r, n] = T.cos(angles_dk_frag[cs, n]) * dk_first_half_frag[cs, r, n] + T.sin(angles_dk_frag[cs, n]) * dk_second_half_frag[cs, r, n]
+                        dk_shared[cs * R + r, N // 2 + n] = -T.sin(angles_dk_frag[cs, n]) * dk_first_half_frag[cs, r, n] + T.cos(angles_dk_frag[cs, n]) * dk_second_half_frag[cs, r, n]
 
-                dk_combined_frag = T.alloc_fragment([fused_chunk_size, N], accum_dtype)
-                T.copy(dk_shared, dk_combined_frag)
-                q_dk_frag = T.alloc_fragment([fused_chunk_size, N], accum_dtype)
-                T.copy(q_pre_rot_shared, q_dk_frag)
-                q_dk_frag_reshaped = T.view(q_dk_frag, [chunk_size, R, N])
-                for csr_in, n in T.Parallel(fused_chunk_size, N):
-                    cs = csr_in // R
-                    for r_out in T.serial(R):
-                        csr_out = cs * R + r_out
-                        dk_combined_frag[csr_in, n] += dqk_from_diag_shared[csr_out, csr_in] * q_dk_frag_reshaped[cs, r_out, n]
-                if eff_tail < chunk_size:
-                    for csr, n in T.Parallel(fused_chunk_size, N):
-                        if csr < eff_tail * R:
-                            DK[i_b, fused_chunk_start + csr, i_h, n] = dk_combined_frag[csr, n]
-                else:
-                    T.copy(dk_combined_frag, DK[i_b, fused_chunk_start:fused_chunk_start + fused_chunk_size, i_h, :])
+                    dk_combined_frag = T.alloc_fragment([fused_chunk_size, N], accum_dtype)
+                    T.copy(dk_shared, dk_combined_frag)
+                    q_dk_frag = T.alloc_fragment([fused_chunk_size, N], accum_dtype)
+                    T.copy(q_pre_rot_shared, q_dk_frag)
+                    q_dk_frag_reshaped = T.view(q_dk_frag, [chunk_size, R, N])
+                    for csr_in, n in T.Parallel(fused_chunk_size, N):
+                        cs = csr_in // R
+                        for r_out in T.serial(R):
+                            csr_out = cs * R + r_out
+                            dk_combined_frag[csr_in, n] += dqk_from_diag_shared[csr_out, csr_in] * q_dk_frag_reshaped[cs, r_out, n]
+                    if eff_tail < chunk_size:
+                        for csr, n in T.Parallel(fused_chunk_size, N):
+                            if csr < eff_tail * R:
+                                DK[i_b, fused_chunk_start + csr, i_h, n] = dk_combined_frag[csr, n]
+                    else:
+                        T.copy(dk_combined_frag, DK[i_b, fused_chunk_start:fused_chunk_start + fused_chunk_size, i_h, :])
 
-                # dQ inverse rotary
-                angles_dq_frag = T.alloc_fragment([chunk_size, N // rotary_dim_divisor], T.float32)
-                T.copy(ANGLES[i_b, chunk_start:chunk_start + chunk_size, i_h, :], angles_dq_frag)
-                dq_first_half_frag = T.alloc_fragment([chunk_size, R, N // rotary_dim_divisor], dtype)
-                dq_second_half_frag = T.alloc_fragment([chunk_size, R, N // rotary_dim_divisor], dtype)
-                for cs, r, n in T.Parallel(chunk_size, R, N // rotary_dim_divisor):
-                    dq_first_half_frag[cs, r, n] = dq_shared[cs * R + r, n]
-                    dq_second_half_frag[cs, r, n] = dq_shared[cs * R + r, N // 2 + n]
-                q_prerot_first_half_frag = T.alloc_fragment([chunk_size, R, N // rotary_dim_divisor], dtype)
-                q_prerot_second_half_frag = T.alloc_fragment([chunk_size, R, N // rotary_dim_divisor], dtype)
-                for cs, r, n in T.Parallel(chunk_size, R, N // rotary_dim_divisor):
-                    q_prerot_first_half_frag[cs, r, n] = q_pre_rot_shared[cs * R + r, n]
-                    q_prerot_second_half_frag[cs, r, n] = q_pre_rot_shared[cs * R + r, N // 2 + n]
-                dangle_dq_frag = T.alloc_fragment([chunk_size, R, N // rotary_dim_divisor], T.float32)
-                T.copy(dangle_dk__or__dq_shared, T.view(dangle_dq_frag, shape=[fused_chunk_size, N // rotary_dim_divisor]))
-                for cs, r, n in T.Parallel(chunk_size, R, N // rotary_dim_divisor):
-                    dangle_dq_frag[cs, r, n] += \
-                        dq_first_half_frag[cs, r, n] * (-q_prerot_first_half_frag[cs, r, n] * T.sin(angles_dq_frag[cs, n]) - q_prerot_second_half_frag[cs, r, n] * T.cos(angles_dq_frag[cs, n])) + \
-                        dq_second_half_frag[cs, r, n] * (q_prerot_first_half_frag[cs, r, n] * T.cos(angles_dq_frag[cs, n]) - q_prerot_second_half_frag[cs, r, n] * T.sin(angles_dq_frag[cs, n]))
-                dangle_frag_reduced = T.alloc_fragment([chunk_size, N // rotary_dim_divisor], T.float32)
-                T.clear(dangle_frag_reduced)
-                for cs, n in T.Parallel(chunk_size, N // rotary_dim_divisor):
-                    for r in T.serial(R):
-                        dangle_frag_reduced[cs, n] += dangle_dq_frag[cs, r, n]
-                if eff_tail < chunk_size:
+                if small_smem:
+                    # --- dQ epilogue ---
+                    angles_dq_frag = T.alloc_fragment([chunk_size, N // rotary_dim_divisor], T.float32)
+                    T.copy(ANGLES[i_b, chunk_start:chunk_start + chunk_size, i_h, :], angles_dq_frag)
+                    dq_first_half_frag = T.alloc_fragment([chunk_size, R, N // rotary_dim_divisor], dtype)
+                    dq_second_half_frag = T.alloc_fragment([chunk_size, R, N // rotary_dim_divisor], dtype)
+                    q_prerot_first_half_frag = T.alloc_fragment([chunk_size, R, N // rotary_dim_divisor], dtype)
+                    q_prerot_second_half_frag = T.alloc_fragment([chunk_size, R, N // rotary_dim_divisor], dtype)
+                    for cs, r, n in T.Parallel(chunk_size, R, N // rotary_dim_divisor):
+                        dq_first_half_frag[cs, r, n] = dq_shared[cs * R + r, n]
+                        dq_second_half_frag[cs, r, n] = dq_shared[cs * R + r, N // 2 + n]
+                        q_prerot_first_half_frag[cs, r, n] = Q[i_b, chunk_start + cs, r, i_h_qk, n] + T.cast(Q_BIAS[i_h, r, n], dtype)
+                        q_prerot_second_half_frag[cs, r, n] = Q[i_b, chunk_start + cs, r, i_h_qk, N // 2 + n] + T.cast(Q_BIAS[i_h, r, N // 2 + n], dtype)
+                    dangle_dq_frag = T.alloc_fragment([chunk_size, R, N // rotary_dim_divisor], T.float32)
+                    for cs, r, n in T.Parallel(chunk_size, R, N // rotary_dim_divisor):
+                        dangle_dq_frag[cs, r, n] = \
+                            dq_first_half_frag[cs, r, n] * (-q_prerot_first_half_frag[cs, r, n] * T.sin(angles_dq_frag[cs, n]) - q_prerot_second_half_frag[cs, r, n] * T.cos(angles_dq_frag[cs, n])) + \
+                            dq_second_half_frag[cs, r, n] * (q_prerot_first_half_frag[cs, r, n] * T.cos(angles_dq_frag[cs, n]) - q_prerot_second_half_frag[cs, r, n] * T.sin(angles_dq_frag[cs, n]))
                     for cs, n in T.Parallel(chunk_size, N // rotary_dim_divisor):
-                        if cs < eff_tail:
-                            DANGLES[i_b, chunk_start + cs, i_h, n] = dangle_frag_reduced[cs, n]
+                        for r in T.serial(R):
+                            dangle_frag_reduced[cs, n] += dangle_dq_frag[cs, r, n]
+                    if eff_tail < chunk_size:
+                        for cs, n in T.Parallel(chunk_size, N // rotary_dim_divisor):
+                            if cs < eff_tail:
+                                DANGLES[i_b, chunk_start + cs, i_h, n] = dangle_frag_reduced[cs, n]
+                    else:
+                        T.copy(dangle_frag_reduced, DANGLES[i_b, chunk_start:chunk_start + chunk_size, i_h, :])
+                    for cs, r, n in T.Parallel(chunk_size, R, N // rotary_dim_divisor):
+                        dq_shared[cs * R + r, n] = T.cos(angles_dq_frag[cs, n]) * dq_first_half_frag[cs, r, n] + T.sin(angles_dq_frag[cs, n]) * dq_second_half_frag[cs, r, n]
+                        dq_shared[cs * R + r, N // 2 + n] = -T.sin(angles_dq_frag[cs, n]) * dq_first_half_frag[cs, r, n] + T.cos(angles_dq_frag[cs, n]) * dq_second_half_frag[cs, r, n]
+                    T.copy(dq_shared, dq_frag)
+                    for csr_out, n in T.Parallel(fused_chunk_size, N):
+                        cs = csr_out // R
+                        for r_in in T.serial(R):
+                            dq_frag[csr_out, n] += dqk_diag_shared[cs, csr_out % R, r_in] * T.cast(
+                                K[i_b, chunk_start + cs, r_in, i_h_qk, n] + T.cast(K_BIAS[i_h, r_in, n], dtype), accum_dtype)
+                    if eff_tail < chunk_size:
+                        for csr, n in T.Parallel(fused_chunk_size, N):
+                            if csr < eff_tail * R:
+                                DQ[i_b, fused_chunk_start + csr, i_h, n] = dq_frag[csr, n]
+                    else:
+                        T.copy(dq_frag, DQ[i_b, fused_chunk_start:fused_chunk_start + fused_chunk_size, i_h, :])
                 else:
-                    T.copy(dangle_frag_reduced, DANGLES[i_b, chunk_start:chunk_start + chunk_size, i_h, :])
-                for cs, r, n in T.Parallel(chunk_size, R, N // rotary_dim_divisor):
-                    dq_shared[cs * R + r, n] = T.cos(angles_dk_frag[cs, n]) * dq_first_half_frag[cs, r, n] + T.sin(angles_dk_frag[cs, n]) * dq_second_half_frag[cs, r, n]
-                    dq_shared[cs * R + r, N // 2 + n] = -T.sin(angles_dk_frag[cs, n]) * dq_first_half_frag[cs, r, n] + T.cos(angles_dk_frag[cs, n]) * dq_second_half_frag[cs, r, n]
-                T.copy(dq_shared, dq_frag)
-                for csr_out, n in T.Parallel(fused_chunk_size, N):
-                    cs = csr_out // R
-                    for r_in in T.serial(R):
-                        csr_in = cs * R + r_in
-                        dq_frag[csr_out, n] += dqk_from_diag_shared[csr_out, csr_in] * k_pre_rot_shared[csr_in, n]
-                if eff_tail < chunk_size:
-                    for csr, n in T.Parallel(fused_chunk_size, N):
-                        if csr < eff_tail * R:
-                            DQ[i_b, fused_chunk_start + csr, i_h, n] = dq_frag[csr, n]
-                else:
-                    T.copy(dq_frag, DQ[i_b, fused_chunk_start:fused_chunk_start + fused_chunk_size, i_h, :])
+                    # dQ inverse rotary
+                    angles_dq_frag = T.alloc_fragment([chunk_size, N // rotary_dim_divisor], T.float32)
+                    T.copy(ANGLES[i_b, chunk_start:chunk_start + chunk_size, i_h, :], angles_dq_frag)
+                    dq_first_half_frag = T.alloc_fragment([chunk_size, R, N // rotary_dim_divisor], dtype)
+                    dq_second_half_frag = T.alloc_fragment([chunk_size, R, N // rotary_dim_divisor], dtype)
+                    for cs, r, n in T.Parallel(chunk_size, R, N // rotary_dim_divisor):
+                        dq_first_half_frag[cs, r, n] = dq_shared[cs * R + r, n]
+                        dq_second_half_frag[cs, r, n] = dq_shared[cs * R + r, N // 2 + n]
+                    q_prerot_first_half_frag = T.alloc_fragment([chunk_size, R, N // rotary_dim_divisor], dtype)
+                    q_prerot_second_half_frag = T.alloc_fragment([chunk_size, R, N // rotary_dim_divisor], dtype)
+                    for cs, r, n in T.Parallel(chunk_size, R, N // rotary_dim_divisor):
+                        q_prerot_first_half_frag[cs, r, n] = q_pre_rot_shared[cs * R + r, n]
+                        q_prerot_second_half_frag[cs, r, n] = q_pre_rot_shared[cs * R + r, N // 2 + n]
+                    dangle_dq_frag = T.alloc_fragment([chunk_size, R, N // rotary_dim_divisor], T.float32)
+                    T.copy(dangle_dk__or__dq_shared, T.view(dangle_dq_frag, shape=[fused_chunk_size, N // rotary_dim_divisor]))
+                    for cs, r, n in T.Parallel(chunk_size, R, N // rotary_dim_divisor):
+                        dangle_dq_frag[cs, r, n] += \
+                            dq_first_half_frag[cs, r, n] * (-q_prerot_first_half_frag[cs, r, n] * T.sin(angles_dq_frag[cs, n]) - q_prerot_second_half_frag[cs, r, n] * T.cos(angles_dq_frag[cs, n])) + \
+                            dq_second_half_frag[cs, r, n] * (q_prerot_first_half_frag[cs, r, n] * T.cos(angles_dq_frag[cs, n]) - q_prerot_second_half_frag[cs, r, n] * T.sin(angles_dq_frag[cs, n]))
+                    dangle_frag_reduced = T.alloc_fragment([chunk_size, N // rotary_dim_divisor], T.float32)
+                    T.clear(dangle_frag_reduced)
+                    for cs, n in T.Parallel(chunk_size, N // rotary_dim_divisor):
+                        for r in T.serial(R):
+                            dangle_frag_reduced[cs, n] += dangle_dq_frag[cs, r, n]
+                    if eff_tail < chunk_size:
+                        for cs, n in T.Parallel(chunk_size, N // rotary_dim_divisor):
+                            if cs < eff_tail:
+                                DANGLES[i_b, chunk_start + cs, i_h, n] = dangle_frag_reduced[cs, n]
+                    else:
+                        T.copy(dangle_frag_reduced, DANGLES[i_b, chunk_start:chunk_start + chunk_size, i_h, :])
+                    for cs, r, n in T.Parallel(chunk_size, R, N // rotary_dim_divisor):
+                        dq_shared[cs * R + r, n] = T.cos(angles_dk_frag[cs, n]) * dq_first_half_frag[cs, r, n] + T.sin(angles_dk_frag[cs, n]) * dq_second_half_frag[cs, r, n]
+                        dq_shared[cs * R + r, N // 2 + n] = -T.sin(angles_dk_frag[cs, n]) * dq_first_half_frag[cs, r, n] + T.cos(angles_dk_frag[cs, n]) * dq_second_half_frag[cs, r, n]
+                    T.copy(dq_shared, dq_frag)
+                    for csr_out, n in T.Parallel(fused_chunk_size, N):
+                        cs = csr_out // R
+                        for r_in in T.serial(R):
+                            csr_in = cs * R + r_in
+                            dq_frag[csr_out, n] += dqk_from_diag_shared[csr_out, csr_in] * k_pre_rot_shared[csr_in, n]
+                    if eff_tail < chunk_size:
+                        for csr, n in T.Parallel(fused_chunk_size, N):
+                            if csr < eff_tail * R:
+                                DQ[i_b, fused_chunk_start + csr, i_h, n] = dq_frag[csr, n]
+                    else:
+                        T.copy(dq_frag, DQ[i_b, fused_chunk_start:fused_chunk_start + fused_chunk_size, i_h, :])
 
                 # --- Update reverse-passed state gradient ---
                 da_cs_sum_dstates = T.alloc_var(T.float32)
@@ -1535,7 +1729,7 @@ def mamba_mimo_bwd_combined_varlen(
         dmimo_z = None
     qk_dot = torch.zeros([B, H, S, R, R], dtype=q.dtype, device=q.device)
 
-    bwd_fwd_kernel = mamba_mimo_bwd_fwd(
+    bwd_fwd_build = lambda small_smem: mamba_mimo_bwd_fwd(
         B, H, G,
         N, P, R,
         z is not None, D is not None, reduceO,
@@ -1544,16 +1738,17 @@ def mamba_mimo_bwd_combined_varlen(
         chunk_size=chunk_size, rotary_dim_divisor=rotary_dim_divisor, dtype=dtype_str,
         outproj_norm_eps=outproj_norm_eps,
         threads=bf_threads, num_stages=bf_num_stages,
-        states_dtype=states_dtype)
+        states_dtype=states_dtype,
+        small_smem=small_smem)
     ns_anchor = cu_seqlens[:-1]
-    bwd_fwd_kernel(
+    _run_bwd_kernel(bwd_fwd_build, (
         dout, q, k, v, q_bias, k_bias, mimo_v, mimo_o,
         outproj_norm_weight_arg,
         dmimo_o, dout_norm_weight_arg, dout_pre_rms, states,
         z, mimo_z, dz_tilelang, dmimo_z,
         angles, dA_cs, dA_cs_rev, dt, trap, D,
         qk_dot, segsum, ns_anchor, cu_seqlens,
-    )
+    ))
     if reduceO and not fuse_pregate_headwise_rms_norm:
         dmimo_o = dmimo_o.sum(dim=(0, 2))
 
@@ -1574,7 +1769,7 @@ def mamba_mimo_bwd_combined_varlen(
     bwd_bwd_reduceO = reduceO and not fuse_pregate_headwise_rms_norm
     bwd_bwd_hasZ = (z is not None) and not fuse_pregate_headwise_rms_norm
     bwd_bwd_packed_dout = fuse_pregate_headwise_rms_norm
-    bwd_bwd_kernel = mamba_mimo_bwd_bwd(
+    bwd_bwd_build = lambda small_smem: mamba_mimo_bwd_bwd(
         B, H, G,
         N, P, R,
         bwd_bwd_hasZ, D is not None, bwd_bwd_reduceO,
@@ -1582,8 +1777,9 @@ def mamba_mimo_bwd_combined_varlen(
         isVarlen=cu_seqlens is not None,
         chunk_size=chunk_size, rotary_dim_divisor=rotary_dim_divisor, dtype=dtype_str,
         threads=bb_threads, num_stages=bb_num_stages,
-        states_dtype=states_dtype)
-    bwd_bwd_kernel(
+        states_dtype=states_dtype,
+        small_smem=small_smem)
+    _run_bwd_kernel(bwd_bwd_build, (
         bwd_bwd_dout, q, k, v, q_bias, k_bias, mimo_v, mimo_o,
         dk_tilelang.view(B, S * R, H, N),
         dv_tilelang, dmimo_v, states,
@@ -1592,7 +1788,7 @@ def mamba_mimo_bwd_combined_varlen(
         dfactor, dgamma_diag, dangles, D, dD,
         qk_dot, ddA, dSSdA, ddA_cs_rev, ddA_cs,
         segsum, cu_seqlens,
-    )
+    ))
 
     dq_tilelang, dk_tilelang, dq_bias_tilelang, dk_bias_tilelang = (
         reduce_grouped_qk_grads_and_bias_triton(dq_tilelang, dk_tilelang, G)

@@ -2402,3 +2402,47 @@ def test_bwd_varlen_prereduce_relative_errors_lt_10pct(
     )
     for name, (ours, ref) in comparisons.items():
         assert_stable_rel(ours, ref, label=f"bwd_varlen_prereduce_{name}", cfg=cfg)
+
+
+# ---------------------------------------------------------------------------
+# Small shared-memory backward schedule (GPUs with ~99 KB smem/block, e.g. SM120)
+# ---------------------------------------------------------------------------
+
+SMALL_SMEM_CASE_GRID = [
+    pytest.param(128, 64, 4, 16, 256, id="N128_P64_R4_C16_BB256"),
+    pytest.param(64, 128, 4, 16, 256, id="N64_P128_R4_C16_BB256"),
+    pytest.param(128, 64, 8, 8, 256, id="N128_P64_R8_C8_BB256"),
+    pytest.param(128, 64, 1, 64, 256, id="N128_P64_R1_C64_BB256"),
+]
+
+
+@pytest.fixture
+def force_small_smem_bwd(mods: SimpleNamespace, monkeypatch) -> None:
+    # Run the small_smem backward schedules regardless of the device's shared memory size.
+    monkeypatch.setattr(mods.bwd, "_FORCE_SMALL_SMEM_BWD", True)
+
+
+@pytest.mark.parametrize("n,p,r,chunk_size,bb_threads", SMALL_SMEM_CASE_GRID)
+def test_mamba_mimo_bwd_small_smem_relative_errors_lt_10pct(
+    mods: SimpleNamespace, force_small_smem_bwd: None,
+    n: int, p: int, r: int, chunk_size: int, bb_threads: int,
+) -> None:
+    test_mamba_mimo_bwd_combined_relative_errors_lt_10pct(mods, n, p, r, chunk_size, bb_threads)
+    test_mamba_mimo_bwd_combined_prereduce_relative_errors_lt_10pct(mods, n, p, r, chunk_size, bb_threads)
+
+
+@pytest.mark.parametrize("n,p,r,chunk_size,bb_threads", SMALL_SMEM_CASE_GRID)
+def test_bwd_varlen_small_smem_relative_errors_lt_10pct(
+    mods_varlen: SimpleNamespace, force_small_smem_bwd: None,
+    n: int, p: int, r: int, chunk_size: int, bb_threads: int,
+) -> None:
+    test_bwd_varlen_relative_errors_lt_10pct(mods_varlen, n, p, r, chunk_size, bb_threads)
+
+
+@pytest.mark.parametrize("n,p,r,chunk_size,bb_threads", FUSED_NORM_CASE_GRID)
+def test_fused_norm_bwd_small_smem_relative_errors_lt_10pct(
+    mods: SimpleNamespace, mods_varlen: SimpleNamespace, force_small_smem_bwd: None,
+    n: int, p: int, r: int, chunk_size: int, bb_threads: int,
+) -> None:
+    test_fused_norm_bwd_relative_errors_lt_10pct(mods, n, p, r, chunk_size, bb_threads)
+    test_fused_norm_bwd_varlen_relative_errors_lt_10pct(mods_varlen, n, p, r, chunk_size, bb_threads)
