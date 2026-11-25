@@ -10,7 +10,10 @@ import pytest
 from einops import rearrange, repeat
 
 
-def test_generation():
+@pytest.mark.parametrize("sdpa_kv_heads", [None, 16, 4], ids=["mamba2", "cached-sdpa", "cached-gqa"])
+def test_generation(monkeypatch, sdpa_kv_heads):
+    if sdpa_kv_heads is not None:
+        monkeypatch.setattr("mamba_ssm.modules.mha.flash_attn_with_kvcache", None)
     batch = 3
     seqlen = 20
     device = "cuda"
@@ -21,6 +24,8 @@ def test_generation():
         n_layer=4,
         vocab_size=50277,
         ssm_cfg=dict(layer="Mamba2"),
+        attn_layer_idx=list(range(4)) if sdpa_kv_heads is not None else [],
+        attn_cfg=dict(num_heads=16, num_heads_kv=sdpa_kv_heads, causal=True),
         rms_norm=True,
         residual_in_fp32=True,
         fused_add_norm=True,
@@ -33,7 +38,7 @@ def test_generation():
     prompt_len = seqlen // 2
     out = model.generate(
         input_ids = x[:, :prompt_len], max_length=seqlen, output_scores=True, return_dict_in_generate=True,
-        cg=True,  # Can turn off CUDA graph for easier debugging
+        cg=sdpa_kv_heads is None,
         # instead of sampling, we take output tokens from x, to get logits for testing
         # For actual generation, don't pass in teacher_outputs
         teacher_outputs=x,
