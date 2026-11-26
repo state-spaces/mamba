@@ -307,10 +307,15 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
         A = -torch.exp(self.A_log.float())  # (nheads,)
 
         # SSM step
+        dt_limit = None if self.dt_limit == (0.0, float("inf")) else self.dt_limit
         if selective_state_update is None:
             assert self.ngroups == 1, "Only support ngroups=1 for this inference code path"
             # Discretize A and B
+            if dt_limit is not None:
+                dt = dt.float()
             dt = F.softplus(dt + self.dt_bias.to(dtype=dt.dtype))  # (batch, nheads)
+            if dt_limit is not None:
+                dt = dt.clamp(*dt_limit)
             dA = torch.exp(dt * A)  # (batch, nheads)
             x = rearrange(x, "b (h p) -> b h p", p=self.headdim)
             dBx = torch.einsum("bh,bn,bhp->bhpn", dt, B, x)
@@ -332,7 +337,7 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
                 z = rearrange(z, "b (h p) -> b h p", p=self.headdim)
             y = selective_state_update(
                 ssm_state, x_reshaped, dt, A, B, C, D, z=z if not self.rmsnorm else None,
-                dt_bias=dt_bias, dt_softplus=True
+                dt_bias=dt_bias, dt_softplus=True, dt_limit=dt_limit
             )
             y = rearrange(y, "b h p -> b (h p)")
         if self.rmsnorm:
